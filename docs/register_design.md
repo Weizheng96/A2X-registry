@@ -2,7 +2,7 @@
 
 ## 概述
 
-注册模块（`src/register/`）为 A2X Registry 提供服务注册能力，支持两类服务（通用服务 + A2A Agent），多数据集，多种注册方式（本地配置文件 / HTTP API / CLI）。
+注册模块（`src/register/`）为 A2X Registry 提供服务注册能力，支持三类服务（通用服务 + A2A Agent + Skill），多数据集，多种注册方式（本地配置文件 / HTTP API / CLI / Skill 文件夹）。
 
 参考 Nacos 设计思路：分离"注册存储"与"消费输出"，但针对单机文件驱动场景做了简化。
 
@@ -22,10 +22,10 @@
 user_config.json ──┐
   (用户编辑，只读)   │
                    ├─→ RegistryService ─→ service.json (纯输出)
-api_config.json ───┘       │
-  (系统写入)               │
-                      RegistryStore
-                      (文件 I/O)
+api_config.json ───┤       │
+  (系统写入)        │       │
+skills/*/SKILL.md ─┘  RegistryStore
+  (文件夹注册)         (文件 I/O)
 ```
 
 ### 文件职责
@@ -34,6 +34,8 @@ api_config.json ───┘       │
 database/{dataset}/
     user_config.json    ← 用户手动编辑（系统只读）
     api_config.json     ← HTTP/CLI 注册的持久化服务（系统写入）
+    skills/             ← Skill 文件夹（每个子目录含 SKILL.md）
+    removed_skills/     ← 已注销的 Skill（移动而非删除）
     service.json        ← 输出（纯输出，service.json 从不作为输入读取）
 
 database/.register_hashes.json  ← 变更检测用的 hash 存储
@@ -43,6 +45,8 @@ database/.register_hashes.json  ← 变更检测用的 hash 存储
 |------|------|------|------|
 | `user_config.json` | 用户 | 系统（启动时） | 用户声明的服务 |
 | `api_config.json` | 系统 | 系统（启动时 + 运行时） | HTTP 注册的持久化服务 |
+| `skills/*/SKILL.md` | 用户/系统 | 系统（启动时 + 运行时） | Skill 文件夹注册源 |
+| `removed_skills/` | 系统 | — | 已注销 Skill 的归档（同名覆盖） |
 | `service.json` | 系统 | A2X | 合并后的输出，**从不被注册模块读取** |
 | `.register_hashes.json` | 系统 | 系统（启动时） | 上次输出的 hash，用于变更检测 |
 
@@ -63,7 +67,7 @@ src/backend/routers/
     build.py             FastAPI 路由: 分类树构建触发、状态查询、取消、SSE 日志流
 ```
 
-## 两类服务
+## 三类服务
 
 ### 通用服务 (generic)
 ```json
@@ -80,6 +84,19 @@ src/backend/routers/
 ```json
 {"type": "a2a", "agent_card_url": "https://.../.well-known/agent.json", "agent_card": {"...缓存..."}}
 ```
+
+### Skill (skill)
+Skill 以文件夹形式存储在 `database/{dataset}/skills/{name}/` 下，每个文件夹必须包含 `SKILL.md`，其 YAML frontmatter 必须含 `name` 和 `description` 字段：
+```yaml
+---
+name: algorithmic-art
+description: Creating algorithmic art using p5.js...
+license: Complete terms in LICENSE.txt
+---
+```
+- 注册方式：ZIP 上传（`POST /api/datasets/{dataset}/skills`）或直接放入 `skills/` 目录
+- 注销时文件夹移至 `removed_skills/`（而非删除），同名覆盖
+- 三来源合并优先级：`api_config` > `user_config` > `skill_folder`
 
 ## A2A 格式验证 (`validation.py`)
 
@@ -133,8 +150,11 @@ RegistryStore._lock
 |--------|------|------|--------|
 | POST | `/api/datasets/{dataset}/services/generic` | 注册通用服务 | 400 (校验失败) |
 | POST | `/api/datasets/{dataset}/services/a2a` | 注册 A2A Agent | 400 (校验/参数), 500 (fetch失败) |
-| DELETE | `/api/datasets/{dataset}/services/{service_id}` | 注销 | 400 (user_config 不可删) |
-| GET | `/api/datasets/{dataset}/services` | 列出服务（mode=browse/admin/full，支持分页） | — |
+| DELETE | `/api/datasets/{dataset}/services/{service_id}` | 注销（不含 skill） | 400 (user_config/skill 不可删) |
+| GET | `/api/datasets/{dataset}/services` | 列出/查询服务（mode=browse/admin/full/single） | — |
+| POST | `/api/datasets/{dataset}/skills` | 上传 Skill（ZIP） | 400 (校验失败) |
+| DELETE | `/api/datasets/{dataset}/skills/{name}` | 注销 Skill（移至 removed_skills） | — |
+| GET | `/api/datasets/{dataset}/skills/{name}/download` | 下载 Skill（ZIP） | 404 |
 
 ### 分类树
 
@@ -174,7 +194,8 @@ RegistryStore._lock
 Phase 1: 加载配置文件
   ├── 读 user_config.json (只读)
   ├── 读 api_config.json (缓存到内存)
-  └── 合并 + 验证 A2A 条目
+  ├── 合并 + 验证 A2A 条目
+  └── 扫描 skills/*/SKILL.md（最低优先级，不覆盖已有条目）
 
 Phase 2: 并行抓取 agent_card_url
   └── ThreadPoolExecutor(10) → 锁内更新 entry.agent_card
@@ -194,6 +215,12 @@ register_generic / register_a2a
   → 锁外持久化写 api_config.json（如 persistent=True）
   → 锁外 _regenerate_output → 写 service.json（如 hash 变化）
 
+register_skill(dataset, zip_bytes)
+  → 解压 ZIP → 校验 SKILL.md 含 name + description
+  → 存储至 skills/{name}/（已存在则覆盖）
+  → 锁内更新 _entries
+  → 锁外 _regenerate_output
+
 register_batch
   → 锁内更新 _entries + 收集该 dataset 所有 api_config 条目
   → 锁外批量写 api_config.json（保留已有条目）
@@ -205,8 +232,14 @@ register_batch
 deregister(dataset, service_id)
   → 锁内检查 source + 删除 _entries
   → user_config: 拒绝（ValueError → 400）
+  → skill_folder: 拒绝（需使用 DELETE /skills/{name}）
   → api_config: 锁外从文件删除
   → ephemeral: 仅内存删除（已在锁内完成）
+  → 锁外 _regenerate_output
+
+deregister_skill(dataset, name)
+  → 锁内删除 _entries
+  → 将 skills/{name}/ 移至 removed_skills/{name}/（同名覆盖）
   → 锁外 _regenerate_output
 ```
 
@@ -225,6 +258,14 @@ deregister(dataset, service_id)
 - `description` 由 `build_description()` 聚合：`"{card.description}. Skills: [name] desc; ..."`
 - `url` 仅在有值时包含
 - `agent_card` 保留完整原始数据（含非标准字段）
+
+### Skill 服务
+```json
+{"id": "skill_xxx", "type": "skill", "name": "algorithmic-art", "description": "Creating algorithmic art...", "metadata": {"skill_path": "skills/algorithmic-art", "license": "...", "files": ["SKILL.md", "LICENSE.txt", ...]}}
+```
+- `name` 和 `description` 来自 SKILL.md frontmatter
+- `metadata.skill_path` 为相对于数据集目录的路径
+- `metadata.files` 列出文件夹内所有文件的相对路径
 
 ### 未解析的 A2A 服务（agent_card_url fetch 失败且无缓存）
 ```json
@@ -336,17 +377,25 @@ database/.register_hashes.json = {"publicMCP": "sha256...", "ToolRet_clean": "sh
 
 **注册 (register)**
 
-- 服务类型：通用服务（generic） / A2A Agent
+- 服务类型：通用服务（generic） / A2A Agent / Skill
 - 数据集：选择已有数据集，或输入新数据集名称（新建）
 - A2A 模式：URL 模式（填写 `agent_card_url`）/ JSON 模式（粘贴完整 AgentCard JSON）
+- Skill 模式：选择本地文件夹 → 预览 SKILL.md 信息 → JSZip 打包上传
 - 各字段支持**数据集默认值**：字段为空时显示为较深占位文本（"使用默认值"提示），提交时自动使用
-- `persistent` 开关：是否写入 `api_config.json` 持久化
+- `persistent` 开关：是否写入 `api_config.json` 持久化（仅 generic/A2A）
 
 **注销 (deregister)**
 
 - 内置**服务浏览器**：加载当前数据集所有已注册服务，支持按 ID / 名称 / 描述搜索
 - 点击列表条目自动填入 `service_id`，也可手动输入
+- Skill 类型条目标记 `skill` 标签，注销时自动调用 skill 专用删除接口（移至 `removed_skills/`）
 - 注销成功后列表自动刷新
+
+**查询 (query)**
+
+- 双模式切换：列表（分页浏览全部服务） / 查找（按 ID 精确查询单个服务）
+- 查找模式内置服务浏览器，点击即可选择 service_id
+- Skill 类型服务查找时返回 ZIP 下载
 
 **构建分类树 (build)**
 

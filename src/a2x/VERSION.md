@@ -1,6 +1,21 @@
 # A2X 版本说明
 
-## 当前版本: v0.1.3
+## 当前版本: v0.1.4
+
+---
+
+## v0.1.4 (2026-04-01)
+
+### 概述
+新增 Skill 注册（第三种服务类型），支持文件夹（ZIP）上传/下载/删除；服务查询新增 single 模式。
+
+### 新功能
+- **Skill 注册**：`POST /api/datasets/{dataset}/skills` 上传 Skill ZIP，自动解析 `SKILL.md` frontmatter 注册为服务
+- **Skill 下载/删除**：`GET /skills/{name}/download` 下载 ZIP、`DELETE /skills/{name}` 删除
+- **Skill 自动发现**：启动时自动扫描 `database/{dataset}/skills/` 目录加载 skill 条目
+- **单服务查询**：`GET /services?mode=single&service_id=xxx`，skill 类型返回 ZIP，其余返回 JSON
+- **前端 AdminPanel**：注册 tab 新增 Skill 类型（文件夹选择 + JSZip 打包上传）；"列表"tab 改为"查询"（列表/查找双模式）；注销 tab 支持 skill 条目删除
+- **三来源合并**：`user_config.json` + `api_config.json` + `skills/` 文件夹，优先级 api > user > skill
 
 ---
 

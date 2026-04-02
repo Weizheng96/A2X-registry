@@ -1,6 +1,6 @@
 # A2X Registry — 智能体服务发现注册中心
 
-**v0.1.3**
+**v0.1.4**
 
 ## 概述
 
@@ -67,6 +67,7 @@ git clone https://github.com/Weizheng96/A2X-registry-demo-data.git database
 | `ToolRet_clean_CN` | 1839 | ZH | ToolRet_clean 中文翻译版 |
 | `publicMCP_CN` | 1387 | ZH | publicMCP 中文翻译版 |
 | `default` | — | — | 21 个公开 A2A Agent（启动后自动拉取） |
+| `publicSkill` | 17 | EN | Claude Code Skill 集合 |
 
 > 不下载也可以正常使用，通过 UI 或 API 创建自己的数据集并注册服务。
 
@@ -131,10 +132,11 @@ git clone https://github.com/Weizheng96/A2X-registry-demo-data.git database
 }
 ```
 
-支持三种注册方式：
+支持四种注册方式：
 - **generic** — 通用服务，提供 name + description
 - **a2a (URL)** — 通过 `agent_card_url` 自动拉取 [A2A 协议](https://google.github.io/A2A/) Agent Card
 - **a2a (内联)** — 通过 `agent_card` 直接提供 Agent Card 内容
+- **skill (文件夹)** — 放入 `database/{数据集名}/skills/{skill名}/` 目录（需含 `SKILL.md`），或通过 API 上传 ZIP
 
 ### 4. 使用
 
@@ -155,7 +157,7 @@ python -m src.ui
 
 UI 提供两个模式：
 - **搜索模式** — 交互对比 A2X / 向量 / MCP 的检索效果，D3.js 实时动画展示分类树导航过程
-- **管理员模式** — 数据集管理、服务注册/注销、分类树构建、Embedding 模型配置
+- **管理员模式** — 数据集管理、服务注册/注销（含 Skill 文件夹上传）、服务查询、分类树构建、Embedding 模型配置
 
 **UI 演示视频：**
 
@@ -204,11 +206,24 @@ curl -X POST http://localhost:8000/api/datasets/my_dataset/services/a2a \
      -H "Content-Type: application/json" \
      -d '{"agent_card": {"name": "翻译助手", "description": "支持中英日韩多语言互译", "url": "https://translate.example.com/a2a"}}'
 
+# 注册 Skill（上传 ZIP）
+curl -X POST http://localhost:8000/api/datasets/my_dataset/skills \
+     -F "file=@my_skill.zip"
+
 # 注销服务
 curl -X DELETE http://localhost:8000/api/datasets/my_dataset/services/{service_id}
 
+# 注销 Skill（移至 removed_skills/）
+curl -X DELETE http://localhost:8000/api/datasets/my_dataset/skills/{skill_name}
+
+# 下载 Skill（ZIP）
+curl -O http://localhost:8000/api/datasets/my_dataset/skills/{skill_name}/download
+
 # 浏览服务
 curl http://localhost:8000/api/datasets/my_dataset/services?mode=browse
+
+# 查询单个服务（skill 类型返回 ZIP）
+curl http://localhost:8000/api/datasets/my_dataset/services?mode=single&service_id={id}
 ```
 
 **分类树构建**：

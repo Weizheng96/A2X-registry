@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from src.backend.schemas.models import DatasetInfo, DefaultQuery
@@ -16,7 +17,7 @@ from src.backend.services.taxonomy_service import get_taxonomy_tree
 from src.backend.default_queries import get_default_queries
 from src.register.models import (
     RegisterGenericRequest, RegisterA2ARequest,
-    RegisterResponse, DeregisterResponse,
+    RegisterResponse, DeregisterResponse, SkillResponse,
 )
 from src.register.service import RegistryService
 
@@ -120,7 +121,8 @@ async def delete_dataset(dataset: str):
 @router.get("/{dataset}/services")
 async def list_services(
     dataset: str,
-    mode: str = Query("browse", description="browse | admin | full"),
+    mode: str = Query("browse", description="browse | admin | full | single"),
+    service_id: Optional[str] = Query(None, description="Service ID (required for single mode)"),
     size: int = Query(-1, ge=-1),
     page: int = Query(1, ge=1),
 ):
@@ -130,7 +132,30 @@ async def list_services(
       browse — lightweight: [{id, name, description}]
       admin  — with type/source: [{id, name, description, type, source}]
       full   — paginated full metadata (for admin panel list op)
+      single — query one service by ID; returns full entry (ZIP for skill type)
     """
+    if mode == "single":
+        if not service_id:
+            raise HTTPException(status_code=400, detail="service_id is required for single mode")
+        svc = get_registry_service()
+        entry = svc.get_entry(dataset, service_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Service not found")
+        # Skill type: return ZIP download
+        if entry.type == "skill" and entry.skill_data:
+            try:
+                zip_bytes = svc.get_skill_zip(dataset, entry.skill_data.name)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail=f"Skill folder not found: {entry.skill_data.name}")
+            return Response(
+                content=zip_bytes,
+                media_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{entry.skill_data.name}.zip"'},
+            )
+        # Generic/A2A: return full service.json entry
+        output = [s for s in svc.list_services(dataset) if s["id"] == service_id]
+        return output[0] if output else None
+
     if mode == "browse":
         service_file = PROJECT_ROOT / "database" / dataset / "service.json"
         if not service_file.exists():
@@ -147,6 +172,8 @@ async def list_services(
         for e in sorted(svc.list_entries(dataset), key=lambda e: e.service_id):
             if e.type == "generic" and e.service_data:
                 name, description = e.service_data.name, e.service_data.description
+            elif e.type == "skill" and e.skill_data:
+                name, description = e.skill_data.name, e.skill_data.description
             elif e.agent_card:
                 name, description = e.agent_card.name, e.agent_card.description
             else:
@@ -200,6 +227,37 @@ async def register_a2a(dataset: str, req: RegisterA2ARequest):
 async def deregister(dataset: str, service_id: str):
     """Deregister a service."""
     return await _run(get_registry_service().deregister, dataset, service_id)
+
+
+# ── Skills (register / download / delete) ─────────────────────────────────────
+
+@router.post("/{dataset}/skills", response_model=SkillResponse)
+async def upload_skill(dataset: str, file: UploadFile = File(...)):
+    """Upload a skill as a ZIP file. ZIP must contain SKILL.md with valid frontmatter."""
+    zip_bytes = await file.read()
+    svc = get_registry_service()
+    return await _run(svc.register_skill, dataset, zip_bytes)
+
+
+@router.delete("/{dataset}/skills/{name}", response_model=SkillResponse)
+async def delete_skill(dataset: str, name: str):
+    """Delete a skill and its registry entry."""
+    return await _run(get_registry_service().deregister_skill, dataset, name)
+
+
+@router.get("/{dataset}/skills/{name}/download")
+async def download_skill(dataset: str, name: str):
+    """Download a skill folder as a ZIP file."""
+    svc = get_registry_service()
+    try:
+        zip_bytes = svc.get_skill_zip(dataset, name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+    )
 
 
 # ── Taxonomy ──────────────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ from .models import (
     RegisterResponse,
     RegistryEntry,
     RegistryStatus,
+    SkillResponse,
     TaxonomyState,
 )
 from .store import RegistryStore, generate_service_id
@@ -97,6 +98,12 @@ class RegistryService:
                 merged[e.service_id] = e
                 if e.agent_card_url:
                     url_entries.append((dataset, e))
+
+            # Load skill folders (lowest priority — don't override user_config/api_config)
+            skill_entries = store.load_skills()
+            for e in skill_entries:
+                if e.service_id not in merged:
+                    merged[e.service_id] = e
 
             with self._lock:
                 self._entries[dataset] = merged
@@ -188,6 +195,50 @@ class RegistryService:
         self._regenerate_output(dataset)
         self._mark_taxonomy_stale(dataset)
 
+    def register_skill(self, dataset: str, zip_bytes: bytes) -> SkillResponse:
+        """Upload a skill ZIP, extract to skills/{name}/, register entry."""
+        store = self._get_store(dataset)
+        skill_data = store.save_skill_zip(zip_bytes)
+
+        service_id = generate_service_id("skill", skill_data.name)
+        entry = RegistryEntry(
+            service_id=service_id,
+            type="skill",
+            source="skill_folder",
+            skill_data=skill_data,
+        )
+
+        with self._lock:
+            ds = self._entries.setdefault(dataset, {})
+            status = "updated" if service_id in ds else "registered"
+            ds[service_id] = entry
+
+        self._regenerate_output(dataset)
+        self._mark_taxonomy_stale(dataset)
+        return SkillResponse(name=skill_data.name, dataset=dataset,
+                             status=status, service_id=service_id)
+
+    def deregister_skill(self, dataset: str, name: str) -> SkillResponse:
+        """Remove a skill folder and its registry entry."""
+        service_id = generate_service_id("skill", name)
+
+        with self._lock:
+            ds = self._entries.get(dataset, {})
+            if service_id not in ds:
+                return SkillResponse(name=name, dataset=dataset, status="not_found")
+            del ds[service_id]
+
+        store = self._get_store(dataset)
+        store.remove_skill(name)
+        self._regenerate_output(dataset)
+        self._mark_taxonomy_stale(dataset)
+        return SkillResponse(name=name, dataset=dataset, status="deleted",
+                             service_id=service_id)
+
+    def get_skill_zip(self, dataset: str, name: str) -> bytes:
+        """Pack a skill folder into a ZIP and return bytes."""
+        return self._get_store(dataset).get_skill_zip(name)
+
     def _do_register(self, dataset: str, entry: RegistryEntry, persistent: bool) -> RegisterResponse:
         """Shared logic for register_generic and register_a2a."""
         with self._lock:
@@ -215,6 +266,8 @@ class RegistryService:
             entry = ds[service_id]
             if entry.source == "user_config":
                 raise ValueError("Cannot deregister user_config entries via API. Edit user_config.json instead.")
+            if entry.source == "skill_folder":
+                raise ValueError("Cannot deregister skill entries via generic API. Use DELETE /skills/{name} instead.")
 
             source = entry.source
             del ds[service_id]
@@ -330,6 +383,20 @@ class RegistryService:
           - description: system-generated; used by taxonomy build (LLM text input)
           - metadata:    for A2A = full agent card; for generic = {url?, inputSchema?}
         """
+        if entry.type == "skill" and entry.skill_data:
+            sd = entry.skill_data
+            return {
+                "id": entry.service_id,
+                "type": "skill",
+                "name": sd.name,
+                "description": sd.description,
+                "metadata": {
+                    "skill_path": sd.skill_path,
+                    "license": sd.license,
+                    "files": sd.files,
+                },
+            }
+
         if entry.type == "generic" and entry.service_data:
             sd = entry.service_data
             metadata: dict = {}
@@ -481,7 +548,11 @@ class RegistryService:
             return []
         return sorted(
             d.name for d in self._database_dir.iterdir()
-            if d.is_dir() and ((d / USER_CONFIG_FILE).exists() or (d / API_CONFIG_FILE).exists())
+            if d.is_dir() and (
+                (d / USER_CONFIG_FILE).exists()
+                or (d / API_CONFIG_FILE).exists()
+                or (d / "skills").is_dir()
+            )
         )
 
     def _distribute_global_config(self):

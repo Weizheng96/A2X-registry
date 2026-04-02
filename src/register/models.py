@@ -29,6 +29,14 @@ class GenericServiceData(BaseModel):
     url: Optional[str] = None
 
 
+class SkillData(BaseModel):
+    name: str
+    description: str
+    license: str = ""
+    skill_path: str = ""       # relative path: "skills/{name}"
+    files: List[str] = []      # relative file paths in folder
+
+
 # --- A2A Agent Card (aligned with A2A protocol spec) ---
 
 class AgentSkill(BaseModel):
@@ -74,11 +82,12 @@ class AgentCard(BaseModel):
 
 class RegistryEntry(BaseModel):
     service_id: str
-    type: Literal["generic", "a2a"]
-    source: Literal["user_config", "api_config", "ephemeral"]
+    type: Literal["generic", "a2a", "skill"]
+    source: Literal["user_config", "api_config", "ephemeral", "skill_folder"]
     service_data: Optional[GenericServiceData] = None
     agent_card: Optional[AgentCard] = None
     agent_card_url: Optional[str] = None
+    skill_data: Optional[SkillData] = None
 
 
 # --- HTTP request models ---
@@ -112,6 +121,13 @@ class RegisterResponse(BaseModel):
 class DeregisterResponse(BaseModel):
     service_id: str
     status: str  # "deregistered" | "not_found"
+
+
+class SkillResponse(BaseModel):
+    name: str
+    dataset: str
+    service_id: str = ""
+    status: str  # "registered" | "updated" | "deleted" | "not_found"
 
 
 class RegistryStatus(BaseModel):

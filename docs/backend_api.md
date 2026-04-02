@@ -31,10 +31,13 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `GET` | `/api/datasets` | 列出所有数据集 |
 | `POST` | `/api/datasets` | 创建新数据集 |
 | `DELETE` | `/api/datasets/{dataset}` | 删除数据集 |
-| `GET` | `/api/datasets/{dataset}/services` | 列出服务（3 种模式） |
+| `GET` | `/api/datasets/{dataset}/services` | 列出/查询服务（4 种模式） |
 | `POST` | `/api/datasets/{dataset}/services/generic` | 注册通用服务 |
 | `POST` | `/api/datasets/{dataset}/services/a2a` | 注册 A2A Agent |
 | `DELETE` | `/api/datasets/{dataset}/services/{service_id}` | 注销服务 |
+| `POST` | `/api/datasets/{dataset}/skills` | 上传 Skill（ZIP） |
+| `DELETE` | `/api/datasets/{dataset}/skills/{name}` | 删除 Skill |
+| `GET` | `/api/datasets/{dataset}/skills/{name}/download` | 下载 Skill（ZIP） |
 | `GET` | `/api/datasets/{dataset}/taxonomy` | 获取分类树 |
 | `GET` | `/api/datasets/{dataset}/default-queries` | 示例查询 |
 | `GET` | `/api/datasets/embedding-models` | 支持的嵌入模型列表 |
@@ -97,7 +100,8 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `mode` | string | `"browse"` | `browse` \| `admin` \| `full` |
+| `mode` | string | `"browse"` | `browse` \| `admin` \| `full` \| `single` |
+| `service_id` | string | — | 服务 ID，仅 `single` 模式必填 |
 | `size` | int | `-1` | 分页大小，`-1` 返回全部 |
 | `page` | int | `1` | 页码（从 1 开始），仅 `full` 模式 + `size>0` 时生效 |
 
@@ -108,6 +112,7 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `browse` | `id, name, description` | 前端服务浏览器（轻量，直接读取 `service.json`） |
 | `admin` | `id, name, description, type, source` | 管理面板条目列表 |
 | `full` | 完整元数据（分页） | 管理面板详细查看 |
+| `single` | 单个服务完整信息（skill 类型返回 ZIP） | 按 ID 精确查询 |
 
 **响应 — browse 模式：**
 ```json
@@ -209,6 +214,44 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 ```
 
 `status` 取值：`"deregistered"` | `"not_found"`
+
+> **注意**：`skill_folder` 来源的服务不能通过此端点注销，需使用 `DELETE /skills/{name}` 端点。
+
+---
+
+### POST `/api/datasets/{dataset}/skills`
+
+上传 Skill 文件夹（ZIP 格式）。ZIP 必须包含 `SKILL.md`（根目录或单层子目录内），frontmatter 需含 `name` 和 `description` 字段。
+
+**请求：** `Content-Type: multipart/form-data`，字段名 `file`。
+
+**响应：**
+```json
+{ "name": "algorithmic-art", "dataset": "default", "service_id": "skill_xxxx", "status": "registered" }
+```
+
+`status` 取值：`"registered"` | `"updated"`（同名覆盖）
+
+---
+
+### DELETE `/api/datasets/{dataset}/skills/{name}`
+
+删除 Skill 文件夹及其注册条目。
+
+**响应：**
+```json
+{ "name": "algorithmic-art", "dataset": "default", "service_id": "skill_xxxx", "status": "deleted" }
+```
+
+`status` 取值：`"deleted"` | `"not_found"`
+
+---
+
+### GET `/api/datasets/{dataset}/skills/{name}/download`
+
+将 Skill 文件夹打包为 ZIP 下载。
+
+**响应：** `Content-Type: application/zip`，附件名 `{name}.zip`。
 
 ---
 

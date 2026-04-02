@@ -6,12 +6,20 @@ interface ServiceEntry {
   id: string;
   name: string;
   description: string;
-  source: "user_config" | "api_config" | "ephemeral";
+  source: "user_config" | "api_config" | "ephemeral" | "skill_folder";
 }
 
-type OpType = "register" | "deregister" | "build" | "list";
-type RegType = "generic" | "a2a";
+type OpType = "register" | "deregister" | "build" | "query";
+type RegType = "generic" | "a2a" | "skill";
 type A2AInputMode = "url" | "json";
+type QueryMode = "list" | "single";
+
+interface SkillPreview {
+  name: string;
+  description: string;
+  files: string[];
+  totalSize: number;
+}
 
 // ── Dataset-specific default values ──────────────────────────────────────────
 
@@ -71,6 +79,7 @@ function buildPreview(
   op: OpType,
   regType: RegType,
   a2aMode: A2AInputMode,
+  queryMode: QueryMode,
   dataset: string,
   fields: Record<string, string>,
   persistent: boolean,
@@ -79,6 +88,7 @@ function buildPreview(
   isNewDataset: boolean,
   newEmbeddingModel: string,
   showBuildLogs: boolean,
+  skillPreview: SkillPreview | null,
 ): PreviewInfo {
   const ds = dataset || "<dataset>";
   const createStep: PreviewStep | null = isNewDataset
@@ -104,8 +114,7 @@ function buildPreview(
       }
       body.persistent = persistent;
       regStep = { method: "POST", path: `/api/datasets/${ds}/services/generic`, body };
-    } else {
-      // a2a
+    } else if (regType === "a2a") {
       const body: Record<string, unknown> = {};
       if (fields.serviceId) body.service_id = fields.serviceId;
       if (a2aMode === "url") {
@@ -121,11 +130,25 @@ function buildPreview(
       }
       body.persistent = persistent;
       regStep = { method: "POST", path: `/api/datasets/${ds}/services/a2a`, body };
+    } else {
+      // skill
+      regStep = {
+        method: "POST", path: `/api/datasets/${ds}/skills`,
+        body: { _note: "multipart/form-data (ZIP)", files: skillPreview?.files || [] },
+      };
     }
     return createStep ? [createStep, regStep] : [regStep];
   }
 
   if (op === "deregister") {
+    // Skill entries use a different delete endpoint (by name, not service_id)
+    if (fields.deregSkillName) {
+      return [{
+        method: "DELETE",
+        path: `/api/datasets/${ds}/skills/${encodeURIComponent(fields.deregSkillName)}`,
+        body: null,
+      }];
+    }
     return [{
       method: "DELETE",
       path: `/api/datasets/${ds}/services/${fields.serviceId || "<service_id>"}`,
@@ -133,7 +156,14 @@ function buildPreview(
     }];
   }
 
-  if (op === "list") {
+  if (op === "query") {
+    if (queryMode === "single") {
+      return [{
+        method: "GET",
+        path: `/api/datasets/${ds}/services?mode=single&service_id=${encodeURIComponent(fields.serviceId || "<id>")}`,
+        body: null,
+      }];
+    }
     const params = new URLSearchParams();
     params.set("size", fields.listSize || "-1");
     params.set("page", fields.listPage || "1");
@@ -191,6 +221,9 @@ export default function AdminPanel() {
   const [op, setOp] = useState<OpType>("register");
   const [regType, setRegType] = useState<RegType>("generic");
   const [a2aMode, setA2AMode] = useState<A2AInputMode>("url");
+  const [queryMode, setQueryMode] = useState<QueryMode>("list");
+  const [skillFiles, setSkillFiles] = useState<File[]>([]);
+  const [skillPreview, setSkillPreview] = useState<SkillPreview | null>(null);
   const [dataset, setDataset] = useState("");
   const [newDatasetName, setNewDatasetName] = useState("");
   const [useNew, setUseNew] = useState(false);
@@ -364,7 +397,7 @@ export default function AdminPanel() {
   const activeDataset = useNew ? newDatasetName.trim() : dataset;
   const defs = DATASET_DEFAULTS[activeDataset] ?? null;
 
-  const preview = buildPreview(op, regType, a2aMode, activeDataset, fields, persistent, resume, defs, useNew, embeddingModel, showBuildLogs);
+  const preview = buildPreview(op, regType, a2aMode, queryMode, activeDataset, fields, persistent, resume, defs, useNew, embeddingModel, showBuildLogs, skillPreview);
 
   const setField = (key: string, val: string) =>
     setFields((prev) => ({ ...prev, [key]: val }));
@@ -379,7 +412,7 @@ export default function AdminPanel() {
     setFields((prev) => ({
       ...prev,
       serviceId: "", name: "", description: "", metadata: "",
-      agentCardUrl: "", agentCardJson: "",
+      agentCardUrl: "", agentCardJson: "", deregSkillName: "",
     }));
   }, []);
 
@@ -391,6 +424,67 @@ export default function AdminPanel() {
     startRef.current = Date.now();
 
     try {
+      // Skill registration: uses FormData, not JSON preview steps
+      if (op === "register" && regType === "skill" && skillFiles.length > 0 && skillPreview) {
+        const JSZip = (await import("jszip")).default;
+        const zip = new JSZip();
+        for (const file of skillFiles) {
+          const relPath = file.webkitRelativePath.split("/").slice(1).join("/");
+          if (relPath) zip.file(relPath, file);
+        }
+        const blob = await zip.generateAsync({ type: "blob" });
+        const formData = new FormData();
+        formData.append("file", blob, `${skillPreview.name}.zip`);
+
+        // If new dataset, create it first
+        if (useNew) {
+          const createResp = await fetch("/api/datasets", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: activeDataset, embedding_model: embeddingModel }),
+          });
+          if (!createResp.ok) {
+            const body = await createResp.json();
+            setResponse({ status: createResp.status, body, elapsed: (Date.now() - startRef.current) / 1000 });
+            setLoading(false);
+            return;
+          }
+        }
+
+        const resp = await fetch(`/api/datasets/${encodeURIComponent(activeDataset)}/skills`, {
+          method: "POST", body: formData,
+        });
+        const body = await resp.json();
+        setResponse({ status: resp.status, body, elapsed: (Date.now() - startRef.current) / 1000 });
+        setLoading(false);
+        if (resp.ok) {
+          refreshDatasets();
+          if (useNew) { setUseNew(false); setDataset(activeDataset); }
+        }
+        return;
+      }
+
+      // Single query: response may be ZIP (for skill) instead of JSON
+      if (op === "query" && queryMode === "single" && fields.serviceId) {
+        const url = `/api/datasets/${encodeURIComponent(activeDataset)}/services?mode=single&service_id=${encodeURIComponent(fields.serviceId)}`;
+        const resp = await fetch(url);
+        const contentType = resp.headers.get("Content-Type") || "";
+        if (contentType.includes("application/zip")) {
+          const blob = await resp.blob();
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = `${fields.serviceId}.zip`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          setResponse({ status: resp.status, body: { message: "Skill ZIP 已下载" }, elapsed: (Date.now() - startRef.current) / 1000 });
+        } else {
+          const body = await resp.json();
+          setResponse({ status: resp.status, body, elapsed: (Date.now() - startRef.current) / 1000 });
+        }
+        setLoading(false);
+        return;
+      }
+
       // Execute all preview steps sequentially
       let lastBody: unknown = null;
       let lastStatus = 200;
@@ -431,7 +525,7 @@ export default function AdminPanel() {
       setLoading(false);
       setReqError(String(e));
     }
-  }, [preview, op, activeDataset, refreshDatasets, openStream, useNew, showBuildLogs]);
+  }, [preview, op, activeDataset, refreshDatasets, openStream, useNew, showBuildLogs, regType, skillFiles, skillPreview, embeddingModel, queryMode, fields.serviceId]);
 
   const handleCancelBuild = useCallback(async () => {
     if (!activeDataset) return;
@@ -444,11 +538,12 @@ export default function AdminPanel() {
   const canSubmit = !loading && !!activeDataset && (() => {
     if (op === "deregister") return !!fields.serviceId;
     if (op === "build") return true;
-    if (op === "list") return true;
+    if (op === "query") return queryMode === "list" || !!fields.serviceId;
     // register
     if (regType === "generic") {
       return !!(fields.name || defs?.generic.name) && !!(fields.description || defs?.generic.description);
     }
+    if (regType === "skill") return skillFiles.length > 0 && !!skillPreview?.name;
     // a2a
     if (a2aMode === "url") return !!(fields.agentCardUrl || defs?.a2a_url.agentCardUrl);
     return !!(fields.agentCardJson || defs?.a2a_json.agentCardJson);
@@ -472,12 +567,12 @@ export default function AdminPanel() {
           <section className="shrink-0">
             <SLabel n={1} text="操作类型" />
             <div className="mt-2 flex rounded-lg border border-zinc-200 overflow-hidden text-[12px] font-medium shadow-sm">
-              {(["register", "deregister", "list", "build"] as const).map((o, i) => (
+              {(["register", "deregister", "query", "build"] as const).map((o, i) => (
                 <button key={o} onClick={() => changeOp(o)}
                   className={`flex-1 py-1.5 transition-colors ${i > 0 ? "border-l border-zinc-200" : ""} ${
                     op === o ? "bg-zinc-800 text-white" : "bg-white text-zinc-500 hover:bg-zinc-50"
                   }`}>
-                  {o === "register" ? "注册" : o === "deregister" ? "注销" : o === "list" ? "列表" : "构建分类树"}
+                  {o === "register" ? "注册" : o === "deregister" ? "注销" : o === "query" ? "查询" : "构建分类树"}
                 </button>
               ))}
             </div>
@@ -544,12 +639,12 @@ export default function AdminPanel() {
                 <div className="flex flex-col flex-1 min-h-0 gap-3">
                   {/* Service type toggle */}
                   <div className="shrink-0 flex rounded-lg border border-zinc-200 overflow-hidden text-[12px] font-medium shadow-sm">
-                    {(["generic", "a2a"] as const).map((t, i) => (
-                      <button key={t} onClick={() => setRegType(t)}
+                    {(["generic", "a2a", "skill"] as const).map((t, i) => (
+                      <button key={t} onClick={() => { setRegType(t); setSkillFiles([]); setSkillPreview(null); }}
                         className={`flex-1 py-1 transition-colors ${i > 0 ? "border-l border-zinc-200" : ""} ${
                           regType === t ? "bg-zinc-800 text-white" : "bg-white text-zinc-500 hover:bg-zinc-50"
                         }`}>
-                        {t === "generic" ? "通用服务" : "A2A Agent"}
+                        {t === "generic" ? "通用服务" : t === "a2a" ? "A2A Agent" : "Skill"}
                       </button>
                     ))}
                   </div>
@@ -573,7 +668,7 @@ export default function AdminPanel() {
                         <PersistentToggle value={persistent} onChange={setPersistent} />
                       </div>
                     </div>
-                  ) : (
+                  ) : regType === "a2a" ? (
                     /* ── A2A fields ── */
                     <div className="flex flex-col flex-1 min-h-0 gap-3">
                       {/* A2A input mode toggle */}
@@ -612,6 +707,81 @@ export default function AdminPanel() {
                         </div>
                       </div>
                     </div>
+                  ) : (
+                    /* ── Skill fields ── */
+                    <div className="flex flex-col flex-1 min-h-0 gap-3">
+                      <div className="shrink-0">
+                        <div className="flex items-baseline gap-1 mb-1">
+                          <span className="text-[11px] font-medium text-zinc-600">选择 Skill 文件夹</span>
+                          <span className="text-[10px] text-red-400">必填</span>
+                        </div>
+                        <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-dashed border-zinc-300
+                          hover:border-zinc-400 cursor-pointer transition-colors bg-white">
+                          <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                          </svg>
+                          <span className="text-[12px] text-zinc-500">
+                            {skillPreview ? skillPreview.name : "点击选择文件夹..."}
+                          </span>
+                          <input
+                            type="file"
+                            {...{ webkitdirectory: "", directory: "" } as any}
+                            className="hidden"
+                            onChange={(e) => {
+                              const files = Array.from(e.target.files || []);
+                              if (files.length === 0) return;
+                              setSkillFiles(files);
+                              // Parse SKILL.md from selected files
+                              const skillMd = files.find((f) =>
+                                f.webkitRelativePath.split("/").pop() === "SKILL.md"
+                                && f.webkitRelativePath.split("/").length === 2
+                              );
+                              if (!skillMd) {
+                                setSkillPreview(null);
+                                return;
+                              }
+                              skillMd.text().then((text) => {
+                                const parts = text.split("---");
+                                if (parts.length < 3) { setSkillPreview(null); return; }
+                                const fm: Record<string, string> = {};
+                                for (const raw of parts[1].trim().split("\n")) {
+                                  const line = raw.replace(/\r$/, "");
+                                  const m = line.match(/^(name|description|license):\s*(.+)$/);
+                                  if (m) {
+                                    let val = m[2].trim();
+                                    if (val.length >= 2 && (val[0] === '"' || val[0] === "'") && val[val.length - 1] === val[0])
+                                      val = val.slice(1, -1);
+                                    fm[m[1]] = val;
+                                  }
+                                }
+                                if (!fm.name || !fm.description) { setSkillPreview(null); return; }
+                                setSkillPreview({
+                                  name: fm.name,
+                                  description: fm.description,
+                                  files: files.map((f) => f.webkitRelativePath.split("/").slice(1).join("/")),
+                                  totalSize: files.reduce((s, f) => s + f.size, 0),
+                                });
+                              });
+                            }}
+                          />
+                        </label>
+                      </div>
+                      {skillPreview && (
+                        <div className="shrink-0 rounded-md border border-zinc-200 bg-zinc-50 p-3 space-y-1.5">
+                          <div className="text-[12px] font-medium text-zinc-700">{skillPreview.name}</div>
+                          <div className="text-[11px] text-zinc-500 line-clamp-2">{skillPreview.description}</div>
+                          <div className="text-[10px] text-zinc-400">
+                            {skillPreview.files.length} 个文件 · {(skillPreview.totalSize / 1024).toFixed(1)} KB
+                          </div>
+                        </div>
+                      )}
+                      {skillFiles.length > 0 && !skillPreview && (
+                        <div className="shrink-0 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-600">
+                          未找到有效的 SKILL.md（需包含 name 和 description 字段）
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -648,39 +818,93 @@ export default function AdminPanel() {
                   <RegistryBrowser
                     dataset={activeDataset}
                     selected={fields.serviceId}
-                    onSelect={(id) => setField("serviceId", id)}
+                    onSelect={(id, entry) => {
+                      setField("serviceId", id);
+                      if (entry?.source === "skill_folder") setField("deregSkillName", entry.name);
+                      else setField("deregSkillName", "");
+                    }}
                     refreshKey={browserRefreshKey}
                   />
                 </div>
               )}
 
-              {/* ── List ── */}
-              {op === "list" && (
-                <div className="flex gap-4">
-                  <div>
-                    <div className="flex items-baseline gap-1 mb-1.5">
-                      <span className="text-[11px] font-medium text-zinc-600 font-mono">size</span>
-                      <span className="text-[10px] text-zinc-400">页面大小 (-1 = 全部)</span>
-                    </div>
-                    <input type="number" min={-1}
-                      value={fields.listSize}
-                      onChange={(e) => { setField("listSize", e.target.value); setField("listPage", "1"); }}
-                      placeholder="-1"
-                      className="w-20 px-3 py-1.5 rounded-md border border-zinc-200 text-[12px] font-mono bg-white
-                        focus:outline-none focus:ring-1 focus:ring-zinc-400/40 focus:border-zinc-400 placeholder-zinc-300" />
+              {/* ── Query ── */}
+              {op === "query" && (
+                <div className="flex flex-col flex-1 min-h-0 gap-3">
+                  {/* Sub-mode toggle */}
+                  <div className="shrink-0 flex gap-2 p-1 rounded-lg bg-zinc-100">
+                    {(["list", "single"] as const).map((m) => (
+                      <button key={m} onClick={() => setQueryMode(m)}
+                        className={`flex-1 py-1 rounded-md text-[11px] font-medium transition-all ${
+                          queryMode === m ? "bg-white text-zinc-800 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                        }`}>
+                        {m === "list" ? "列表" : "查找"}
+                      </button>
+                    ))}
                   </div>
-                  <div>
-                    <div className="flex items-baseline gap-1 mb-1.5">
-                      <span className="text-[11px] font-medium text-zinc-600 font-mono">page</span>
-                      <span className="text-[10px] text-zinc-400">页码 (≥1)</span>
+
+                  {queryMode === "list" ? (
+                    <div className="flex gap-4">
+                      <div>
+                        <div className="flex items-baseline gap-1 mb-1.5">
+                          <span className="text-[11px] font-medium text-zinc-600 font-mono">size</span>
+                          <span className="text-[10px] text-zinc-400">页面大小 (-1 = 全部)</span>
+                        </div>
+                        <input type="number" min={-1}
+                          value={fields.listSize}
+                          onChange={(e) => { setField("listSize", e.target.value); setField("listPage", "1"); }}
+                          placeholder="-1"
+                          className="w-20 px-3 py-1.5 rounded-md border border-zinc-200 text-[12px] font-mono bg-white
+                            focus:outline-none focus:ring-1 focus:ring-zinc-400/40 focus:border-zinc-400 placeholder-zinc-300" />
+                      </div>
+                      <div>
+                        <div className="flex items-baseline gap-1 mb-1.5">
+                          <span className="text-[11px] font-medium text-zinc-600 font-mono">page</span>
+                          <span className="text-[10px] text-zinc-400">页码 (≥1)</span>
+                        </div>
+                        <input type="number" min={1}
+                          value={fields.listPage}
+                          onChange={(e) => setField("listPage", e.target.value)}
+                          placeholder="1"
+                          className="w-20 px-3 py-1.5 rounded-md border border-zinc-200 text-[12px] font-mono bg-white
+                            focus:outline-none focus:ring-1 focus:ring-zinc-400/40 focus:border-zinc-400 placeholder-zinc-300" />
+                      </div>
                     </div>
-                    <input type="number" min={1}
-                      value={fields.listPage}
-                      onChange={(e) => setField("listPage", e.target.value)}
-                      placeholder="1"
-                      className="w-20 px-3 py-1.5 rounded-md border border-zinc-200 text-[12px] font-mono bg-white
-                        focus:outline-none focus:ring-1 focus:ring-zinc-400/40 focus:border-zinc-400 placeholder-zinc-300" />
-                  </div>
+                  ) : (
+                    <>
+                      {/* service_id input */}
+                      <div className="shrink-0">
+                        <div className="flex items-baseline gap-1 mb-1">
+                          <span className="text-[11px] font-medium text-zinc-600 font-mono">service_id</span>
+                          <span className="text-[10px] text-red-400">必填</span>
+                          <span className="text-[10px] text-zinc-400">(skill 类型将下载 ZIP)</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <input type="text"
+                            value={fields.serviceId}
+                            onChange={(e) => setField("serviceId", e.target.value)}
+                            placeholder="输入服务 ID，或浏览下方列表选择"
+                            className="flex-1 px-3 py-1.5 rounded-md border border-zinc-200 text-[12px] font-mono bg-white
+                              focus:outline-none focus:ring-1 focus:ring-zinc-400/40 focus:border-zinc-400 placeholder-zinc-300" />
+                          {fields.serviceId && (
+                            <button onClick={() => setField("serviceId", "")}
+                              className="shrink-0 text-zinc-300 hover:text-zinc-600 transition-colors p-1">
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {/* Service browser — fills remaining space */}
+                      <RegistryBrowser
+                        dataset={activeDataset}
+                        selected={fields.serviceId}
+                        onSelect={(id) => setField("serviceId", id)}
+                        refreshKey={browserRefreshKey}
+                      />
+                    </>
+                  )}
                 </div>
               )}
 
@@ -845,7 +1069,7 @@ export default function AdminPanel() {
                   </svg>
                   处理中
                 </span>
-              ) : op === "register" ? "注册服务" : op === "deregister" ? "确认注销" : op === "list" ? "查询列表" : "启动构建"}
+              ) : op === "register" ? "注册服务" : op === "deregister" ? "确认注销" : op === "query" ? "执行查询" : "启动构建"}
             </button>
           )}
         </div>
@@ -951,8 +1175,8 @@ export default function AdminPanel() {
                         </pre>
                       </div>
                     )}
-                    {/* List pagination: next page button */}
-                    {op === "list" && (() => {
+                    {/* Query list pagination: next page button */}
+                    {op === "query" && queryMode === "list" && (() => {
                       const meta =
                         response.body &&
                         typeof response.body === "object" &&
@@ -1060,7 +1284,7 @@ function RegistryBrowser({
 }: {
   dataset: string;
   selected: string;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, entry?: ServiceEntry) => void;
   refreshKey: number;
 }) {
   const [services, setServices] = useState<ServiceEntry[]>([]);
@@ -1139,11 +1363,12 @@ function RegistryBrowser({
         ) : (
           filtered.map((s) => {
             const locked = s.source === "user_config";
+            const isSkill = s.source === "skill_folder";
             const isSel = !locked && selected === s.id;
             return (
               <button
                 key={s.id}
-                onClick={() => !locked && onSelect(s.id)}
+                onClick={() => !locked && onSelect(s.id, s)}
                 disabled={locked}
                 className={`w-full text-left px-4 py-2.5 transition-colors ${
                   locked
@@ -1160,6 +1385,11 @@ function RegistryBrowser({
                   {locked && (
                     <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded border border-zinc-200 text-zinc-400 bg-zinc-50 font-medium">
                       user_config
+                    </span>
+                  )}
+                  {isSkill && (
+                    <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded border border-blue-200 text-blue-500 bg-blue-50 font-medium">
+                      skill
                     </span>
                   )}
                 </div>
