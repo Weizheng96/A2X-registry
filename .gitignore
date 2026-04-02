@@ -66,11 +66,15 @@ cache/
 claude scripts/
 prompt/
 
-# Results — only track summary.json files referenced by README
+# Results — only track summary.json for experiments referenced by README
 results/*
-!results/*/
-results/*/*
-!results/*/summary.json
+!results/20260323_a2x-getall_toolretnew_1714/
+!results/20260323_vector_toolretnew_1714/
+!results/20260323_traditional_toolretnew_50/
+!results/20260323_a2x-getall_publicmcp_50/
+!results/20260323_vector_publicmcp_50/
+results/20260323_*/
+!results/20260323_*/summary.json
 
 # Docs — local-only design notes
 docs/optimize_design.md
