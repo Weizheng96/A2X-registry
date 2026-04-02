@@ -7,7 +7,7 @@ File I/O (caching) is handled by the caller (CategoryDesigner).
 import logging
 from typing import Dict, List, Optional
 
-from src.a2x.utils import LLMClient, parse_json_response
+from src.common.llm_client import LLMClient, parse_json_response
 from .config import AutoHierarchicalConfig
 from .progress import progress_bar
 

@@ -7,7 +7,14 @@
 ## v0.1.4 (2026-04-01)
 
 ### 概述
-新增 Skill 注册（第三种服务类型），支持文件夹（ZIP）上传/下载/删除；服务查询新增 single 模式。
+新增 Skill 注册（第三种服务类型），支持文件夹（ZIP）上传/下载/删除；服务查询新增 single 模式。代码重构：统一共享接口，消除跨模块冗余。
+
+### 重构
+- **统一 SearchResult**：三个搜索方法（a2x/vector/traditional）共用 `src.common.models.SearchResult`，消除 3 份重复定义
+- **迁移 LLMClient**：从 `src.a2x.utils` 移至 `src.common.llm_client`，消除 traditional 对 a2x 的不合理依赖（原位置保留 re-export）
+- **统一结果转换**：`SearchService.search()` 中三个分支的结果转换代码合并为一处
+- **提取 compute_set_metrics**：三个 evaluator 的 precision/recall/hit 计算逻辑提取到 `src.common.evaluation`
+- **扩充 common 模块**：新增 `models.py`、`llm_client.py`、`evaluation.py`，`common/__init__.py` 统一导出
 
 ### 新功能
 - **Skill 注册**：`POST /api/datasets/{dataset}/skills` 上传 Skill ZIP，自动解析 `SKILL.md` frontmatter 注册为服务

@@ -9,16 +9,9 @@ Usage:
 
 from dataclasses import dataclass
 
+from src.common.models import SearchResult  # noqa: F401
 from src.vector.utils import EmbeddingModel
 from src.vector.build.index_builder import IndexBuilder
-
-
-@dataclass
-class SearchResult:
-    """Single search result, matching A2X SearchResult interface."""
-    id: str
-    name: str
-    description: str
 
 
 @dataclass

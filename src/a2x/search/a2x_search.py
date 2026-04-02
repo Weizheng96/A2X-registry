@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Callable, Generator, Union
 
-from src.a2x.utils import LLMClient
+from src.common.llm_client import LLMClient
 from src.a2x.search.models import SearchStats, NavigationStep
 from src.a2x.search.navigator import CategoryNavigator
 from src.a2x.search.selector import ServiceSelector

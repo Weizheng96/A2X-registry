@@ -117,6 +117,7 @@ classDiagram
     }
 
     class LLMClient {
+        <<src.common.llm_client>>
         +call(messages, temperature, max_tokens) LLMResponse
     }
 

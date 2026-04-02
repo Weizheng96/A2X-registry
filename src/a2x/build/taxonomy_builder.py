@@ -31,7 +31,7 @@ from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from src.a2x.utils import LLMClient
+from src.common.llm_client import LLMClient
 from .cross_domain_assigner import CrossDomainAssigner
 from .config import AutoHierarchicalConfig
 from .node_splitter import NodeSplitter, NodeSplitResult

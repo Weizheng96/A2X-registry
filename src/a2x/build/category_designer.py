@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from src.a2x.utils import LLMClient, parse_json_response
+from src.common.llm_client import LLMClient, parse_json_response
 
 logger = logging.getLogger(__name__)
 from .config import AutoHierarchicalConfig

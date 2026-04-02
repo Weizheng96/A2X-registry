@@ -18,7 +18,7 @@ import logging
 from typing import Dict, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from src.a2x.utils import LLMClient, parse_json_response
+from src.common.llm_client import LLMClient, parse_json_response
 
 logger = logging.getLogger(__name__)
 from .config import AutoHierarchicalConfig

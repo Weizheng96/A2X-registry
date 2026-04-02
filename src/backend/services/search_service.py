@@ -122,7 +122,7 @@ class SearchService:
     def _get_llm_client(self):
         with self._lock:
             if self._llm_client is None:
-                from src.a2x.utils import LLMClient
+                from src.common.llm_client import LLMClient
                 self._llm_client = LLMClient()
             return self._llm_client
 
@@ -293,45 +293,28 @@ class SearchService:
         if method.startswith("a2x"):
             _check_taxonomy(dataset)
             mode = method.replace("a2x_", "")
-            searcher = self._get_a2x(dataset, mode)
-            results, stats = searcher.search(query)
-            return {
-                "results": [{"id": r.id, "name": r.name, "description": r.description}
-                            for r in results],
-                "stats": {
-                    "llm_calls": stats.llm_calls,
-                    "total_tokens": stats.total_tokens,
-                    "visited_categories": len(stats.visited_categories),
-                    "pruned_categories": len(stats.pruned_categories),
-                },
-                "elapsed_time": round(time.time() - start, 2),
+            results, stats = self._get_a2x(dataset, mode).search(query)
+            stats_dict = {
+                "llm_calls": stats.llm_calls,
+                "total_tokens": stats.total_tokens,
+                "visited_categories": len(stats.visited_categories),
+                "pruned_categories": len(stats.pruned_categories),
             }
-
         elif method == "vector":
-            searcher = self._get_vector(dataset)
-            results, stats = searcher.search(query, top_k=top_k)
-            return {
-                "results": [{"id": r.id, "name": r.name, "description": r.description}
-                            for r in results],
-                "stats": {"llm_calls": 0, "total_tokens": 0},
-                "elapsed_time": round(time.time() - start, 2),
-            }
-
+            results, stats = self._get_vector(dataset).search(query, top_k=top_k)
+            stats_dict = {"llm_calls": 0, "total_tokens": 0}
         elif method == "traditional":
-            searcher = self._get_traditional(dataset)
-            results, stats = searcher.search(query)
-            return {
-                "results": [{"id": r.id, "name": r.name, "description": r.description}
-                            for r in results],
-                "stats": {
-                    "llm_calls": stats.llm_calls,
-                    "total_tokens": stats.total_tokens,
-                },
-                "elapsed_time": round(time.time() - start, 2),
-            }
-
+            results, stats = self._get_traditional(dataset).search(query)
+            stats_dict = {"llm_calls": stats.llm_calls, "total_tokens": stats.total_tokens}
         else:
             raise ValueError(f"Unknown method: {method}")
+
+        return {
+            "results": [{"id": r.id, "name": r.name, "description": r.description}
+                        for r in results],
+            "stats": stats_dict,
+            "elapsed_time": round(time.time() - start, 2),
+        }
 
     def search_stream(self, query: str, method: str,
                       dataset: str = "ToolRet_clean") -> Generator[Dict, None, None]:

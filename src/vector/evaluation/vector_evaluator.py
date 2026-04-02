@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 from src.vector.search.vector_search import VectorSearch
 from src.vector.utils.metrics import precision_at_k, recall_at_k, hit_at_k, mrr, ndcg_at_k
+from src.common.evaluation import compute_set_metrics
 
 
 @dataclass
@@ -102,16 +103,9 @@ class VectorEvaluator:
 
         # Primary metrics at default top_k
         found_tools = all_found[:k]
+        correct, missed, wrong, precision, recall, hit = \
+            compute_set_metrics(expected_tools, found_tools)
         expected_set = set(expected_tools)
-        found_set = set(found_tools)
-
-        correct = list(expected_set & found_set)
-        missed = list(expected_set - found_set)
-        wrong = list(found_set - expected_set)
-
-        precision = len(correct) / len(found_tools) if found_tools else 0.0
-        recall = len(correct) / len(expected_tools) if expected_tools else 0.0
-        hit = len(correct) > 0
 
         # Multi-K metrics
         metrics_at_k = {}

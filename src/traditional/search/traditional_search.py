@@ -11,15 +11,8 @@ import json
 import re
 from dataclasses import dataclass
 
-from src.a2x.utils.llm_client import LLMClient, parse_json_response
-
-
-@dataclass
-class SearchResult:
-    """Single search result, matching A2X SearchResult interface."""
-    id: str
-    name: str
-    description: str = ""
+from src.common.llm_client import LLMClient, parse_json_response
+from src.common.models import SearchResult  # noqa: F401
 
 
 @dataclass

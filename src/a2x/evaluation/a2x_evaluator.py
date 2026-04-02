@@ -23,6 +23,7 @@ sys.path.insert(0, str(project_root))
 
 from src.a2x.search.a2x_search import A2XSearch
 from src.a2x.evaluation.error_analysis import save_error_report
+from src.common.evaluation import compute_set_metrics
 
 
 @dataclass
@@ -125,27 +126,15 @@ class A2XEvaluator:
             })()
 
         # Compute metrics
-        expected_set = set(expected_tools)
-        found_set = set(found_tools)
-
-        correct_tools = list(expected_set & found_set)
-        missed_tools = list(expected_set - found_set)
-        wrong_tools = list(found_set - expected_set)
-
-        expected_count = len(expected_tools)
-        found_count = len(found_tools)
-        correct_count = len(correct_tools)
-
-        precision = correct_count / found_count if found_count > 0 else 0.0
-        recall = correct_count / expected_count if expected_count > 0 else 0.0
-        hit = correct_count > 0
+        correct_tools, missed_tools, wrong_tools, precision, recall, hit = \
+            compute_set_metrics(expected_tools, found_tools)
 
         return QueryMetrics(
             query_id=query_id,
             query=query,
-            expected_count=expected_count,
-            found_count=found_count,
-            correct_count=correct_count,
+            expected_count=len(expected_tools),
+            found_count=len(found_tools),
+            correct_count=len(correct_tools),
             precision=precision,
             recall=recall,
             hit=hit,

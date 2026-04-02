@@ -110,6 +110,7 @@ classDiagram
     }
 
     class LLMClient {
+        <<src.common.llm_client>>
         -base_url: str
         -model: str
         -api_keys: List~str~
@@ -118,7 +119,6 @@ classDiagram
     }
 
     class IncrementalBuilder {
-        <<待实现>>
         +add_service(service) List~str~
         +remove_service(service_id) bool
     }

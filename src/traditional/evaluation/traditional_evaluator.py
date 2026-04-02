@@ -17,6 +17,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 from src.traditional.search.traditional_search import TraditionalSearch
+from src.common.evaluation import compute_set_metrics
 
 
 @dataclass
@@ -87,16 +88,8 @@ class TraditionalEvaluator:
             found_tools = []
             stats = type('obj', (object,), {'llm_calls': 0, 'total_tokens': 0})()
 
-        expected_set = set(expected_tools)
-        found_set = set(found_tools)
-
-        correct = list(expected_set & found_set)
-        missed = list(expected_set - found_set)
-        wrong = list(found_set - expected_set)
-
-        precision = len(correct) / len(found_tools) if found_tools else 0.0
-        recall = len(correct) / len(expected_tools) if expected_tools else 0.0
-        hit = len(correct) > 0
+        correct, missed, wrong, precision, recall, hit = \
+            compute_set_metrics(expected_tools, found_tools)
 
         return QueryMetrics(
             query_id=query_id,
