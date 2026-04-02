@@ -53,9 +53,10 @@ llm_apikey.json
 # Binary data files
 *.bin
 
-# Database — data lives in separate repo (A2X-registry-demo-data), only .gitkeep tracked
-database/*
-!database/.gitkeep
+# Database — git submodule (A2X-registry-demo-data)
+# Ignore local-only generated files within it
+database/chroma/
+database/*/removed_skills/
 
 # Cache
 cache/
