@@ -247,19 +247,27 @@ client.register_agent("team", card, service_id=sid)   # 重试同 sid 幂等
 ### 2.1 模块划分
 
 ```
-src/client/
-├── __init__.py          # 导出 A2XClient / AsyncA2XClient / 异常 / dataclass
-├── client.py            # A2XClient（同步入口）
-├── async_client.py      # AsyncA2XClient（异步入口，镜像同步）
-├── transport.py         # HTTPTransport + AsyncHTTPTransport
-├── ownership.py         # OwnershipStore（同步文件 I/O + 跨进程锁）
-├── _internal.py         # 共享纯函数（URL / body / 哨兵 / header 构造）
-├── models.py            # 响应 dataclass（from_dict 容忍未知字段）
-├── errors.py            # 异常层级
-├── tests/               # pytest 单元测试（不纳入 wheel）
-├── py.typed             # PEP 561 类型标记
-├── pyproject.toml       # 独立打包时用
+src/client/                # 纯 SDK 主体，独立分发时原样打包
+├── __init__.py            # 导出 A2XClient / AsyncA2XClient / 异常 / dataclass
+├── client.py              # A2XClient（同步入口）
+├── async_client.py        # AsyncA2XClient（异步入口，镜像同步）
+├── transport.py           # HTTPTransport + AsyncHTTPTransport
+├── ownership.py           # OwnershipStore（同步文件 I/O + 跨进程锁）
+├── _internal.py           # 共享纯函数（URL / body / 哨兵 / header 构造）
+├── models.py              # 响应 dataclass（from_dict 容忍未知字段）
+├── errors.py              # 异常层级
+├── py.typed               # PEP 561 类型标记
+├── pyproject.toml         # 独立打包时用
 └── README.md
+
+todo/client_tests/         # pytest 单元测试（与 SDK 代码分离，不纳入 wheel）
+├── conftest.py
+├── pytest.ini
+├── test_internal.py
+├── test_ownership.py
+├── test_transport.py
+├── test_client.py
+└── test_async_client.py
 ```
 
 **独立性自检**：`grep -r "from src\." src/client/ | grep -v "from src\.client"` 应无命中。
@@ -678,11 +686,11 @@ sequenceDiagram
 
 ## 5. 测试
 
-单元测试位于 `src/client/tests/`，用 `pytest` + `pytest-asyncio` + `httpx.MockTransport` 驱动，**不需要真实后端**。
+单元测试位于 `todo/client_tests/`（与 SDK 代码分离，不纳入独立分发的 wheel），用 `pytest` + `pytest-asyncio` + `httpx.MockTransport` 驱动，**不需要真实后端**。
 
 ```bash
 pip install pytest pytest-asyncio
-python -m pytest src/client/tests/
+python -m pytest todo/client_tests/
 ```
 
 覆盖范围：
@@ -695,7 +703,7 @@ python -m pytest src/client/tests/
 | `test_client.py` | 8 个对外方法的完整路径；持久化开关、所有权 fail-fast、404 自清、400 自清、子路径 base_url 正确拼接 |
 | `test_async_client.py` | 异步版对等行为子集（确认同步/异步对称） |
 
-打包时测试不纳入 wheel：`pyproject.toml` 的 `packages = ["a2x_client"]` 只导出顶层，`tests/` 子目录不会被 setuptools 递归收集。
+打包时测试不纳入 wheel：测试文件物理位置就不在 `src/client/` 内，`pyproject.toml` 的 `packages = ["a2x_client"]` 只导出 SDK 主体，与测试目录完全解耦。
 
 ---
 
