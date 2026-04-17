@@ -256,6 +256,7 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 - **不做格式校验**：更新只增不减，原始校验的不变式依然成立；节省一次完整校验。
 - 只有 `name` 或 `description` 实际变化时 `taxonomy_affected=true`，并将该数据集的 taxonomy 置为 `STALE`。仅改 `url` / `inputSchema` 等不参与分类 hash 的字段不会影响分类树可用性。
 - `changed_fields` 仅列出值真正变化的顶层键（避免同值赋值误报）。
+- **A2A + `agent_card_url` 注意**：若 A2A 条目以 URL 注册（以远端抓取为真源），PUT 更新会写入本地缓存快照，但下次 `startup()` 再次抓取 URL 时会用上游数据覆盖。若需持久化编辑，请在注册时不要提供 `agent_card_url`，改以完整 `agent_card` 注册。
 
 **错误响应**：
 

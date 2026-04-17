@@ -633,10 +633,7 @@ def main():
 
     try:
         DISPATCH[args.command](service, args)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    except FileNotFoundError as e:
+    except (ValueError, FileNotFoundError, KeyError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

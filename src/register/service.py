@@ -332,9 +332,16 @@ class RegistryService:
         else:
             raise ValueError(f"Unsupported entry type: {entry.type!r}")
 
-        # Commit the new in-memory entry.
+        # Commit the new in-memory entry. If a concurrent deregister removed
+        # the entry during our disk I/O, don't resurrect it — the deregister
+        # wins. The already-applied disk side-effects (renamed folder, rewritten
+        # SKILL.md) will be reconciled on next startup.
         with self._lock:
-            self._entries.setdefault(dataset, {})[service_id] = new_entry
+            ds = self._entries.get(dataset, {})
+            if service_id not in ds:
+                raise KeyError(
+                    f"Service '{service_id}' was removed during update")
+            ds[service_id] = new_entry
 
         # Persist: api_config entries round-trip to disk; skill_folder entries
         # were updated in place during _apply_skill_updates; ephemeral stays
