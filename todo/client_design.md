@@ -79,18 +79,27 @@ SDK 维护 `_owned: dict[dataset, set[service_id]]`，记录**本客户端注册
 | `delete_dataset` | 移除整个 `_owned[dataset]` | — |
 | `list_agents` / `get_agent` | — | — （只读不限） |
 
-**持久化**：`_owned` 落盘保存在本地 JSON 文件（默认 `~/.a2x_client/owned.json`），**每次变更后立即写盘**（原子写：`.tmp` 文件 + `rename`）；客户端下次启动时自动加载。文件按 `base_url` 分段，以支持同一开发者连接多个后端：
+**持久化**：`_owned` 落盘保存在本地 JSON 文件（默认 `~/.a2x_client/owned.json`），**每次变更后立即写盘**（原子写：`.tmp` 文件 + `rename`）；客户端下次启动时自动加载。文件按 `base_url` 分段，以支持同一开发者连接多个后端。**文件带 `schema_version` 版本头**（D11），便于未来扩展：
 
 ```json
 {
-  "https://registry.example.com": {
-    "research_team": ["agent_planner_xxx", "agent_researcher_yyy"]
-  },
-  "http://127.0.0.1:8000": {
-    "test_team": ["agent_test_zzz"]
+  "schema_version": 1,
+  "data": {
+    "https://registry.example.com": {
+      "research_team": ["agent_planner_xxx", "agent_researcher_yyy"]
+    },
+    "http://127.0.0.1:8000": {
+      "test_team": ["agent_test_zzz"]
+    }
   }
 }
 ```
+
+> **向后兼容**：旧格式（无 `schema_version` 包裹，直接以 `base_url` 为顶层键）读取时会被静默迁移为 v1 并在下次写盘时落地。
+
+**并发安全（D2 / D9）**：由于 RMW（读整文件 → 改 `data[base_url]` 段 → 原子写）并非天然临界区，SDK 在 `_save()` 入口用**跨平台文件锁**（POSIX 用 `fcntl.flock`、Windows 用 `msvcrt.locking`）锁住一个独立的 `owned.json.lock` 兄弟文件，保证：
+- 同机多进程同时初始化并注册服务时，不会相互覆盖对方段
+- 异步客户端并发分派到线程池的 `_save` 调用之间也串行化（同进程内另有 `threading.Lock` 覆盖 RMW）
 
 初始化时只加载 `base_url` 对应的段。构造函数参数 `ownership_file` 可自定义路径；传 `False` 则禁用持久化，只在内存保留（进程退出即丢失）。
 
@@ -324,20 +333,22 @@ A2XClient(
 
 | 输入参数 | 转化结果 |
 |---------|----------|
-| `base_url` | `httpx.Client(base_url=...)` |
+| `base_url` | 若缺失尾部 `/` 则自动补上（L3：保证挂载在子路径下的后端如 `http://host/a2x/` 也能正确拼接），再传给 `httpx.Client(base_url=...)` |
 | `timeout` | `httpx.Client(timeout=...)` |
 | `api_key` | 若非空，默认 header `Authorization: Bearer <api_key>` |
 | `ownership_file` | 从 JSON 文件读取 `data[base_url]` 初始化 `_owned`；文件不存在则 `_owned = {}` |
 
 **`_owned` 加载流程**：
 1. 解析 `ownership_file`（`None` → `~/.a2x_client/owned.json`；`False` → 跳过，`_owned = {}`）
-2. 若文件存在且可解析：读取 `data[self.base_url]` → `{dataset: [sid]}`；反序列化为 `{dataset: set(sid)}`
+2. 若文件存在且可解析：读取 `data[self.base_url]` → `{dataset: [sid]}`；反序列化为 `{dataset: set(sid)}`。**兼容旧格式**（无 `schema_version` 的扁平 `{base_url: {...}}`），读取时静默迁移（D11）
 3. 文件缺失、损坏（JSON 解析失败）或 `base_url` 键不存在：`_owned = {}`，**不抛异常**（首次使用属正常）
 4. `_save_owned()` 内部方法在每次 `_owned` 变化后被调用；写盘策略：
-   - 读取已有文件（支持多 `base_url` 共存）
+   - **获取跨进程文件锁**（`owned.json.lock`；POSIX `fcntl.flock`、Windows `msvcrt.locking`）—— 解决 D2 多进程 RMW 竞态
+   - 读取已有文件（支持多 `base_url` 共存），若不含 `schema_version` 则迁移为 v1 结构
    - 替换 `data[self.base_url]` 段
    - 原子写：先写 `<file>.tmp`，再 `os.replace()` 覆盖原文件
    - 首次写入时自动创建父目录
+   - **写盘失败降级为 `warnings.warn`**（D8）：HTTP 调用此前已成功，抛出 `OSError` 会让调用方误以为注册失败而去重试，进而在后端重复创建服务
 
 ---
 
@@ -416,7 +427,15 @@ Content-Type: application/json
 | `service_id` | body `.service_id` | `None` 时省略；由后端生成 |
 | `persistent` | body `.persistent` | 默认 `true` |
 
-**副作用**：成功后将 `resp.service_id` 加入 `_owned[dataset]`，并立即持久化到 `ownership_file`。
+**副作用**：
+- `persistent=True`（默认）：成功后将 `resp.service_id` 加入 `_owned[dataset]`，并立即持久化到 `ownership_file`
+- `persistent=False`（D4）：**跳过 `_owned.add`**。后端重启后该会话级服务会消失，若 SDK 把它持久化了，下次启动 `update_agent` 会反复 404
+
+**`status` 取值（D7）**：
+- `"registered"` — 新建
+- `"updated"` — **同 `service_id` 重注册**触发的**全量覆盖**（后端语义，不是 PUT 的顶层字段 upsert）。与 §2.4 `update_agent` 的部分更新语义完全不同，不要混淆
+
+**幂等性建议（L6）**：省略 `service_id` 时由后端自动生成 ID。若调用成功但响应在网络上丢失（触发 `A2XConnectionError`），重试会创建第二个孤儿服务。需要 retry-safe 行为的调用方应**显式传入 `service_id`**（例如 UUID），重试将变为等价的"重注册 → status=updated"，不会产生重复。
 
 > 不使用 URL 模式（`agent_card_url`）。如需该能力可扩展 `register_agent_from_url()`。
 
@@ -458,7 +477,7 @@ Content-Type: application/json
 **前置检查**：`service_id ∈ _owned[dataset]`，否则抛 `NotOwnedError`（本地 fail-fast，不发请求）。
 
 **错误映射**：
-- 404 → `NotFoundError`（`service_id` 不存在于后端；可能意味着本地 `_owned` 与后端不同步）
+- 404 → `NotFoundError`。**SDK 会在重抛前自动从 `_owned[dataset]` 移除该 `service_id`**（D3），避免本地/远端永久偏差（例如后端被管理员清理后，本地会反复抛 404）。`set_team_count` / `deregister_agent` 同样处理
 - 400 → `ValidationError`（`user_config` 来源 / 改名冲突）
 
 ---
@@ -492,7 +511,11 @@ Content-Type: application/json
 | `service_id` | URL path | URL-encode |
 | `count` | body `.agentTeamCount` | 整数；SDK 负责字段命名（camelCase） |
 
-**前置检查**：与 2.4 相同，`service_id ∈ _owned[dataset]`。
+**前置检查**：
+- `count` 必须是**非负整数**（`int` 且 `count >= 0`，不接受 `bool` / `float` / `str`）；不满足则本地抛 `ValueError`，**不发 HTTP**（D10）
+- `service_id ∈ _owned[dataset]`（与 2.4 相同）
+
+**404 处理**：与 2.4 相同——重抛前自动从 `_owned` 移除该 `service_id`（D3）。
 
 **实现备注**：本 method 是 `update_agent(dataset, sid, {"agentTeamCount": count})` 的**薄封装**，目的是为首要客户提供一个语义清晰的入口；底层完全复用 PUT 端点。字段名 `agentTeamCount` 由 SDK 固定，调用方不能通过此 method 改名。
 
@@ -540,8 +563,8 @@ Accept: application/json
 ```
 
 **响应处理**：
-- `200 + application/json` → 解析，a2a 类型取 `metadata` 为完整 AgentCard
-- `200 + application/zip` → skill 类型（不在本范围）；抛 `UnexpectedServiceTypeError`
+- `200` 且 `Content-Type` 包含 `application/json`（**子串匹配**，容忍 `application/json; charset=utf-8` 等带参数形态，D5）→ 解析，a2a 类型取 `metadata` 为完整 AgentCard
+- `200` 且 `Content-Type` 不含 `application/json`（如 `application/zip; charset=binary`）→ skill 类型（不在本范围）；抛 `UnexpectedServiceTypeError`
 - `404` → `NotFoundError`
 
 不做所有权校验——只读。
@@ -568,7 +591,7 @@ DELETE /api/datasets/<dataset>/services/<service_id> HTTP/1.1
 
 **特殊响应**：
 - 服务不存在：后端 200 + `{"status": "not_found"}`（不是 404），SDK 原样返回
-- 来源为 `user_config`：后端 400 → SDK 抛 `UserConfigDeregisterForbiddenError`（Agent Team 场景下通过 API 注册不会触发）
+- 来源为 `user_config`：后端 400 → SDK 抛 `UserConfigServiceImmutableError`（同样适用于 `update_agent`；旧名 `UserConfigDeregisterForbiddenError` 作为别名保留）。Agent Team 场景下通过 API 注册不会触发
 
 ---
 
@@ -586,9 +609,11 @@ client.delete_dataset(name: str) -> DatasetDeleteResponse
 DELETE /api/datasets/<name> HTTP/1.1
 ```
 
-**副作用**：成功后清空 `_owned[name]`（该数据集下所有服务的所有权记录），并立即持久化到 `ownership_file`。
+**副作用**：
+- 成功（200）：清空 `_owned[name]`（该数据集下所有服务的所有权记录），立即持久化
+- 失败（400，数据集不存在）：**同样清空 `_owned[name]`**（D6），再重抛 `ValidationError`。避免"后端早被清理 → 本地永远 400 + 永远残留"的死循环
 
-数据集不存在 → 后端 400 → `ValidationError`。
+数据集不存在 → 后端 400 → `ValidationError`（SDK 重抛前已完成本地清理）。
 
 > **设计决策**：`delete_dataset` 不做所有权检查（数据集层面当前无创建者追踪）。
 
@@ -731,7 +756,7 @@ classDiagram
     class NotFoundError
     class ValidationError
     class NotOwnedError
-    class UserConfigDeregisterForbiddenError
+    class UserConfigServiceImmutableError
     class UnexpectedServiceTypeError
 
     A2XClient *-- HTTPTransport : owns
@@ -759,7 +784,7 @@ classDiagram
     A2XError <|-- NotOwnedError
     A2XHTTPError <|-- NotFoundError
     A2XHTTPError <|-- ValidationError
-    ValidationError <|-- UserConfigDeregisterForbiddenError
+    ValidationError <|-- UserConfigServiceImmutableError
     A2XHTTPError <|-- UnexpectedServiceTypeError
 ```
 
@@ -815,7 +840,7 @@ self._owned: OwnershipStore   # 同类型，文件 I/O 本身同步
 ```
 
 **职责边界**（两个类一致）：
-- ✅ 参数组装（构造 body dict、剔除 None、重命名 `input_schema → inputSchema`、`count → agentTeamCount`）
+- ✅ 参数组装（构造 body dict、剔除 None、`set_team_count` 的 `count → agentTeamCount` 字段命名）。`register_agent` / `update_agent` 的 `agent_card` / `fields` dict **整体透传**，不做字段重命名（D1）
 - ✅ 所有权前置检查（调 `OwnershipStore.contains`）
 - ✅ 响应反序列化（调 `<Model>.from_dict(resp.json())`）
 - ✅ 特殊分支处理（`get_agent` 的 Content-Type 判断）
@@ -889,7 +914,7 @@ class AsyncHTTPTransport:
 - `_client: httpx.Client | httpx.AsyncClient`
 - `_wrap_http_error(resp) -> A2XError` — 映射规则（同步/异步一致）：
   - `404` → `NotFoundError`
-  - `400 / 422` → `ValidationError`；若 `detail` 含 `"user_config"` → `UserConfigDeregisterForbiddenError`
+  - `400 / 422` → `ValidationError`；若 `detail` 含 `"user_config"` → `UserConfigServiceImmutableError`
   - `5xx` → `ServerError`
   - `httpx.ConnectError` / `httpx.TimeoutException` → `A2XConnectionError`
 
@@ -938,10 +963,12 @@ class OwnershipStore:
 
 **关键设计决策**：
 1. **按 `base_url` 分段**，支持同一个文件管理多个后端
-2. **每次变更立即 `_save()`**：没有批量合并/延迟刷新，避免崩溃丢数据
-3. **容忍 I/O 异常**：`_load` 遇到损坏 JSON 不抛，从空开始（首次启动正常）；`_save` 遇到磁盘满等错误抛 `OSError`（由上层决定是否忽略）
-4. **文件不存在不等于错误**：首次使用时预期如此
-5. **同步实现，两个客户端共用**：本地文件 I/O 通常 < 1ms，没有独立的 async 版本。`AsyncA2XClient` 调用 `add` / `remove` / `remove_dataset` 时通过 `await asyncio.to_thread(...)` 把同步调用调度到线程池，避免阻塞事件循环；`contains`（纯内存查询）直接同步调用即可
+2. **`schema_version` 版本头**（D11）：写入时包一层 `{"schema_version": 1, "data": {...}}`；读取时优先识别，缺失则按 v0 扁平结构兼容解析并在下一次 `_save()` 时迁移
+3. **每次变更立即 `_save()`**：没有批量合并/延迟刷新，避免崩溃丢数据
+4. **跨进程并发安全**（D2 / D9）：`_save()` 入口使用**跨平台文件锁**（POSIX `fcntl.flock`、Windows `msvcrt.locking`），锁目标是**独立的 `<file>.lock` 兄弟文件**（不会被 `os.replace` 替换），确保整个 RMW 在进程间串行；进程内另用 `threading.Lock` 覆盖 RMW，串行化异步线程池分派的 `_save`
+5. **容忍 I/O 异常**：`_load` 遇到损坏 JSON 不抛，从空开始（首次启动正常）；**`_save` 遇到 `OSError` 降级为 `warnings.warn`**（D8）——HTTP 通常已成功，抛出会诱导重复注册
+6. **文件不存在不等于错误**：首次使用时预期如此
+7. **同步实现，两个客户端共用**：本地文件 I/O 通常 < 1ms，没有独立的 async 版本。`AsyncA2XClient` 调用 `add` / `remove` / `remove_dataset` 时通过 `await asyncio.to_thread(...)` 把同步调用调度到线程池，避免阻塞事件循环；`contains`（纯内存查询）直接同步调用即可
 
 ---
 
@@ -983,7 +1010,8 @@ class A2XConnectionError(A2XError): ...      # 网络/超时
 class A2XHTTPError(A2XError): ...            # 4xx/5xx 通用
 class NotFoundError(A2XHTTPError): ...       # 404
 class ValidationError(A2XHTTPError): ...     # 400/422
-class UserConfigDeregisterForbiddenError(ValidationError): ...
+class UserConfigServiceImmutableError(ValidationError): ...
+# Alias (deprecated): UserConfigDeregisterForbiddenError = UserConfigServiceImmutableError
 class UnexpectedServiceTypeError(A2XHTTPError): ...  # get_agent 遇 ZIP
 class ServerError(A2XHTTPError): ...         # 5xx
 class NotOwnedError(A2XError): ...           # 本地所有权检查失败
@@ -991,7 +1019,7 @@ class NotOwnedError(A2XError): ...           # 本地所有权检查失败
 
 **关键设计决策**：
 1. **`NotOwnedError` 不继承 `A2XHTTPError`**：它是本地业务错误，没有 `status_code`
-2. **`UserConfigDeregisterForbiddenError` 继承 `ValidationError`**：用户如果只 `except ValidationError` 也能捕获
+2. **`UserConfigServiceImmutableError` 继承 `ValidationError`**：用户如果只 `except ValidationError` 也能捕获。旧名 `UserConfigDeregisterForbiddenError` 作为别名保留向后兼容
 3. **异常对象只携带数据**，不做 logging / reporting（那是用户职责）
 
 ---
