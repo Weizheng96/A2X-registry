@@ -123,6 +123,14 @@ class DeregisterResponse(BaseModel):
     status: str  # "deregistered" | "not_found"
 
 
+class UpdateResponse(BaseModel):
+    service_id: str
+    dataset: str
+    status: str                       # "updated" | "not_found"
+    changed_fields: List[str] = []    # top-level keys whose value actually changed
+    taxonomy_affected: bool = False   # True iff name or description changed
+
+
 class SkillResponse(BaseModel):
     name: str
     dataset: str

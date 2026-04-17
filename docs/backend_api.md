@@ -34,6 +34,7 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `GET` | `/api/datasets/{dataset}/services` | 列出/查询服务（4 种模式） |
 | `POST` | `/api/datasets/{dataset}/services/generic` | 注册通用服务 |
 | `POST` | `/api/datasets/{dataset}/services/a2a` | 注册 A2A Agent |
+| `PUT` | `/api/datasets/{dataset}/services/{service_id}` | 部分字段更新服务 |
 | `DELETE` | `/api/datasets/{dataset}/services/{service_id}` | 注销服务 |
 | `POST` | `/api/datasets/{dataset}/skills` | 上传 Skill（ZIP） |
 | `DELETE` | `/api/datasets/{dataset}/skills/{name}` | 删除 Skill |
@@ -219,6 +220,49 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 ```json
 { "service_id": "translate_agent", "dataset": "my_dataset", "status": "registered" }
 ```
+
+---
+
+### PUT `/api/datasets/{dataset}/services/{service_id}`
+
+部分字段更新服务（顶层字段 upsert：存在则替换，不存在则追加）。
+
+**请求体：** 任意 `{field: value}` 字典，按类型允许的字段列表校验：
+
+| 类型 | 可改字段 | 备注 |
+|------|---------|------|
+| `generic` | `name`, `description`, `inputSchema`, `url` | 字段名严格，出现未知键返回 400 |
+| `a2a` | Agent Card 任意顶层字段（含 `skills`、`provider`、`capabilities` 等，以及 `extra=allow` 允许的自定义字段） | 顶层替换；想改 `provider.url` 需整段重传 `provider` |
+| `skill` | `name`, `description`, `license` | 改 `name` 时 `skills/{name}/` 文件夹会随之重命名；SKILL.md frontmatter 会被相应重写 |
+
+**示例请求：**
+```json
+{ "description": "更新后的描述", "url": "https://new.example.com" }
+```
+
+**响应：**
+```json
+{
+  "service_id": "flight_booking",
+  "dataset":    "my_dataset",
+  "status":     "updated",
+  "changed_fields": ["description", "url"],
+  "taxonomy_affected": true
+}
+```
+
+**行为约定**：
+
+- **不做格式校验**：更新只增不减，原始校验的不变式依然成立；节省一次完整校验。
+- 只有 `name` 或 `description` 实际变化时 `taxonomy_affected=true`，并将该数据集的 taxonomy 置为 `STALE`。仅改 `url` / `inputSchema` 等不参与分类 hash 的字段不会影响分类树可用性。
+- `changed_fields` 仅列出值真正变化的顶层键（避免同值赋值误报）。
+
+**错误响应**：
+
+| 状态码 | 触发 |
+|--------|------|
+| 400 | `user_config` 来源的服务（需直接编辑 `user_config.json`）/ 未知字段（generic、skill）/ 改名时目标文件夹已存在 |
+| 404 | `service_id` 不存在 |
 
 ---
 

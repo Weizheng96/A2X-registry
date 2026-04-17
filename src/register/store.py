@@ -189,6 +189,58 @@ class RegistryStore:
         shutil.move(str(skill_dir), str(dest))
         return True
 
+    def rename_skill(self, old_name: str, new_name: str) -> None:
+        """Rename ``skills/{old_name}/`` to ``skills/{new_name}/``.
+
+        Raises FileNotFoundError if source missing, ValueError if target exists.
+        """
+        if not new_name or new_name == old_name:
+            return
+        old_dir = self._dir / SKILLS_DIR / old_name
+        new_dir = self._dir / SKILLS_DIR / new_name
+        if not old_dir.exists():
+            raise FileNotFoundError(f"Skill folder not found: {old_name}")
+        if new_dir.exists():
+            raise ValueError(f"Skill folder already exists: {new_name}")
+        shutil.move(str(old_dir), str(new_dir))
+
+    def update_skill_md(self, name: str, updates: Dict[str, str]) -> None:
+        """Upsert frontmatter keys in ``skills/{name}/SKILL.md``.
+
+        Preserves body text and any frontmatter keys not in ``updates``.
+        Creates frontmatter if missing.
+        """
+        skill_md = self._dir / SKILLS_DIR / name / "SKILL.md"
+        if not skill_md.exists():
+            raise FileNotFoundError(f"SKILL.md not found for skill '{name}'")
+        with open(skill_md, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            raise ValueError("SKILL.md must have YAML frontmatter delimited by ---")
+        fm_body = parts[1].strip("\n")
+        body = parts[2]
+
+        # Line-level upsert: rewrite existing key lines, append new ones.
+        pattern = re.compile(r"^(\s*)([A-Za-z_][\w-]*)(\s*:\s*)(.*)$")
+        new_lines: List[str] = []
+        seen = set()
+        for line in fm_body.split("\n"):
+            m = pattern.match(line)
+            if m and m.group(2) in updates:
+                new_lines.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{updates[m.group(2)]}")
+                seen.add(m.group(2))
+            else:
+                new_lines.append(line)
+        for k, v in updates.items():
+            if k not in seen:
+                new_lines.append(f"{k}: {v}")
+
+        new_content = "---\n" + "\n".join(new_lines) + "\n---" + body
+        with open(skill_md, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
     def get_skill_zip(self, name: str) -> bytes:
         """Pack a skill folder into an in-memory ZIP. Raises FileNotFoundError if missing."""
         skill_dir = self._dir / SKILLS_DIR / name

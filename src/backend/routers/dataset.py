@@ -17,7 +17,7 @@ from src.backend.services.taxonomy_service import get_taxonomy_tree
 from src.backend.default_queries import get_default_queries
 from src.register.models import (
     RegisterGenericRequest, RegisterA2ARequest,
-    RegisterResponse, DeregisterResponse, SkillResponse,
+    RegisterResponse, DeregisterResponse, SkillResponse, UpdateResponse,
 )
 from src.register.service import RegistryService
 
@@ -50,6 +50,10 @@ async def _run(fn, *args):
         return await loop.run_in_executor(_executor, fn, *args)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error("Registry error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -254,6 +258,24 @@ async def register_a2a(dataset: str, req: RegisterA2ARequest):
     """Register an A2A agent."""
     req.dataset = dataset
     return await _run(get_registry_service().register_a2a, req)
+
+
+@router.put("/{dataset}/services/{service_id}", response_model=UpdateResponse)
+async def update_service(dataset: str, service_id: str, updates: dict):
+    """Partially update a service by top-level field upsert.
+
+    Body is an arbitrary ``{field: value}`` dict. Fields not present are
+    untouched; matching fields are replaced. No format validation (since
+    fields are only added/replaced, not removed). Changing ``name`` or
+    ``description`` marks the taxonomy as stale.
+
+    Rejected:
+      - user_config-sourced entries (edit user_config.json directly)
+      - unknown fields for generic / skill types (strict schema)
+      - skill rename whose target folder already exists
+    """
+    return await _run(get_registry_service().update_service,
+                      dataset, service_id, updates)
 
 
 @router.delete("/{dataset}/services/{service_id}", response_model=DeregisterResponse)

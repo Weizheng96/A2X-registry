@@ -73,6 +73,33 @@ deregister_skill(dataset, name):
   → _regenerate_output
 ```
 
+### 更新流程
+
+```
+update_service(dataset, service_id, updates):
+  → 锁内定位 entry；user_config 来源 → 拒绝
+  → 按类型 dispatch：
+    generic: 校验字段名 ⊆ {name, description, inputSchema, url}
+             → model_dump 合并 updates → 重新构造 GenericServiceData
+    a2a:     requires entry.agent_card 已解析
+             → model_dump 合并 updates → 重新构造 AgentCard（extra=allow 保留自定义字段）
+    skill:   校验字段名 ⊆ {name, description, license}
+             → 若 name 变化：rename skills/{old}/ → skills/{new}/
+             → 重写 SKILL.md frontmatter（只写变化过的字段，保留 body 与其它键）
+  → 锁内替换 _entries[service_id]
+  → api_config 来源：save_api_entry 持久化
+  → _regenerate_output
+  → 若 {name, description} ∩ changed_fields 非空：_mark_taxonomy_stale
+```
+
+**更新契约**：
+
+- 顶层字段 upsert：相同键直接替换，新键追加；不删除既有字段。
+- **不触发格式校验** —— 既然只增不减必要字段，原始校验的不变式仍成立。
+- 只有 `name` 或 `description` 发生实际变化时，才把 taxonomy 标记为 STALE；
+  仅改 `url` / `inputSchema` 等不影响分类 hash 的字段不会触发重建提示。
+- 返回 `UpdateResponse{service_id, dataset, changed_fields[], taxonomy_affected}`。
+
 ### 变更检测
 
 `_regenerate_output` 每次重新生成 output 列表后与 `_output_cache` 中上次结果做内存对比，仅实际变化时写盘并触发回调。无独立 hash 文件。
@@ -98,6 +125,7 @@ python -m src.register [--database-dir DIR] [--config FILE] [--json] [-v] <comma
 | `register-generic DATASET --name N --desc D` | 注册 Generic | `python -m src.register register-generic default --name "API" --desc "..."` |
 | `register-a2a DATASET (--url U \| --card-file F)` | 注册 A2A | `python -m src.register register-a2a default --url https://...` |
 | `register-skill DATASET ZIP` | 上传 Skill | `python -m src.register register-skill default skill.zip` |
+| `update DATASET SERVICE_ID [--json F \| --set k=v ...] [--name N] [--desc D]` | 部分字段更新 | `python -m src.register update default generic_xxx --desc "new"` |
 | `deregister DATASET SERVICE_ID` | 注销服务 | `python -m src.register deregister default generic_xxx` |
 | `deregister-skill DATASET NAME` | 删除 Skill | `python -m src.register deregister-skill default my-skill` |
 | `create-dataset NAME [--embedding-model M] [--formats SPEC]` | 创建数据集（可声明允许格式） | `python -m src.register create-dataset myDS --formats generic,a2a:v1.0` |
@@ -123,6 +151,9 @@ svc.register_generic(RegisterGenericRequest(dataset="ds", name="...", descriptio
 svc.register_a2a(RegisterA2ARequest(dataset="ds", agent_card_url="https://..."))
 svc.register_skill("ds", zip_bytes)
 svc.register_batch(entries, dataset="ds")
+
+# 更新（部分字段 upsert；不触发格式校验）
+svc.update_service("ds", "service_id", {"description": "new", "url": "..."})
 
 # 注销
 svc.deregister("ds", "service_id")
@@ -357,6 +388,7 @@ classDiagram
         +register_a2a(req) RegisterResponse
         +register_skill(dataset, zip_bytes) SkillResponse
         +register_batch(entries, dataset, persistent) void
+        +update_service(dataset, service_id, updates) UpdateResponse
         +deregister(dataset, service_id) DeregisterResponse
         +deregister_skill(dataset, name) SkillResponse
         +list_services(dataset) List~dict~
@@ -384,6 +416,8 @@ classDiagram
         +save_api_batch(entries) void
         +save_skill_zip(zip_bytes) SkillData
         +remove_skill(name) bool
+        +rename_skill(old_name, new_name) void
+        +update_skill_md(name, updates) void
         +get_skill_zip(name) bytes
         +write_service_json(services) void
     }

@@ -8,6 +8,7 @@ Usage (subcommands):
     python -m src.register register-generic DATASET --name NAME --desc DESC [--url URL]
     python -m src.register register-a2a DATASET (--url URL | --card-file FILE)
     python -m src.register register-skill DATASET ZIP_FILE
+    python -m src.register update DATASET SERVICE_ID [--json FILE | --set k=v ...] [--name N] [--desc D] [--url U] [--license L]
     python -m src.register deregister DATASET SERVICE_ID
     python -m src.register deregister-skill DATASET NAME
     python -m src.register create-dataset NAME [--embedding-model MODEL] [--formats SPEC]
@@ -37,6 +38,7 @@ SUBCOMMANDS = {
     "list", "get", "register-generic", "register-a2a",
     "register-skill", "deregister", "deregister-skill",
     "get-register-config", "set-register-config",
+    "update",
 }
 
 
@@ -318,6 +320,51 @@ def _cmd_register_skill(service: RegistryService, args):
     ])
 
 
+def _cmd_update(service: RegistryService, args):
+    """Partial-update a service. Accepts --json FILE, --set key=value (repeatable),
+    and shortcut flags (--name / --description / --url / --license)."""
+    updates: dict = {}
+    if args.json_file:
+        path = Path(args.json_file)
+        if not path.exists():
+            print(f"Error: File not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            print("Error: --json file must contain a JSON object", file=sys.stderr)
+            sys.exit(1)
+        updates.update(loaded)
+
+    for kv in args.set or []:
+        if "=" not in kv:
+            print(f"Error: --set expects key=value, got {kv!r}", file=sys.stderr)
+            sys.exit(1)
+        k, v = kv.split("=", 1)
+        updates[k.strip()] = v
+
+    # Shortcut flags override --set / --json for the same key (most specific wins).
+    if args.name is not None:        updates["name"] = args.name
+    if args.description is not None: updates["description"] = args.description
+    if args.url is not None:         updates["url"] = args.url
+    if args.license is not None:     updates["license"] = args.license
+
+    if not updates:
+        print("Error: no updates provided (use --json, --set, or shortcut flags)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    resp = service.update_service(args.dataset, args.service_id, updates)
+    if args.json_output:
+        _print_json(resp.model_dump())
+        return
+    print(f"Updated service '{resp.service_id}' in '{resp.dataset}'")
+    _print_kv([
+        ("Changed fields", ", ".join(resp.changed_fields) or "(none — no-op)"),
+        ("Taxonomy stale", "yes" if resp.taxonomy_affected else "no"),
+    ])
+
+
 def _cmd_deregister(service: RegistryService, args):
     resp = service.deregister(args.dataset, args.service_id)
     if args.json_output:
@@ -469,6 +516,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset", help="Target dataset")
     p.add_argument("zip_file", help="Path to skill ZIP file")
 
+    # update
+    p = sub.add_parser("update", help="Partially update a service by ID")
+    p.add_argument("dataset", help="Dataset name")
+    p.add_argument("service_id", help="Service ID to update")
+    p.add_argument("--json", dest="json_file", default=None,
+                   help="Path to JSON file containing updates dict")
+    p.add_argument("--set", action="append", default=None, metavar="KEY=VALUE",
+                   help="Set a single top-level field (repeatable)")
+    p.add_argument("--name", default=None, help="Shortcut: update name")
+    p.add_argument("--description", "--desc", default=None,
+                   help="Shortcut: update description")
+    p.add_argument("--url", default=None, help="Shortcut: update url (generic/a2a)")
+    p.add_argument("--license", default=None, help="Shortcut: update license (skill)")
+
     # deregister
     p = sub.add_parser("deregister", help="Deregister a service by ID")
     p.add_argument("dataset", help="Dataset name")
@@ -541,6 +602,7 @@ DISPATCH = {
     "register-generic":      _cmd_register_generic,
     "register-a2a":          _cmd_register_a2a,
     "register-skill":        _cmd_register_skill,
+    "update":                _cmd_update,
     "deregister":            _cmd_deregister,
     "deregister-skill":      _cmd_deregister_skill,
     "get-register-config":   _cmd_get_register_config,

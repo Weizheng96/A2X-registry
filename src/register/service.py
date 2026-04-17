@@ -22,8 +22,10 @@ from .models import (
     RegisterResponse,
     RegistryEntry,
     RegistryStatus,
+    SkillData,
     SkillResponse,
     TaxonomyState,
+    UpdateResponse,
 )
 from .store import RegistryStore, generate_service_id
 from .validation import (
@@ -276,6 +278,136 @@ class RegistryService:
     def get_skill_zip(self, dataset: str, name: str) -> bytes:
         """Pack a skill folder into a ZIP and return bytes."""
         return self._get_store(dataset).get_skill_zip(name)
+
+    # -----------------------------------------------------------------------
+    # Update (partial field merge)
+    # -----------------------------------------------------------------------
+
+    # Fields the update endpoint accepts per type. For a2a we accept anything
+    # — the AgentCard model has ``extra="allow"`` and the update contract is
+    # "add or replace, never remove". Generic and Skill have strict schemas.
+    _GENERIC_UPDATE_FIELDS = {"name", "description", "inputSchema", "url"}
+    _SKILL_UPDATE_FIELDS   = {"name", "description", "license"}
+
+    def update_service(self, dataset: str, service_id: str,
+                       updates: Dict[str, Any]) -> UpdateResponse:
+        """Partially update a service by top-level field upsert.
+
+        Semantics:
+          - Each key in ``updates`` replaces the matching field on the entry;
+            keys that don't exist yet are added (only for types that accept
+            extras, i.e. a2a).
+          - No format validation — updates never remove required fields, so the
+            original validation guarantees still hold.
+          - If ``name`` or ``description`` actually changed, marks the
+            dataset's taxonomy STALE so the next search re-evaluates it.
+          - Rejects updates to ``user_config`` entries (edit the file instead).
+          - For skill entries, persists to ``SKILL.md`` on disk; a name change
+            also renames the ``skills/{name}/`` folder.
+
+        Raises:
+          KeyError    — service_id not found in dataset
+          ValueError  — user_config source / unknown fields / rename collision
+        """
+        if not isinstance(updates, dict):
+            raise ValueError("updates must be a dict of {field: value}")
+
+        with self._lock:
+            ds = self._entries.get(dataset, {})
+            entry = ds.get(service_id)
+            if entry is None:
+                raise KeyError(f"Service '{service_id}' not found in dataset '{dataset}'")
+            if entry.source == "user_config":
+                raise ValueError(
+                    "Cannot update user_config entries via API. "
+                    "Edit user_config.json directly and restart.")
+
+        # Apply the merge outside the lock — disk writes happen here.
+        if entry.type == "generic":
+            new_entry, changed = self._apply_generic_updates(entry, updates)
+        elif entry.type == "a2a":
+            new_entry, changed = self._apply_a2a_updates(entry, updates)
+        elif entry.type == "skill":
+            new_entry, changed = self._apply_skill_updates(dataset, entry, updates)
+        else:
+            raise ValueError(f"Unsupported entry type: {entry.type!r}")
+
+        # Commit the new in-memory entry.
+        with self._lock:
+            self._entries.setdefault(dataset, {})[service_id] = new_entry
+
+        # Persist: api_config entries round-trip to disk; skill_folder entries
+        # were updated in place during _apply_skill_updates; ephemeral stays
+        # in-memory only.
+        if new_entry.source == "api_config":
+            self._get_store(dataset).save_api_entry(new_entry)
+
+        self._regenerate_output(dataset)
+
+        taxonomy_affected = bool({"name", "description"} & changed)
+        if taxonomy_affected:
+            self._mark_taxonomy_stale(dataset)
+
+        return UpdateResponse(
+            service_id=service_id, dataset=dataset, status="updated",
+            changed_fields=sorted(changed), taxonomy_affected=taxonomy_affected)
+
+    def _apply_generic_updates(self, entry: RegistryEntry,
+                               updates: Dict[str, Any]):
+        unknown = set(updates) - self._GENERIC_UPDATE_FIELDS
+        if unknown:
+            raise ValueError(
+                f"Unknown generic fields: {sorted(unknown)}. "
+                f"Allowed: {sorted(self._GENERIC_UPDATE_FIELDS)}")
+        current = entry.service_data.model_dump() if entry.service_data else {}
+        changed = {k for k, v in updates.items() if current.get(k) != v}
+        current.update(updates)
+        new_data = GenericServiceData(**current)
+        return entry.model_copy(update={"service_data": new_data}), changed
+
+    def _apply_a2a_updates(self, entry: RegistryEntry,
+                           updates: Dict[str, Any]):
+        if entry.agent_card is None:
+            raise ValueError("Cannot update a2a entry with no resolved agent_card")
+        current = entry.agent_card.model_dump()
+        changed = {k for k, v in updates.items() if current.get(k) != v}
+        current.update(updates)
+        new_card = AgentCard(**current)
+        return entry.model_copy(update={"agent_card": new_card}), changed
+
+    def _apply_skill_updates(self, dataset: str, entry: RegistryEntry,
+                             updates: Dict[str, Any]):
+        unknown = set(updates) - self._SKILL_UPDATE_FIELDS
+        if unknown:
+            raise ValueError(
+                f"Unknown skill fields: {sorted(unknown)}. "
+                f"Allowed: {sorted(self._SKILL_UPDATE_FIELDS)}")
+        if entry.skill_data is None:
+            raise ValueError("skill entry has no skill_data")
+
+        current = entry.skill_data.model_dump()
+        changed = {k for k, v in updates.items() if current.get(k) != v}
+        merged = dict(current)
+        merged.update(updates)
+
+        store = self._get_store(dataset)
+        old_name = current["name"]
+        new_name = merged["name"]
+
+        # Rename folder first so subsequent SKILL.md write targets the new path.
+        if new_name != old_name:
+            store.rename_skill(old_name, new_name)
+            merged["skill_path"] = f"skills/{new_name}"
+
+        # Rewrite frontmatter — only the actually-changed fields to preserve
+        # any other YAML keys the user may have kept in the file.
+        md_updates = {k: merged[k] for k in ("name", "description", "license")
+                      if k in changed and merged.get(k) is not None}
+        if md_updates:
+            store.update_skill_md(new_name, md_updates)
+
+        new_data = SkillData(**merged)
+        return entry.model_copy(update={"skill_data": new_data}), changed
 
     def _do_register(self, dataset: str, entry: RegistryEntry, persistent: bool) -> RegisterResponse:
         """Shared logic for register_generic and register_a2a."""
