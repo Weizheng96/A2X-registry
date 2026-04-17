@@ -41,14 +41,17 @@ skills/*/SKILL.md ─┘  RegistryStore
 
 ```
 register_generic / register_a2a:
-  → 校验输入（name/description 非空，A2A 格式验证）
+  → 查数据集 register_config.json 确认类型在允许列表内
+  → 统一格式校验（由对应 FormatValidator 从老→新依次尝试，首个通过即接受）
   → 创建 RegistryEntry
   → 锁内更新 _entries（status: registered / updated）
   → 锁外持久化写 api_config.json（如 persistent=True）
   → _regenerate_output → 对比内存缓存，变化时写 service.json + 触发回调
 
 register_skill(dataset, zip_bytes):
+  → 查数据集 register_config.json 确认 "skill" 在允许列表内
   → 解压 ZIP → 校验 SKILL.md 含 name + description
+  → 统一格式校验（SkillValidator）
   → 存储至 skills/{name}/（已存在则覆盖）
   → 锁内更新 _entries → _regenerate_output
 ```
@@ -97,8 +100,10 @@ python -m src.register [--database-dir DIR] [--config FILE] [--json] [-v] <comma
 | `register-skill DATASET ZIP` | 上传 Skill | `python -m src.register register-skill default skill.zip` |
 | `deregister DATASET SERVICE_ID` | 注销服务 | `python -m src.register deregister default generic_xxx` |
 | `deregister-skill DATASET NAME` | 删除 Skill | `python -m src.register deregister-skill default my-skill` |
-| `create-dataset NAME [--embedding-model M]` | 创建数据集 | `python -m src.register create-dataset myDS` |
+| `create-dataset NAME [--embedding-model M] [--formats SPEC]` | 创建数据集（可声明允许格式） | `python -m src.register create-dataset myDS --formats generic,a2a:v1.0` |
 | `delete-dataset NAME [--confirm]` | 删除数据集 | `python -m src.register delete-dataset old --confirm` |
+| `get-register-config DATASET` | 查看允许的注册格式 | `python -m src.register get-register-config default` |
+| `set-register-config DATASET --formats SPEC` | 修改允许的注册格式 | `python -m src.register set-register-config default --formats a2a:v1.0` |
 
 全局选项：`--json` 输出机器可读 JSON；`-v` 启用 DEBUG 日志。
 
@@ -133,8 +138,13 @@ svc.list_datasets()             # → List[str]
 svc.check_taxonomy_state("ds")  # → Optional[TaxonomyState]
 
 # 数据集生命周期
-svc.create_dataset("name", embedding_model="all-MiniLM-L6-v2")
+svc.create_dataset("name", embedding_model="all-MiniLM-L6-v2",
+                   formats={"generic": "v0.0", "a2a": "v1.0"})
 svc.delete_dataset("name")
+
+# 注册格式配置
+svc.get_register_config("name")                    # → {"generic": "v0.0", ...}
+svc.set_register_config("name", {"a2a": "v1.0"})   # 覆盖式更新
 
 # 回调（后端用于触发向量索引同步）
 svc.set_on_service_changed(lambda dataset: ...)
@@ -183,14 +193,15 @@ svc.set_on_service_changed(lambda dataset: ...)
 
 ```
 database/{dataset}/
-    user_config.json    ← 用户手动编辑（系统只读）
-    api_config.json     ← HTTP/CLI 注册的持久化服务（系统写入）
-    service.json        ← 纯输出（从不作为输入读取）
-    skills/             ← Skill 文件夹（每个子目录含 SKILL.md）
-    removed_skills/     ← 已注销的 Skill（移动而非删除）
+    user_config.json      ← 用户手动编辑（系统只读）
+    api_config.json       ← HTTP/CLI 注册的持久化服务（系统写入）
+    register_config.json  ← 该数据集允许的注册格式列表（类型 + min_version）
+    service.json          ← 纯输出（从不作为输入读取）
+    skills/               ← Skill 文件夹（每个子目录含 SKILL.md）
+    removed_skills/       ← 已注销的 Skill（移动而非删除）
     taxonomy/
-        taxonomy.json   ← 分类树结构
-        class.json      ← 分类元数据
+        taxonomy.json     ← 分类树结构
+        class.json        ← 分类元数据
         build_config.json ← 构建参数 + service_hash
 ```
 
@@ -198,6 +209,7 @@ database/{dataset}/
 |------|------|------|------|
 | `user_config.json` | 用户 | 系统（启动时） | 用户声明的服务 |
 | `api_config.json` | 系统 | 系统（启动时 + 运行时） | HTTP/CLI 注册的持久化服务 |
+| `register_config.json` | 系统 / 用户 | 系统（启动时 + 每次注册） | 数据集允许的注册格式（类型 → min_version） |
 | `skills/*/SKILL.md` | 用户/系统 | 系统（启动时 + 运行时） | Skill 文件夹注册源 |
 | `removed_skills/` | 系统 | — | 已注销 Skill 的归档 |
 | `service.json` | 系统 | A2X / 向量搜索 | 合并后的输出 |
@@ -399,13 +411,31 @@ classDiagram
 
     class ValidationResult {
         +valid: bool
+        +service_type: str
         +matched_version: str
         +errors: List~str~
         +warnings: List~str~
     }
 
+    class FormatValidator {
+        +service_type: str
+        +SUPPORTED_VERSIONS: List~str~
+        +validate(payload, min_version) ValidationResult
+        #_check_version(payload, version) (errors, warnings)
+    }
+
+    class GenericValidator
+    class A2AValidator
+    class SkillValidator
+
+    FormatValidator <|-- GenericValidator
+    FormatValidator <|-- A2AValidator
+    FormatValidator <|-- SkillValidator
+    FormatValidator --> ValidationResult : returns
+
     RegistryService --> RegistryStore : owns (per dataset)
     RegistryService --> RegistryEntry : manages
+    RegistryService --> FormatValidator : dispatches via validate_service
     RegistryStore --> RegistryEntry : reads/writes
     RegistryEntry --> AgentCard : optional
     RegistryEntry --> GenericServiceData : optional
@@ -455,15 +485,63 @@ license: Complete terms in LICENSE.txt
 - 注销：文件夹移至 `removed_skills/`（而非删除）
 - `service_id` 自动生成：`skill_{sha256(name)[:16]}`
 
-## 7. A2A 格式验证
+## 7. 注册格式校验
 
-| 版本 | 必填字段 | 用途 |
-|------|---------|------|
-| **v0.0** | name, description | 兼容非标准 Agent Card |
-| **v1.0** | name, description, version, url, capabilities, defaultInputModes, defaultOutputModes, skills (含 id/name/description/tags) | 完整 A2A v1.0 规范 |
+### 7.1 统一模型
 
-- 验证顺序：**先严后宽**（v1.0 → v0.0），返回最严格的匹配版本
-- 默认允许 `{"v0.0", "v1.0"}`，可通过 `allowed_a2a_versions` 配置
+每种服务类型（`generic` / `a2a` / `skill`）拥有独立的 `FormatValidator` 子类，
+声明其 `SUPPORTED_VERSIONS`（从老到新排序）。数据集通过 `register_config.json`
+声明所接受的类型及每种类型的**最老协议版本**（`min_version`）。
+
+**执行规则**：
+
+1. 注册请求的 `type` 必须在数据集的允许列表内，否则直接拒绝。
+2. 从 `min_version` 起，按 `SUPPORTED_VERSIONS` **从老到新**依次尝试。
+3. 任何版本通过 → 整体通过，记录首个匹配到的版本为 `matched_version`。
+4. 全部失败 → 抛出 `ValueError`，错误信息包含最新版本的具体缺失字段。
+5. 格式校验**只检验必填字段是否存在**；不做业务语义检查。
+
+```
+FormatValidator (ABC)
+├── GenericValidator        SUPPORTED_VERSIONS = ["v0.0"]
+├── SkillValidator          SUPPORTED_VERSIONS = ["v0.0"]
+└── A2AValidator            SUPPORTED_VERSIONS = ["v0.0", "v1.0"]
+```
+
+### 7.2 版本规则
+
+| 类型 | 版本 | 必填字段 | 用途 |
+|------|------|---------|------|
+| **generic** | v0.0 | name, description | 通用服务基线 |
+| **skill** | v0.0 | name, description | SKILL.md frontmatter 基线 |
+| **a2a** | v0.0 | name, description | 兼容非标准 Agent Card |
+| **a2a** | v1.0 | name, description, version, url, capabilities, defaultInputModes, defaultOutputModes, skills (含 id/name/description/tags) | 完整 A2A v1.0 规范 |
+
+**所有 v0.0 只校验 `name` 和 `description`**（由基类 `_check_name_description` 共享实现）。
+
+### 7.3 数据集级配置
+
+每个数据集目录下的 `register_config.json`：
+
+```json
+{
+  "formats": {
+    "generic": "v0.0",
+    "a2a": "v0.0",
+    "skill": "v0.0"
+  }
+}
+```
+
+- 默认（文件缺失时）：三种类型全部允许，`min_version` 均为 `v0.0`。
+- 未声明的类型：拒绝该类型的所有注册。
+- 声明类型但 `min_version=v1.0`：只接受 v1.0 及以上版本的 payload。
+
+### 7.4 兼容旧接口
+
+`validate_agent_card(card, allowed_versions)` 保留作为薄封装：
+将 `allowed_versions` 集合中的最老版本映射为 `min_version` 后调用
+`validate_service("a2a", …)`。新代码请直接使用 `validate_service(type, payload, min_version)`。
 
 ## 8. Taxonomy 状态 (TaxonomyState)
 
@@ -508,13 +586,13 @@ registry_svc.set_on_service_changed(callback)
 
 ```
 src/register/
-    __init__.py          导出 RegistryService, RegistryStore, validate_agent_card
+    __init__.py          导出 RegistryService, RegistryStore, validate_service, FormatValidator, ...
     models.py            Pydantic 数据模型（RegistryEntry, AgentCard, Request/Response 等）
-    store.py             RegistryStore: 单数据集文件 I/O（线程安全）
+    store.py             RegistryStore: 单数据集文件 I/O（含 register_config 读写）
     service.py           RegistryService: 多数据集业务编排（单锁保护所有状态）
     agent_card.py        Agent Card URL 抓取 + description 聚合
-    validation.py        A2A 格式校验（v0.0 / v1.0）
-    __main__.py          CLI 入口（11 个子命令 + 向后兼容旧用法）
+    validation.py        统一格式校验（FormatValidator 基类 + 三种子类；validate_service 入口）
+    __main__.py          CLI 入口（13 个子命令 + 向后兼容旧用法）
 ```
 
 ## 12. 效率

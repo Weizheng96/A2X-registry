@@ -80,14 +80,47 @@ async def list_datasets():
 class CreateDatasetRequest(BaseModel):
     name: str
     embedding_model: str = "all-MiniLM-L6-v2"
+    # Optional {type: min_version} declaring which registration formats this
+    # dataset will accept. Missing/None → all three types allowed from v0.0.
+    formats: Optional[dict] = None
 
 
 @router.post("")
 async def create_dataset(req: CreateDatasetRequest):
-    """Create a new empty dataset directory with embedding config."""
+    """Create a new empty dataset directory with embedding + register-format config."""
     svc = get_registry_service()
-    await _run(svc.create_dataset, req.name, req.embedding_model)
-    return {"dataset": req.name, "embedding_model": req.embedding_model, "status": "created"}
+    await _run(svc.create_dataset, req.name, req.embedding_model, req.formats)
+    return {
+        "dataset": req.name,
+        "embedding_model": req.embedding_model,
+        "formats": svc.get_register_config(req.name),
+        "status": "created",
+    }
+
+
+# ── Registration format config ────────────────────────────────────────────────
+
+class RegisterConfigRequest(BaseModel):
+    formats: dict  # {type: min_version} or {type: {"min_version": "v0.0"}}
+
+
+@router.get("/{dataset}/register-config")
+async def get_register_config(dataset: str):
+    """Return the per-type ``min_version`` map that gates registration."""
+    svc = get_registry_service()
+    return {"dataset": dataset, "formats": svc.get_register_config(dataset)}
+
+
+@router.post("/{dataset}/register-config")
+async def set_register_config(dataset: str, req: RegisterConfigRequest):
+    """Replace the allowed registration formats for a dataset.
+
+    Body: ``{"formats": {"generic": "v0.0", "a2a": "v1.0", "skill": "v0.0"}}``.
+    Unknown types / versions are silently dropped. Empty result → 400.
+    """
+    svc = get_registry_service()
+    cfg = await _run(svc.set_register_config, dataset, req.formats)
+    return {"dataset": dataset, "formats": cfg}
 
 
 @router.delete("/{dataset}")

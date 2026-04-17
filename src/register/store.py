@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 USER_CONFIG_FILE = "user_config.json"
 API_CONFIG_FILE = "api_config.json"
+REGISTER_CONFIG_FILE = "register_config.json"
 SERVICE_JSON_FILE = "service.json"
 SKILLS_DIR = "skills"
 REMOVED_SKILLS_DIR = "removed_skills"
@@ -207,6 +208,32 @@ class RegistryStore:
     def write_service_json(self, services: List[dict]):
         """Atomically write the output service.json."""
         _atomic_write(self._dir / SERVICE_JSON_FILE, services)
+
+    # --- Register-format config ---
+
+    def load_register_config(self) -> Optional[Dict[str, str]]:
+        """Read ``register_config.json`` → ``{type: min_version}``.
+
+        Returns ``None`` when the file is missing; caller substitutes defaults.
+        Returns ``{}`` (empty dict) when the file exists but is malformed /
+        declares no valid formats — caller should surface a hard ban on all
+        types in that case.
+        """
+        path = self._dir / REGISTER_CONFIG_FILE
+        if not path.exists():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load %s: %s", path, exc)
+            return {}
+        from .validation import normalize_format_config
+        return normalize_format_config(data.get("formats"))
+
+    def write_register_config(self, formats: Dict[str, str]) -> None:
+        """Persist ``register_config.json`` with normalized formats dict."""
+        _atomic_write(self._dir / REGISTER_CONFIG_FILE, {"formats": formats})
 
 
 # ---------------------------------------------------------------------------

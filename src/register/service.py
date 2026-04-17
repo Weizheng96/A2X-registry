@@ -10,7 +10,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from .agent_card import build_description, fetch_agent_card
 from .models import (
@@ -26,7 +26,15 @@ from .models import (
     TaxonomyState,
 )
 from .store import RegistryStore, generate_service_id
-from .validation import DEFAULT_ALLOWED_VERSIONS, validate_agent_card
+from .validation import (
+    DEFAULT_ALLOWED_VERSIONS,
+    DEFAULT_FORMAT_CONFIG,
+    SUPPORTED_SERVICE_TYPES,
+    ValidationResult,
+    normalize_format_config,
+    validate_agent_card,
+    validate_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +60,16 @@ class RegistryService:
     ):
         self._database_dir = database_dir
         self._global_config_path = global_config_path
-        self._allowed_a2a_versions = allowed_a2a_versions or DEFAULT_ALLOWED_VERSIONS
+        # Legacy knob kept for callers that still pass an a2a allow-list. When
+        # set, it overrides the per-dataset register_config.json for a2a.
+        self._allowed_a2a_versions = allowed_a2a_versions
         self._stores: Dict[str, RegistryStore] = {}
         # Protected by _lock:
         self._entries: Dict[str, Dict[str, RegistryEntry]] = {}
         self._output_cache: Dict[str, List[dict]] = {}
         self._taxonomy_states: Dict[str, TaxonomyState] = {}
+        # dataset -> {type: min_version}; populated lazily from register_config.json
+        self._format_configs: Dict[str, Dict[str, str]] = {}
         self._lock = threading.Lock()
         # Optional callback: called with dataset name whenever service.json content changes.
         # Used by SearchService to keep the vector index in sync.
@@ -86,15 +98,15 @@ class RegistryService:
             user_entries = store.load_user_config()
             api_entries = store.load_api_config()
 
-            # Merge: api overrides user on same ID; validate A2A entries
+            # Merge: api overrides user on same ID; validate entries against the
+            # dataset's register_config.json (type allow-list + per-type min_version).
             merged = {}
             for e in user_entries + api_entries:
-                if e.type == "a2a" and e.agent_card:
-                    vr = validate_agent_card(e.agent_card, self._allowed_a2a_versions)
-                    if not vr.valid:
-                        logger.warning("Skipping invalid A2A '%s' in %s: %s",
-                                       e.service_id, dataset, "; ".join(vr.errors))
-                        continue
+                vr = self._validate_entry(dataset, e, skip_a2a_url_only=True)
+                if vr is not None and not vr.valid:
+                    logger.warning("Skipping invalid %s '%s' in %s: %s",
+                                   e.type, e.service_id, dataset, "; ".join(vr.errors))
+                    continue
                 merged[e.service_id] = e
                 if e.agent_card_url:
                     url_entries.append((dataset, e))
@@ -102,8 +114,14 @@ class RegistryService:
             # Load skill folders (lowest priority — don't override user_config/api_config)
             skill_entries = store.load_skills()
             for e in skill_entries:
-                if e.service_id not in merged:
-                    merged[e.service_id] = e
+                if e.service_id in merged:
+                    continue
+                vr = self._validate_entry(dataset, e)
+                if vr is not None and not vr.valid:
+                    logger.warning("Skipping invalid skill '%s' in %s: %s",
+                                   e.service_id, dataset, "; ".join(vr.errors))
+                    continue
+                merged[e.service_id] = e
 
             with self._lock:
                 self._entries[dataset] = merged
@@ -111,6 +129,18 @@ class RegistryService:
         # Phase 2: Parallel fetch agent_card_urls
         if url_entries:
             self._fetch_agent_cards_parallel(url_entries)
+            # Re-validate freshly fetched A2A entries against the dataset's
+            # register_config. An entry whose card still fails validation is
+            # dropped (matches Phase 1 behavior for inline cards).
+            for dataset, entry in url_entries:
+                if entry.agent_card is None:
+                    continue
+                vr = self._validate_entry(dataset, entry)
+                if vr is not None and not vr.valid:
+                    logger.warning("Dropping invalid A2A '%s' in %s after fetch: %s",
+                                   entry.service_id, dataset, "; ".join(vr.errors))
+                    with self._lock:
+                        self._entries.get(dataset, {}).pop(entry.service_id, None)
 
         # Phase 3: Generate output and compute taxonomy states
         result = {}
@@ -138,14 +168,14 @@ class RegistryService:
 
     def register_generic(self, req: RegisterGenericRequest) -> RegisterResponse:
         """Register a generic service."""
-        if not (req.name and req.name.strip()):
-            raise ValueError("name is required and cannot be empty")
-        if not (req.description and req.description.strip()):
-            raise ValueError("description is required and cannot be empty")
-
         dataset = req.dataset
-        service_id = req.service_id or generate_service_id("generic", req.name)
+        payload = {
+            "name": req.name, "description": req.description,
+            "url": req.url, "inputSchema": req.inputSchema,
+        }
+        self._require_valid(dataset, "generic", payload)
 
+        service_id = req.service_id or generate_service_id("generic", req.name)
         entry = RegistryEntry(
             service_id=service_id, type="generic",
             source="api_config" if req.persistent else "ephemeral",
@@ -167,11 +197,10 @@ class RegistryService:
         else:
             raise ValueError("Either agent_card or agent_card_url must be provided")
 
-        self._validate_a2a_card(agent_card)
-
         dataset = req.dataset
-        service_id = req.service_id or generate_service_id("agent", agent_card.name)
+        self._require_valid(dataset, "a2a", agent_card)
 
+        service_id = req.service_id or generate_service_id("agent", agent_card.name)
         entry = RegistryEntry(
             service_id=service_id, type="a2a",
             source="api_config" if req.persistent else "ephemeral",
@@ -197,8 +226,17 @@ class RegistryService:
 
     def register_skill(self, dataset: str, zip_bytes: bytes) -> SkillResponse:
         """Upload a skill ZIP, extract to skills/{name}/, register entry."""
+        # Enforce skill allow-list before touching disk — avoids saving a ZIP
+        # the dataset will never accept.
+        self._require_type_allowed(dataset, "skill")
+
         store = self._get_store(dataset)
         skill_data = store.save_skill_zip(zip_bytes)
+
+        # Post-extraction re-validation — trivially passes v0.0 (save_skill_zip
+        # already enforced name+description) but will flag issues once a
+        # skill v1.0+ adds stricter checks.
+        self._require_valid(dataset, "skill", skill_data)
 
         service_id = generate_service_id("skill", skill_data.name)
         entry = RegistryEntry(
@@ -470,25 +508,55 @@ class RegistryService:
     # Dataset lifecycle
     # -----------------------------------------------------------------------
 
-    def create_dataset(self, name: str, embedding_model: str = "all-MiniLM-L6-v2") -> Path:
-        """Create a new empty dataset directory with vector_config.json.
+    def create_dataset(
+        self,
+        name: str,
+        embedding_model: str = "all-MiniLM-L6-v2",
+        formats: Optional[Dict[str, Any]] = None,
+    ) -> Path:
+        """Create a new empty dataset directory with vector + register configs.
+
+        Args:
+            name: Dataset folder name under ``database/``.
+            embedding_model: Vector embedding model key.
+            formats: Per-type min_version map. Defaults to all three types
+                at ``v0.0``. Unknown types / versions are silently dropped.
 
         Returns the dataset directory path.
-        Raises ValueError if the dataset already exists.
+        Raises ValueError if the dataset already exists, or if a non-default
+        ``formats`` normalizes to an empty dict (which would reject every
+        registration).
         """
         from src.vector.utils.embedding import EMBEDDING_MODELS
         ds_dir = self._database_dir / name
         if ds_dir.exists():
             raise ValueError(f"Dataset '{name}' already exists")
+
+        # Normalize formats BEFORE creating the directory so we fail fast on bad input.
+        if formats is None:
+            normalized = dict(DEFAULT_FORMAT_CONFIG)
+        else:
+            normalized = normalize_format_config(formats)
+            if not normalized:
+                raise ValueError(
+                    "formats must declare at least one valid type/version. "
+                    f"Supported types: {list(SUPPORTED_SERVICE_TYPES)}")
+
         ds_dir.mkdir(parents=True)
         (ds_dir / "query").mkdir()
-        # Write vector_config.json
         info = EMBEDDING_MODELS.get(embedding_model, {})
         dim = info.get("dim", 384)
         vc = {"embedding_model": embedding_model, "embedding_dim": dim}
         (ds_dir / "vector_config.json").write_text(
             json.dumps(vc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        logger.info("Created dataset '%s' (embedding: %s)", name, embedding_model)
+
+        # Write register_config.json via the store (atomic) and cache it.
+        self._get_store(name).write_register_config(normalized)
+        with self._lock:
+            self._format_configs[name] = dict(normalized)
+
+        logger.info("Created dataset '%s' (embedding: %s, formats: %s)",
+                    name, embedding_model, normalized)
         return ds_dir
 
     def delete_dataset(self, name: str) -> None:
@@ -505,20 +573,117 @@ class RegistryService:
             self._output_cache.pop(name, None)
             self._taxonomy_states.pop(name, None)
             self._stores.pop(name, None)
+            self._format_configs.pop(name, None)
         shutil.rmtree(ds_dir)
         logger.info("Deleted dataset '%s'", name)
 
     # -----------------------------------------------------------------------
-    # Internal — A2A card fetching
+    # Internal — unified format validation
     # -----------------------------------------------------------------------
 
-    def _validate_a2a_card(self, card: AgentCard):
-        result = validate_agent_card(card, self._allowed_a2a_versions)
+    def get_register_config(self, dataset: str) -> Dict[str, str]:
+        """Return the effective ``{type: min_version}`` map for a dataset.
+
+        Resolution order:
+          1. cached in-memory copy (if already read this session)
+          2. ``<dataset>/register_config.json`` (normalized; unknown types dropped)
+          3. default — all three types allowed from ``v0.0``
+        Missing file → returns defaults AND caches them (does not write).
+        """
+        with self._lock:
+            cached = self._format_configs.get(dataset)
+        if cached is not None:
+            return dict(cached)
+        cfg = self._get_store(dataset).load_register_config()
+        if cfg is None:
+            cfg = dict(DEFAULT_FORMAT_CONFIG)
+        with self._lock:
+            self._format_configs[dataset] = dict(cfg)
+        return dict(cfg)
+
+    def set_register_config(self, dataset: str, formats: Dict[str, Any]) -> Dict[str, str]:
+        """Persist a new ``formats`` mapping for a dataset.
+
+        Unknown types / versions are silently dropped (see ``normalize_format_config``).
+        If the resulting map is empty, raises ``ValueError`` — a dataset with
+        no allowed formats would reject every registration.
+        """
+        cfg = normalize_format_config(formats)
+        if not cfg:
+            raise ValueError(
+                "formats must declare at least one valid type with a known version; "
+                f"supported types: {list(SUPPORTED_SERVICE_TYPES)}")
+        self._get_store(dataset).write_register_config(cfg)
+        with self._lock:
+            self._format_configs[dataset] = dict(cfg)
+        return dict(cfg)
+
+    def _require_type_allowed(self, dataset: str, service_type: str) -> str:
+        """Ensure ``service_type`` is allowed by the dataset config; return its min_version."""
+        cfg = self.get_register_config(dataset)
+        if service_type not in cfg:
+            raise ValueError(
+                f"Service type '{service_type}' is not allowed for dataset '{dataset}'. "
+                f"Allowed: {sorted(cfg.keys())}")
+        return cfg[service_type]
+
+    def _require_valid(self, dataset: str, service_type: str, payload: Any) -> ValidationResult:
+        """Validate or raise ValueError. Returns the passing ValidationResult."""
+        min_version = self._require_type_allowed(dataset, service_type)
+        # Legacy override: fixed a2a allow-list from constructor wins for a2a.
+        if service_type == "a2a" and self._allowed_a2a_versions is not None:
+            result = validate_agent_card(payload, self._allowed_a2a_versions)
+        else:
+            result = validate_service(service_type, payload, min_version)
         if not result.valid:
-            raise ValueError(f"AgentCard '{card.name}' failed validation: {'; '.join(result.errors)}")
+            raise ValueError(
+                f"{service_type} payload failed validation for dataset '{dataset}': "
+                + "; ".join(result.errors))
         if result.warnings:
-            logger.warning("AgentCard '%s' passed as %s with warnings: %s",
-                           card.name, result.matched_version, "; ".join(result.warnings))
+            logger.info("%s payload passed as %s (%s) with warnings: %s",
+                        service_type, result.matched_version, dataset,
+                        "; ".join(result.warnings))
+        return result
+
+    def _validate_entry(self, dataset: str, entry: RegistryEntry,
+                        skip_a2a_url_only: bool = False) -> Optional[ValidationResult]:
+        """Startup-side validation. Returns None when validation is skipped
+        (e.g. an A2A entry whose card has not yet been fetched).
+        """
+        cfg = self.get_register_config(dataset)
+        if entry.type not in cfg:
+            return ValidationResult(
+                valid=False, service_type=entry.type,
+                errors=[f"service type '{entry.type}' not allowed in dataset '{dataset}'"])
+        min_version = cfg[entry.type]
+
+        if entry.type == "a2a":
+            if entry.agent_card is None:
+                # URL-only entries are validated after the fetch phase.
+                return None if skip_a2a_url_only else ValidationResult(
+                    valid=False, service_type="a2a",
+                    errors=["agent_card not present (URL fetch not yet completed)"])
+            if self._allowed_a2a_versions is not None:
+                return validate_agent_card(entry.agent_card, self._allowed_a2a_versions)
+            return validate_service("a2a", entry.agent_card, min_version)
+
+        if entry.type == "generic" and entry.service_data:
+            payload = {
+                "name": entry.service_data.name,
+                "description": entry.service_data.description,
+            }
+            return validate_service("generic", payload, min_version)
+
+        if entry.type == "skill" and entry.skill_data:
+            payload = {
+                "name": entry.skill_data.name,
+                "description": entry.skill_data.description,
+            }
+            return validate_service("skill", payload, min_version)
+
+        return ValidationResult(
+            valid=False, service_type=entry.type,
+            errors=["entry has no payload to validate"])
 
     def _fetch_agent_cards_parallel(self, url_entries: List[tuple]):
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -551,6 +716,7 @@ class RegistryService:
             if d.is_dir() and (
                 (d / USER_CONFIG_FILE).exists()
                 or (d / API_CONFIG_FILE).exists()
+                or (d / "register_config.json").exists()
                 or (d / "skills").is_dir()
             )
         )

@@ -43,6 +43,8 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `GET` | `/api/datasets/embedding-models` | 支持的嵌入模型列表 |
 | `GET` | `/api/datasets/{dataset}/vector-config` | 获取嵌入配置 |
 | `POST` | `/api/datasets/{dataset}/vector-config` | 设置嵌入模型 |
+| `GET` | `/api/datasets/{dataset}/register-config` | 获取允许的注册格式 |
+| `POST` | `/api/datasets/{dataset}/register-config` | 覆盖允许的注册格式 |
 
 ---
 
@@ -62,21 +64,37 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 
 ### POST `/api/datasets`
 
-创建一个新的空数据集目录并配置嵌入模型。
+创建一个新的空数据集目录并配置嵌入模型，同时可声明该数据集接受的注册格式。
 
 **请求体：**
 ```json
 {
   "name": "my_dataset",
-  "embedding_model": "all-MiniLM-L6-v2"
+  "embedding_model": "all-MiniLM-L6-v2",
+  "formats": {
+    "generic": "v0.0",
+    "a2a":     "v0.0",
+    "skill":   "v0.0"
+  }
 }
 ```
 
-`embedding_model` 默认值为 `"all-MiniLM-L6-v2"`。
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `name` | 是 | 数据集名 |
+| `embedding_model` | 否 | 嵌入模型（默认 `"all-MiniLM-L6-v2"`） |
+| `formats` | 否 | `{类型: min_version}` 映射。可选类型：`generic` / `a2a` / `skill`。省略 → 三种全开，均从 `v0.0` 起接受。 |
+
+未列出的类型会被注册端直接拒绝；未知类型 / 版本会被静默丢弃。若 `formats` 正规化后为空集合，返回 400。
 
 **响应：**
 ```json
-{ "dataset": "my_dataset", "embedding_model": "all-MiniLM-L6-v2", "status": "created" }
+{
+  "dataset": "my_dataset",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "formats": { "generic": "v0.0", "a2a": "v0.0", "skill": "v0.0" },
+  "status": "created"
+}
 ```
 
 ---
@@ -332,6 +350,56 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 ```
 
 若模型名未知且未提供 `embedding_dim`，返回 400。
+
+---
+
+### GET `/api/datasets/{dataset}/register-config`
+
+获取该数据集允许的注册格式（类型及每种类型的最老协议版本）。
+
+**响应：**
+```json
+{
+  "dataset": "my_dataset",
+  "formats": { "generic": "v0.0", "a2a": "v0.0", "skill": "v0.0" }
+}
+```
+
+文件缺失时返回全量默认值（三种类型全开，均为 `v0.0`）。
+
+---
+
+### POST `/api/datasets/{dataset}/register-config`
+
+覆盖式替换允许的注册格式（非增量合并）。
+
+**请求体：**
+```json
+{
+  "formats": {
+    "generic": "v0.0",
+    "a2a":     "v1.0"
+  }
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `formats` | 是 | `{类型: min_version}` 映射，也可写成 `{"a2a": {"min_version": "v1.0"}}` |
+
+- 未知类型 / 版本被静默丢弃。
+- 正规化后为空 → 400。
+- 未被列出的类型之后不再接受注册；已注册的服务不会自动清理，下次启动才重新校验并剔除不合规条目。
+
+**响应：**
+```json
+{ "dataset": "my_dataset", "formats": { "generic": "v0.0", "a2a": "v1.0" } }
+```
+
+**注册校验规则**：
+- 注册请求的 `type`（由 endpoint 决定）必须在 `formats` 中，否则 400。
+- 对应类型的 payload 从 `min_version` 起，依类型声明的 `SUPPORTED_VERSIONS` **从老到新**依次尝试；任一版本通过则整体通过。
+- 所有 `v0.0` 只校验 `name` + `description`。更严格的版本（如 A2A v1.0）追加完整字段检查。
 
 ---
 

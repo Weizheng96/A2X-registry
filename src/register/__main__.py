@@ -10,8 +10,10 @@ Usage (subcommands):
     python -m src.register register-skill DATASET ZIP_FILE
     python -m src.register deregister DATASET SERVICE_ID
     python -m src.register deregister-skill DATASET NAME
-    python -m src.register create-dataset NAME [--embedding-model MODEL]
+    python -m src.register create-dataset NAME [--embedding-model MODEL] [--formats SPEC]
     python -m src.register delete-dataset NAME [--confirm]
+    python -m src.register get-register-config DATASET
+    python -m src.register set-register-config DATASET --formats SPEC
 
 Legacy usage (still supported):
     python -m src.register --config path/to/config.json
@@ -34,6 +36,7 @@ SUBCOMMANDS = {
     "status", "datasets", "create-dataset", "delete-dataset",
     "list", "get", "register-generic", "register-a2a",
     "register-skill", "deregister", "deregister-skill",
+    "get-register-config", "set-register-config",
 }
 
 
@@ -101,11 +104,60 @@ def _cmd_datasets(service: RegistryService, args):
 
 
 def _cmd_create_dataset(service: RegistryService, args):
-    path = service.create_dataset(args.name, args.embedding_model)
+    formats = _parse_formats_spec(args.formats) if args.formats else None
+    service.create_dataset(args.name, args.embedding_model, formats=formats)
+    effective = service.get_register_config(args.name)
     if args.json_output:
-        _print_json({"dataset": args.name, "embedding_model": args.embedding_model, "status": "created"})
+        _print_json({"dataset": args.name, "embedding_model": args.embedding_model,
+                     "formats": effective, "status": "created"})
         return
     print(f"Created dataset '{args.name}' (embedding: {args.embedding_model})")
+    print("  Allowed formats:")
+    for t, v in sorted(effective.items()):
+        print(f"    {t:<8} min_version={v}")
+
+
+def _cmd_get_register_config(service: RegistryService, args):
+    cfg = service.get_register_config(args.dataset)
+    if args.json_output:
+        _print_json({"dataset": args.dataset, "formats": cfg})
+        return
+    print(f"Register config for '{args.dataset}':")
+    for t, v in sorted(cfg.items()):
+        print(f"  {t:<8} min_version={v}")
+
+
+def _cmd_set_register_config(service: RegistryService, args):
+    formats = _parse_formats_spec(args.formats)
+    cfg = service.set_register_config(args.dataset, formats)
+    if args.json_output:
+        _print_json({"dataset": args.dataset, "formats": cfg})
+        return
+    print(f"Updated register config for '{args.dataset}':")
+    for t, v in sorted(cfg.items()):
+        print(f"  {t:<8} min_version={v}")
+
+
+def _parse_formats_spec(spec: str) -> dict:
+    """Parse a comma-separated formats spec.
+
+    Examples:
+      "generic,a2a,skill"                   → all types at v0.0
+      "generic:v0.0,a2a:v1.0"               → explicit versions
+      "a2a:v1.0"                            → single type, only v1.0+
+    Unknown types / versions are silently dropped downstream.
+    """
+    out = {}
+    for piece in spec.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if ":" in piece:
+            t, v = piece.split(":", 1)
+            out[t.strip()] = v.strip()
+        else:
+            out[piece] = "v0.0"
+    return out
 
 
 def _cmd_delete_dataset(service: RegistryService, args):
@@ -361,6 +413,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="Dataset name")
     p.add_argument("--embedding-model", default="all-MiniLM-L6-v2",
                    help="Embedding model (default: all-MiniLM-L6-v2)")
+    p.add_argument("--formats", default=None,
+                   help="Comma-separated allowed formats. "
+                        "Examples: 'generic,a2a,skill' (all v0.0) or "
+                        "'generic:v0.0,a2a:v1.0'. Default: all three at v0.0.")
+
+    # get-register-config
+    p = sub.add_parser("get-register-config", help="Show allowed registration formats")
+    p.add_argument("dataset", help="Dataset name")
+
+    # set-register-config
+    p = sub.add_parser("set-register-config", help="Replace allowed registration formats")
+    p.add_argument("dataset", help="Dataset name")
+    p.add_argument("--formats", required=True,
+                   help="Comma-separated formats spec (e.g. 'generic,a2a:v1.0')")
 
     # delete-dataset
     p = sub.add_parser("delete-dataset", help="Delete a dataset")
@@ -466,17 +532,19 @@ def _handle_legacy(argv: list):
 # ---------------------------------------------------------------------------
 
 DISPATCH = {
-    "status":            _cmd_status,
-    "datasets":          _cmd_datasets,
-    "create-dataset":    _cmd_create_dataset,
-    "delete-dataset":    _cmd_delete_dataset,
-    "list":              _cmd_list,
-    "get":               _cmd_get,
-    "register-generic":  _cmd_register_generic,
-    "register-a2a":      _cmd_register_a2a,
-    "register-skill":    _cmd_register_skill,
-    "deregister":        _cmd_deregister,
-    "deregister-skill":  _cmd_deregister_skill,
+    "status":                _cmd_status,
+    "datasets":              _cmd_datasets,
+    "create-dataset":        _cmd_create_dataset,
+    "delete-dataset":        _cmd_delete_dataset,
+    "list":                  _cmd_list,
+    "get":                   _cmd_get,
+    "register-generic":      _cmd_register_generic,
+    "register-a2a":          _cmd_register_a2a,
+    "register-skill":        _cmd_register_skill,
+    "deregister":            _cmd_deregister,
+    "deregister-skill":      _cmd_deregister_skill,
+    "get-register-config":   _cmd_get_register_config,
+    "set-register-config":   _cmd_set_register_config,
 }
 
 
