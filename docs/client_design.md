@@ -510,6 +510,44 @@ sequenceDiagram
     end
 ```
 
+#### 3.4.1 `NotFound` 分层约定
+
+`update_agent` / `set_team_count` / `deregister_agent` 这类 mutation 在“目标 service 不存在”时，推荐明确遵守以下三层契约：
+
+```mermaid
+flowchart LR
+    A["RegistryService\n(后端业务层)"] -->|"raise RegistryNotFoundError"| B["FastAPI Router\n(协议适配层)"]
+    B -->|"map to HTTPException(404)"| C["HTTP Response\n404 Not Found"]
+    C -->|"httpx receives 404"| D["SDK Transport\n_wrap_http_error()"]
+    D -->|"raise NotFoundError"| E["A2XClient / AsyncA2XClient"]
+    E -->|"re-raise to caller\n(and cleanup ownership if needed)"| F["Developer Code"]
+```
+
+三层各自的职责：
+
+- `RegistryNotFoundError`
+  后端**业务层**异常，只表达“dataset / service / skill 在业务上不存在”，不携带 HTTP 语义。
+- `HTTP 404`
+  后端 **API 层** 对外协议语义。Router 负责把业务层的“not found”翻译成统一的 `404 Not Found`。
+- `SDK NotFoundError`
+  客户端 **Python 语义**。SDK transport 把 HTTP 404 统一包装成 `NotFoundError`，业务方法可在此基础上补做本地修复逻辑（例如 ownership cleanup）。
+
+设计原则：
+
+- **业务层不直接抛 `HTTPException`**，避免 `RegistryService` 与 Web 框架耦合。
+- **业务层尽量不用裸 `KeyError` 表达资源不存在**，因为语义过泛，且 `str(KeyError(...))` 文案不稳定。
+- **不存在应优先走 404，而不是 200 + `status="not_found"`**，否则 SDK 无法稳定触发 `NotFoundError` 分支与 ownership 自动清理。
+
+推荐的调用链应当是：
+
+1. `RegistryService` 发现 service 不存在，抛 `RegistryNotFoundError`
+2. Router 统一映射为 HTTP 404
+3. SDK transport 统一映射为 `NotFoundError`
+4. `A2XClient` / `AsyncA2XClient` 在捕获 `NotFoundError` 后执行本地 `_owned.remove(...)`
+5. 再将 `NotFoundError` 重抛给调用方
+
+这样可以保证：**后端内部语义、HTTP 对外契约、SDK Python 异常语义** 三层一致。
+
 ### 3.5 `set_team_count`
 
 ```mermaid
@@ -614,18 +652,16 @@ sequenceDiagram
             Client->>Own: remove(dataset, sid)
             Client--xDev: 重抛 NotFoundError
         else 200
-            API-->>HTTP: 200 {service_id, status:"deregistered"|"not_found"}
+            API-->>HTTP: 200 {service_id, status:"deregistered"}
             HTTP-->>Client: Response
             Client->>Client: DeregisterResponse.from_dict(...)
-            Client->>Own: remove(dataset, sid)<br/>（"not_found" 也清，保持一致）
+            Client->>Own: remove(dataset, sid)
             Own->>Own: lock → _data[ds].discard(sid)<br/>_save_locked()
             Own-->>Client: 
             Client-->>Dev: DeregisterResponse
         end
     end
 ```
-
-> 后端 `status:"not_found"` 仍返回 200，SDK 同样从 `_owned` 移除。
 
 ### 3.9 `delete_dataset`
 
@@ -668,7 +704,7 @@ sequenceDiagram
 | `set_team_count` | `PUT` | 同上 | body 固定为 `{"agentTeamCount": count}`；count 本地校验 |
 | `list_agents` | `GET` | `/api/datasets/{ds}/services?mode=browse` | 空数据集/不存在 → `[]` |
 | `get_agent` | `GET` | `/api/datasets/{ds}/services?mode=single&service_id=...` | content-type 分支：JSON → AgentDetail；ZIP → `UnexpectedServiceTypeError` |
-| `deregister_agent` | `DELETE` | `/api/datasets/{ds}/services/{sid}` | 200 `"not_found"` 与 `"deregistered"` 同路径处理；成功后清 `_owned` |
+| `deregister_agent` | `DELETE` | `/api/datasets/{ds}/services/{sid}` | 404 自动清 `_owned` 并重抛；200 `"deregistered"` 时清 `_owned` |
 | `delete_dataset` | `DELETE` | `/api/datasets/{ds}` | 200 和 400 都清 `_owned[name]` |
 
 **参数转换通用规则**：
