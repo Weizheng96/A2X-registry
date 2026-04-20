@@ -22,10 +22,12 @@ def _mock(handler):
 
 
 def _swap_client(transport: HTTPTransport, mock_transport: httpx.MockTransport) -> None:
-    """Replace the underlying httpx client with one using the given mock transport."""
+    """Replace the underlying httpx client, preserving default headers from init."""
+    headers = dict(transport._client.headers)
     transport._client.close()
     transport._client = httpx.Client(
         base_url=str(transport._client.base_url),
+        headers=headers,
         transport=mock_transport,
     )
 
@@ -111,4 +113,118 @@ class TestResponsePassthrough:
         assert "api/datasets" in seen["url"]
         assert "mode=browse" in seen["url"]
         assert _json.loads(seen["body"]) == {"name": "ds"}
+        t.close()
+
+
+class TestHeaders:
+    def test_api_key_becomes_bearer_header(self):
+        seen = {}
+
+        def capture(req):
+            seen["auth"] = req.headers.get("authorization")
+            return httpx.Response(200, json={})
+
+        t = HTTPTransport(base_url="http://x/", headers={"Authorization": "Bearer secret-abc"})
+        _swap_client(t, _mock(capture))
+        t.request("GET", "foo")
+        assert seen["auth"] == "Bearer secret-abc"
+        t.close()
+
+    def test_no_headers_means_no_auth(self):
+        seen = {}
+
+        def capture(req):
+            seen["auth"] = req.headers.get("authorization")
+            return httpx.Response(200, json={})
+
+        t = HTTPTransport(base_url="http://x/")
+        _swap_client(t, _mock(capture))
+        t.request("GET", "foo")
+        assert seen["auth"] is None
+        t.close()
+
+
+class TestTimeout:
+    def test_connect_timeout_wrapped_as_connection_error(self):
+        t = HTTPTransport(base_url="http://x/")
+
+        def raise_timeout(req):
+            raise httpx.ConnectTimeout("slow")
+
+        _swap_client(t, _mock(raise_timeout))
+        with pytest.raises(A2XConnectionError):
+            t.request("GET", "foo")
+        t.close()
+
+    def test_read_timeout_wrapped(self):
+        t = HTTPTransport(base_url="http://x/")
+
+        def raise_timeout(req):
+            raise httpx.ReadTimeout("slow read")
+
+        _swap_client(t, _mock(raise_timeout))
+        with pytest.raises(A2XConnectionError):
+            t.request("GET", "foo")
+        t.close()
+
+    def test_timeout_value_propagated_to_underlying_client(self):
+        custom = 7.25
+        t = HTTPTransport(base_url="http://x/", timeout=custom)
+        # httpx stores a Timeout instance; its .connect / .read / .write are all ``custom``.
+        assert t._client.timeout.connect == custom
+        assert t._client.timeout.read == custom
+        t.close()
+
+
+class TestCloseBehavior:
+    def test_close_idempotent_and_marks_client_closed(self):
+        t = HTTPTransport(base_url="http://x/")
+        assert t._client.is_closed is False
+        t.close()
+        assert t._client.is_closed is True
+        t.close()  # second close must not raise
+
+    def test_context_manager_closes_transport(self):
+        with HTTPTransport(base_url="http://x/") as t:
+            inner = t._client
+            assert inner.is_closed is False
+        assert inner.is_closed is True
+
+
+class TestNonJsonErrorBody:
+    """Server-side 4xx/5xx with non-JSON body must not crash the error mapper."""
+
+    def test_html_body_does_not_crash(self):
+        t = HTTPTransport(base_url="http://x/")
+        _swap_client(t, _mock(
+            lambda req: httpx.Response(
+                503,
+                content=b"<html>service unavailable</html>",
+                headers={"content-type": "text/html"},
+            )
+        ))
+        with pytest.raises(ServerError) as exc_info:
+            t.request("GET", "foo")
+        assert exc_info.value.payload is None
+        assert exc_info.value.status_code == 503
+        t.close()
+
+    def test_plain_text_body_does_not_crash(self):
+        t = HTTPTransport(base_url="http://x/")
+        _swap_client(t, _mock(
+            lambda req: httpx.Response(
+                400, content=b"Bad Request",
+                headers={"content-type": "text/plain"},
+            )
+        ))
+        with pytest.raises(ValidationError) as exc_info:
+            t.request("GET", "foo")
+        assert exc_info.value.status_code == 400
+        t.close()
+
+    def test_empty_body_on_error(self):
+        t = HTTPTransport(base_url="http://x/")
+        _swap_client(t, _mock(lambda req: httpx.Response(500, content=b"")))
+        with pytest.raises(ServerError):
+            t.request("GET", "foo")
         t.close()

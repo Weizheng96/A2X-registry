@@ -271,3 +271,645 @@ def test_subpath_base_url_preserved_in_request(tmp_path):
     client.create_dataset("ds", embedding_model="m")
     assert seen["path"] == "/prefix/api/datasets"
     client.close()
+
+
+# ── create_dataset additional cases ──────────────────────────────────────────
+
+def test_create_dataset_custom_embedding_model(tmp_path):
+    def handler(req):
+        import json as _json
+        body = _json.loads(req.content)
+        assert body["embedding_model"] == "bge-m3"
+        return httpx.Response(200, json={
+            "dataset": "ds", "embedding_model": "bge-m3",
+            "formats": {"a2a": "v0.0"}, "status": "created",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    client.create_dataset("ds", embedding_model="bge-m3")
+    client.close()
+
+
+def test_create_dataset_custom_formats(tmp_path):
+    def handler(req):
+        import json as _json
+        body = _json.loads(req.content)
+        assert body["formats"] == {"a2a": "v0.0", "generic": "v0.0"}
+        return httpx.Response(200, json={
+            "dataset": "ds", "embedding_model": "m",
+            "formats": body["formats"], "status": "created",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    client.create_dataset("ds", embedding_model="m",
+                          formats={"a2a": "v0.0", "generic": "v0.0"})
+    client.close()
+
+
+def test_create_dataset_does_not_touch_ownership(tmp_path):
+    """Datasets have no per-client creator tracking."""
+    def handler(req):
+        return httpx.Response(200, json={
+            "dataset": "ds", "embedding_model": "m",
+            "formats": {"a2a": "v0.0"}, "status": "created",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    client.create_dataset("ds")
+    assert client._owned._data == {}
+    client.close()
+
+
+def test_create_dataset_validation_error(tmp_path):
+    def handler(req):
+        return httpx.Response(400, json={"detail": "invalid name"})
+    client, _ = _make_client(handler, tmp_path)
+    with pytest.raises(ValidationError) as exc_info:
+        client.create_dataset("bad")
+    assert exc_info.value.payload["detail"] == "invalid name"
+    client.close()
+
+
+# ── register_agent — full-card preservation and corner cases ─────────────────
+
+def test_register_agent_full_card_passes_through_unchanged(tmp_path):
+    """Agent card fields (camelCase, nested, custom) must not be rewritten."""
+    card = {
+        "protocolVersion": "0.0",
+        "name": "N", "description": "D",
+        "skills": [{"name": "s", "description": "d"}],
+        "provider": {"organization": "O", "url": "U"},
+        "capabilities": {"streaming": True},
+        "defaultInputModes": ["text/plain"],
+        "agentTeamCount": 0,
+        "custom_x": 42,
+    }
+    captured = {}
+
+    def handler(req):
+        import json as _json
+        captured["body"] = _json.loads(req.content)
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "registered",
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client.register_agent("ds", card)
+    # agent_card field wraps the original dict unchanged
+    assert captured["body"]["agent_card"] == card
+    # camelCase must not be mangled to snake_case
+    assert "protocolVersion" in captured["body"]["agent_card"]
+    assert "defaultInputModes" in captured["body"]["agent_card"]
+    client.close()
+
+
+def test_register_agent_with_explicit_service_id(tmp_path):
+    def handler(req):
+        import json as _json
+        body = _json.loads(req.content)
+        assert body["service_id"] == "my_custom_id"
+        return httpx.Response(200, json={
+            "service_id": "my_custom_id", "dataset": "ds", "status": "registered",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    r = client.register_agent("ds", {"name": "N", "description": "D"},
+                              service_id="my_custom_id")
+    assert r.service_id == "my_custom_id"
+    assert client._owned.contains("ds", "my_custom_id")
+    client.close()
+
+
+def test_register_agent_service_id_none_not_in_body(tmp_path):
+    """service_id=None should be filtered out of the body."""
+    def handler(req):
+        import json as _json
+        body = _json.loads(req.content)
+        assert "service_id" not in body
+        return httpx.Response(200, json={
+            "service_id": "auto-generated", "dataset": "ds", "status": "registered",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    client.register_agent("ds", {"name": "N", "description": "D"})
+    client.close()
+
+
+def test_register_agent_updated_status_also_tracked(tmp_path):
+    """Re-registering same service_id returns status=updated; still add to _owned."""
+    def handler(req):
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "updated",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    r = client.register_agent("ds", {"name": "N", "description": "D"})
+    assert r.status == "updated"
+    assert client._owned.contains("ds", "sid")
+    client.close()
+
+
+def test_register_agent_400_does_not_track(tmp_path):
+    """Validation failures must leave _owned clean."""
+    def handler(req):
+        return httpx.Response(400, json={"detail": "bad format"})
+    client, _ = _make_client(handler, tmp_path)
+    with pytest.raises(ValidationError):
+        client.register_agent("ds", {"name": "N", "description": "D"})
+    assert client._owned._data == {}
+    client.close()
+
+
+# ── update_agent — body + response ───────────────────────────────────────────
+
+def test_update_agent_body_is_fields_dict_verbatim(tmp_path):
+    """Body is the fields dict itself, no wrapping."""
+    captured = {}
+
+    def handler(req):
+        import json as _json
+        captured["body"] = _json.loads(req.content)
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "updated",
+            "changed_fields": ["description", "skills"], "taxonomy_affected": False,
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    fields = {"description": "new", "skills": [{"name": "s", "description": "d"}]}
+    r = client.update_agent("ds", "sid", fields)
+    assert captured["body"] == fields
+    assert r.changed_fields == ["description", "skills"]
+    assert r.taxonomy_affected is False
+    client.close()
+
+
+def test_update_agent_taxonomy_affected_true(tmp_path):
+    def handler(req):
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "updated",
+            "changed_fields": ["name"], "taxonomy_affected": True,
+        })
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    r = client.update_agent("ds", "sid", {"name": "NewName"})
+    assert r.taxonomy_affected is True
+    client.close()
+
+
+def test_update_agent_400_does_not_clear_ownership(tmp_path):
+    """Validation errors (not 404) must not touch _owned."""
+    def handler(req):
+        return httpx.Response(400, json={"detail": "conflict"})
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    with pytest.raises(ValidationError):
+        client.update_agent("ds", "sid", {"name": "X"})
+    assert client._owned.contains("ds", "sid")
+    client.close()
+
+
+# ── set_team_count edge cases ────────────────────────────────────────────────
+
+def test_set_team_count_zero_is_valid(tmp_path):
+    """count=0 must not be treated as falsy / dropped."""
+    def handler(req):
+        import json as _json
+        assert _json.loads(req.content) == {"agentTeamCount": 0}
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "updated",
+            "changed_fields": ["agentTeamCount"], "taxonomy_affected": False,
+        })
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    client.set_team_count("ds", "sid", 0)
+    client.close()
+
+
+@pytest.mark.parametrize("bad", [1.5, "3", None, True, False])
+def test_set_team_count_rejects_non_int(tmp_path, bad):
+    def handler(req):
+        pytest.fail("HTTP should not be called on invalid count")
+    client, reqs = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    with pytest.raises(ValueError):
+        client.set_team_count("ds", "sid", bad)
+    assert reqs == []
+    client.close()
+
+
+def test_set_team_count_field_name_fixed(tmp_path):
+    """Field name is SDK-owned, callers cannot influence it."""
+    captured = {}
+
+    def handler(req):
+        import json as _json
+        captured["body"] = _json.loads(req.content)
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "updated",
+            "changed_fields": [], "taxonomy_affected": False,
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    client.set_team_count("ds", "sid", 5)
+    # exactly one top-level key; name fixed
+    assert list(captured["body"].keys()) == ["agentTeamCount"]
+    client.close()
+
+
+# ── list_agents ──────────────────────────────────────────────────────────────
+
+def test_list_agents_empty_returns_empty_list(tmp_path):
+    def handler(req):
+        return httpx.Response(200, json=[])
+    client, _ = _make_client(handler, tmp_path)
+    assert client.list_agents("ds") == []
+    client.close()
+
+
+def test_list_agents_no_ownership_required(tmp_path):
+    """Reads work even when _owned is empty."""
+    def handler(req):
+        return httpx.Response(200, json=[{"id": "a", "name": "A", "description": "a"}])
+    client, _ = _make_client(handler, tmp_path)
+    assert client._owned._data == {}
+    briefs = client.list_agents("ds")
+    assert len(briefs) == 1
+    client.close()
+
+
+def test_list_agents_tolerates_extra_fields(tmp_path):
+    def handler(req):
+        return httpx.Response(200, json=[
+            {"id": "a", "name": "A", "description": "a", "type": "a2a", "extra": "x"},
+        ])
+    client, _ = _make_client(handler, tmp_path)
+    briefs = client.list_agents("ds")
+    assert briefs[0].id == "a"
+    assert not hasattr(briefs[0], "extra")
+    client.close()
+
+
+# ── get_agent — URL and edge cases ───────────────────────────────────────────
+
+def test_get_agent_query_params_correct(tmp_path):
+    captured = {}
+
+    def handler(req):
+        captured["query"] = dict(req.url.params.multi_items())
+        return httpx.Response(200, json={
+            "id": "sid", "type": "a2a", "name": "N", "description": "D", "metadata": {},
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client.get_agent("ds", "sid")
+    assert captured["query"]["mode"] == "single"
+    assert captured["query"]["service_id"] == "sid"
+    client.close()
+
+
+def test_get_agent_404(tmp_path):
+    def handler(req):
+        return httpx.Response(404, json={"detail": "not found"})
+    client, _ = _make_client(handler, tmp_path)
+    with pytest.raises(NotFoundError):
+        client.get_agent("ds", "no_such_sid")
+    client.close()
+
+
+def test_get_agent_malformed_json_body_raises(tmp_path):
+    """Unexpected: 200 but body is not a JSON object → raise, don't crash."""
+    def handler(req):
+        return httpx.Response(
+            200, json="not a dict",
+            headers={"content-type": "application/json"},
+        )
+    client, _ = _make_client(handler, tmp_path)
+    with pytest.raises(UnexpectedServiceTypeError):
+        client.get_agent("ds", "sid")
+    client.close()
+
+
+# ── URL encoding in paths (X-URL-*) ─────────────────────────────────────────
+
+@pytest.mark.parametrize("ds_name, encoded_segment", [
+    ("my team", "my%20team"),
+    ("研究团队", "%E7%A0%94%E7%A9%B6%E5%9B%A2%E9%98%9F"),
+    ("my#ds", "my%23ds"),
+])
+def test_dataset_name_url_encoded_on_wire(tmp_path, ds_name, encoded_segment):
+    """The encoded form must appear in the on-the-wire raw path.
+
+    httpx's ``url.path`` is percent-decoded for display; ``url.raw_path`` is
+    the bytes actually sent. We assert against the latter.
+    """
+    captured = {}
+
+    def handler(req):
+        captured["raw_path"] = req.url.raw_path
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": ds_name, "status": "registered",
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client.register_agent(ds_name, {"name": "N", "description": "D"})
+    assert encoded_segment.encode("ascii") in captured["raw_path"]
+    client.close()
+
+
+def test_service_id_with_slash_stays_in_query_string(tmp_path):
+    """get_agent places service_id in query string → slashes can't walk the URL."""
+    captured = {}
+
+    def handler(req):
+        captured["path"] = req.url.path
+        captured["raw_query"] = req.url.query.decode()
+        return httpx.Response(200, json={
+            "id": "s/../x", "type": "a2a", "name": "N", "description": "D", "metadata": {},
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client.get_agent("ds", "s/../x")
+    # Path must stop at /services — the slash-laden sid never enters the path.
+    assert captured["path"].endswith("/services")
+    assert "service_id=s%2F..%2Fx" in captured["raw_query"]
+    client.close()
+
+
+def test_service_id_with_slash_encoded_in_path(tmp_path):
+    """update_agent / deregister_agent put sid in path → must URL-encode."""
+    captured = {}
+
+    def handler(req):
+        captured["raw_path"] = req.url.raw_path
+        return httpx.Response(200, json={
+            "service_id": "s/1", "dataset": "ds", "status": "updated",
+            "changed_fields": [], "taxonomy_affected": False,
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "s/1")
+    client.update_agent("ds", "s/1", {"description": "x"})
+    # Encoded %2F must appear on the wire; literal slash would split segments.
+    assert b"/s%2F1" in captured["raw_path"]
+    client.close()
+
+
+# ── api_key injection (M-INIT-005/006) ───────────────────────────────────────
+
+def test_api_key_injected_as_bearer(tmp_path):
+    captured = {}
+
+    def handler(req):
+        captured["auth"] = req.headers.get("authorization")
+        return httpx.Response(200, json=[])
+
+    client = A2XClient(
+        base_url="http://test", api_key="secret_token",
+        ownership_file=tmp_path / "x.json",
+    )
+    # Preserve the default headers from __init__ when swapping the transport.
+    default_headers = dict(client._transport._client.headers)
+    client._transport._client.close()
+    client._transport._client = httpx.Client(
+        base_url=client.base_url,
+        headers=default_headers,
+        transport=httpx.MockTransport(handler),
+    )
+    client.list_agents("ds")
+    assert captured["auth"] == "Bearer secret_token"
+    client.close()
+
+
+def test_no_api_key_means_no_auth_header(tmp_path):
+    captured = {}
+
+    def handler(req):
+        captured["auth"] = req.headers.get("authorization")
+        return httpx.Response(200, json=[])
+
+    client, _ = _make_client(handler, tmp_path)
+    client.list_agents("ds")
+    assert captured["auth"] is None
+    client.close()
+
+
+# ── Pre-existing owned.json loaded on init (M-INIT-009) ─────────────────────
+
+def test_preexisting_owned_json_is_loaded(tmp_path):
+    """Starting a new client should pick up ownership from disk."""
+    import json as _json
+    path = tmp_path / "owned.json"
+    path.write_text(_json.dumps({
+        "schema_version": 1,
+        "data": {"http://test/": {"ds": ["pre_sid"]}},
+    }), encoding="utf-8")
+
+    def handler(req):
+        return httpx.Response(200, json={
+            "service_id": "pre_sid", "dataset": "ds", "status": "updated",
+            "changed_fields": ["description"], "taxonomy_affected": False,
+        })
+
+    # Client sees ownership without ever calling register_agent
+    client = A2XClient(base_url="http://test", ownership_file=path)
+    assert client._owned.contains("ds", "pre_sid")
+    client._transport._client.close()
+    client._transport._client = httpx.Client(
+        base_url=client.base_url, transport=httpx.MockTransport(handler)
+    )
+    # Should succeed without NotOwnedError
+    client.update_agent("ds", "pre_sid", {"description": "new"})
+    client.close()
+
+
+# ── Context manager (M-INIT-007) ────────────────────────────────────────────
+
+def test_context_manager_closes_transport(tmp_path):
+    with A2XClient(base_url="http://test", ownership_file=tmp_path / "x.json") as client:
+        transport_client = client._transport._client
+        assert transport_client.is_closed is False
+    assert transport_client.is_closed is True
+
+
+# ── Connection error mapping ────────────────────────────────────────────────
+
+def test_connection_error_wrapped(tmp_path):
+    """All methods must surface A2XConnectionError, not bare httpx exceptions."""
+    from src.client import A2XConnectionError
+
+    def handler(req):
+        raise httpx.ConnectError("refused")
+
+    client, _ = _make_client(handler, tmp_path)
+    with pytest.raises(A2XConnectionError):
+        client.list_agents("ds")
+    client.close()
+
+
+# ── Deregister additional cases ──────────────────────────────────────────────
+
+def test_deregister_returning_not_found_status_still_clears(tmp_path):
+    """Backend 200 + status='not_found' is success; local _owned must still clear."""
+    def handler(req):
+        return httpx.Response(200, json={
+            "service_id": "sid", "status": "not_found",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    r = client.deregister_agent("ds", "sid")
+    assert r.status == "not_found"
+    assert not client._owned.contains("ds", "sid")
+    client.close()
+
+
+def test_deregister_user_config_source_raises_specialized(tmp_path):
+    from src.client import UserConfigServiceImmutableError
+
+    def handler(req):
+        return httpx.Response(400, json={
+            "detail": "Cannot deregister user_config-sourced service"
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    with pytest.raises(UserConfigServiceImmutableError):
+        client.deregister_agent("ds", "sid")
+    # _owned should stay — user_config service still exists server-side
+    assert client._owned.contains("ds", "sid")
+    client.close()
+
+
+def test_deregister_twice_second_is_local_fail_fast(tmp_path):
+    """After a successful deregister the sid is no longer owned → NotOwnedError."""
+    def handler(req):
+        return httpx.Response(200, json={"service_id": "sid", "status": "deregistered"})
+    client, reqs = _make_client(handler, tmp_path)
+    client._owned.add("ds", "sid")
+    client.deregister_agent("ds", "sid")
+    assert len(reqs) == 1
+
+    with pytest.raises(NotOwnedError):
+        client.deregister_agent("ds", "sid")
+    # Still only one HTTP call — second attempt fail-fast.
+    assert len(reqs) == 1
+    client.close()
+
+
+# ── delete_dataset additional cases ──────────────────────────────────────────
+
+def test_delete_dataset_no_ownership_check(tmp_path):
+    """delete_dataset is not gated by _owned — anyone who knows the name can delete."""
+    def handler(req):
+        return httpx.Response(200, json={"dataset": "foreign_ds", "status": "deleted"})
+    client, _ = _make_client(handler, tmp_path)
+    # _owned has nothing about "foreign_ds"
+    r = client.delete_dataset("foreign_ds")
+    assert r.status == "deleted"
+    client.close()
+
+
+# ── Response schema forward-compat ───────────────────────────────────────────
+
+def test_register_response_tolerates_extra_fields(tmp_path):
+    def handler(req):
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "registered",
+            "future_field": "ok", "server_version": "1.2.3",
+        })
+    client, _ = _make_client(handler, tmp_path)
+    r = client.register_agent("ds", {"name": "N", "description": "D"})
+    assert r.service_id == "sid"
+    client.close()
+
+
+# ── property getters (L2) ───────────────────────────────────────────────────
+
+def test_properties_reflect_init_values(tmp_path):
+    client = A2XClient(
+        base_url="http://test:9999",
+        timeout=12.5,
+        api_key="abc",
+        ownership_file=tmp_path / "x.json",
+    )
+    assert client.base_url == "http://test:9999/"
+    assert client.timeout == 12.5
+    assert client.api_key == "abc"
+    client.close()
+
+
+@pytest.mark.parametrize("attr", ["timeout", "api_key"])
+def test_properties_are_read_only(tmp_path, attr):
+    client = A2XClient(base_url="http://test", ownership_file=tmp_path / "x.json")
+    with pytest.raises(AttributeError):
+        setattr(client, attr, "mutated")
+    client.close()
+
+
+# ── Corner cases that could silently regress ────────────────────────────────
+
+def test_get_agent_without_content_type_header_raises(tmp_path):
+    """Servers that omit Content-Type should trigger the fallback branch."""
+    def handler(req):
+        # Return content with no content-type. httpx may add a default, so we
+        # explicitly remove it.
+        resp = httpx.Response(200, content=b'{"id":"x"}')
+        resp.headers.pop("content-type", None)
+        return resp
+
+    client, _ = _make_client(handler, tmp_path)
+    with pytest.raises(UnexpectedServiceTypeError):
+        client.get_agent("ds", "sid")
+    client.close()
+
+
+def test_agent_card_with_none_fields_passes_through(tmp_path):
+    """Nested None values inside agent_card should reach the backend as-is."""
+    captured = {}
+
+    def handler(req):
+        import json as _json
+        captured["body"] = _json.loads(req.content)
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "registered",
+        })
+
+    client, _ = _make_client(handler, tmp_path)
+    card = {"name": "N", "description": "D", "url": None, "provider": None}
+    client.register_agent("ds", card)
+    # SDK must not strip nested None values — backend validates, not SDK.
+    assert captured["body"]["agent_card"] == card
+    client.close()
+
+
+@pytest.mark.parametrize("raw_base_url", ["http://test", "http://test/"])
+def test_base_url_without_trailing_slash_does_not_double(tmp_path, raw_base_url):
+    """base_url gets / appended at most once; no // in the final request URL."""
+    seen = {}
+
+    def handler(req):
+        seen["url"] = str(req.url)
+        return httpx.Response(200, json={
+            "dataset": "ds", "embedding_model": "m",
+            "formats": {"a2a": "v0.0"}, "status": "created",
+        })
+
+    client = A2XClient(base_url=raw_base_url, ownership_file=tmp_path / "x.json")
+    client._transport._client.close()
+    client._transport._client = httpx.Client(
+        base_url=client.base_url, transport=httpx.MockTransport(handler)
+    )
+    client.create_dataset("ds", embedding_model="m")
+    # Strip scheme then confirm no accidental double slashes before /api.
+    assert "//api" not in seen["url"].replace("http://", "", 1)
+    client.close()
+
+
+def test_register_preserves_dict_identity(tmp_path):
+    """SDK must not mutate the caller's agent_card dict."""
+    def handler(req):
+        return httpx.Response(200, json={
+            "service_id": "sid", "dataset": "ds", "status": "registered",
+        })
+    client, _ = _make_client(handler, tmp_path)
+
+    card = {"name": "N", "description": "D", "skills": [{"name": "a", "description": "b"}]}
+    card_before = {k: (v.copy() if isinstance(v, list) else v) for k, v in card.items()}
+    client.register_agent("ds", card)
+    assert card == card_before, "SDK mutated the caller's agent_card dict"
+    client.close()

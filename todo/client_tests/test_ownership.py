@@ -160,3 +160,102 @@ class TestAtomicWrite:
         s.add("ds", "sid")
         leftover = [p for p in ownership_path.parent.iterdir() if p.name.endswith(".tmp")]
         assert leftover == []
+
+    def test_uses_os_replace_for_atomic_rename(self, ownership_path: Path, monkeypatch):
+        """Regression: must go through os.replace, never plain rename / write."""
+        calls = {"replace": 0}
+        original = os.replace
+
+        def tracker(src, dst):
+            calls["replace"] += 1
+            return original(src, dst)
+
+        monkeypatch.setattr(os, "replace", tracker)
+        s = OwnershipStore(ownership_path, "http://h")
+        s.add("ds", "sid")
+        assert calls["replace"] >= 1
+
+    def test_parent_dirs_auto_created(self, tmp_path: Path):
+        deep = tmp_path / "a" / "b" / "c" / "owned.json"
+        assert not deep.parent.exists()
+        s = OwnershipStore(deep, "http://h")
+        s.add("ds", "sid")
+        assert deep.exists()
+        assert deep.parent.is_dir()
+
+
+class TestLoadingEdgeCases:
+    def test_empty_file_tolerated(self, ownership_path: Path):
+        ownership_path.parent.mkdir(parents=True, exist_ok=True)
+        ownership_path.write_text("")  # 0 bytes
+        s = OwnershipStore(ownership_path, "http://h")
+        assert not s.contains("ds", "sid")
+
+    def test_base_url_missing_in_file_is_clean_start(self, ownership_path: Path):
+        ownership_path.parent.mkdir(parents=True, exist_ok=True)
+        ownership_path.write_text(json.dumps({
+            "schema_version": 1,
+            "data": {"http://OTHER": {"ds": ["x"]}}
+        }))
+        s = OwnershipStore(ownership_path, "http://ME")
+        assert not s.contains("ds", "x")
+        # File must not have been rewritten just from reading
+        doc = json.loads(ownership_path.read_text("utf-8"))
+        assert doc["data"] == {"http://OTHER": {"ds": ["x"]}}
+
+    def test_future_schema_version_falls_back_to_empty(self, ownership_path: Path):
+        """Unknown future schema versions should not crash; treat as clean start."""
+        ownership_path.parent.mkdir(parents=True, exist_ok=True)
+        ownership_path.write_text(json.dumps({
+            "schema_version": 99,
+            "data": {"http://h": {"ds": ["x"]}}
+        }))
+        s = OwnershipStore(ownership_path, "http://h")
+        assert not s.contains("ds", "x")  # ignored, forward-compat safe
+
+    def test_load_does_not_create_file(self, tmp_path: Path):
+        """Constructor should never create the file by itself."""
+        path = tmp_path / "owned.json"
+        assert not path.exists()
+        OwnershipStore(path, "http://h")
+        assert not path.exists()  # still no file after construction
+
+    def test_garbage_values_ignored(self, ownership_path: Path):
+        """Non-string sids and non-list buckets are silently dropped."""
+        ownership_path.parent.mkdir(parents=True, exist_ok=True)
+        ownership_path.write_text(json.dumps({
+            "schema_version": 1,
+            "data": {"http://h": {
+                "ds1": ["valid", 42, None, {"x": 1}],  # non-strings dropped
+                "ds2": "not a list",                    # bucket dropped entirely
+            }}
+        }))
+        s = OwnershipStore(ownership_path, "http://h")
+        assert s.contains("ds1", "valid")
+        assert not s.contains("ds1", "42")
+        assert not s.contains("ds2", "anything")
+
+
+class TestUnicodeKeys:
+    def test_unicode_dataset_name(self, ownership_path: Path):
+        s = OwnershipStore(ownership_path, "http://h")
+        s.add("研究团队", "agent_研究_001")
+        assert s.contains("研究团队", "agent_研究_001")
+
+        reload = OwnershipStore(ownership_path, "http://h")
+        assert reload.contains("研究团队", "agent_研究_001")
+
+        # File must be valid UTF-8
+        doc = json.loads(ownership_path.read_text("utf-8"))
+        assert "研究团队" in doc["data"]["http://h"]
+
+
+class TestContainsInvariant:
+    def test_contains_returns_false_for_missing_dataset(self, ownership_path: Path):
+        s = OwnershipStore(ownership_path, "http://h")
+        assert not s.contains("never_existed", "sid")
+
+    def test_remove_on_missing_bucket_is_silent(self, ownership_path: Path):
+        s = OwnershipStore(ownership_path, "http://h")
+        s.remove("never_existed", "sid")  # must not raise
+        assert not ownership_path.exists()  # no spurious write
