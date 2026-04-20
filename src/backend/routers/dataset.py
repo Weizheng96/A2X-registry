@@ -19,6 +19,7 @@ from src.register.models import (
     RegisterGenericRequest, RegisterA2ARequest,
     RegisterResponse, DeregisterResponse, SkillResponse, UpdateResponse,
 )
+from src.register.errors import RegistryNotFoundError
 from src.register.service import RegistryService
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,8 @@ async def _run(fn, *args):
         return await loop.run_in_executor(_executor, fn, *args)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RegistryNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
