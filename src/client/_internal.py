@@ -135,14 +135,15 @@ def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
 def build_filter_params(filters: dict[str, Any]) -> dict[str, Any]:
     """Build query params for ``GET .../services?mode=filter&...``.
 
-    Every ``(k, v)`` in ``filters`` becomes a query param. Values are
+    Every ``(k, v)`` becomes a query param with AND semantics. Values are
     coerced to strings (HTTP query params are strings; backend also
-    string-coerces its comparison). Empty filter dict raises locally.
+    string-coerces its comparison). Empty filters → backend returns every
+    service.
     """
-    if not isinstance(filters, dict) or not filters:
-        raise ValueError(
-            f"filters must be a non-empty dict, got {filters!r}"
-        )
+    if filters is None:
+        filters = {}
+    if not isinstance(filters, dict):
+        raise ValueError(f"filters must be a dict, got {filters!r}")
     reserved = {"mode", "service_id", "size", "page"}
     params: dict[str, Any] = {"mode": "filter"}
     for k, v in filters.items():
@@ -157,19 +158,6 @@ def build_filter_params(filters: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"filter value for {k!r} must not be None")
         params[k] = str(v)
     return params
-
-
-def build_full_list_params(page: int, size: int) -> dict[str, Any]:
-    """Build query params for ``GET .../services?mode=full``.
-
-    ``size=-1`` returns the full dataset in one page (backend default);
-    ``size>=1`` paginates with ``page`` (1-indexed).
-    """
-    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
-        raise ValueError(f"page must be >= 1, got {page!r}")
-    if not isinstance(size, int) or isinstance(size, bool) or (size < -1 or size == 0):
-        raise ValueError(f"size must be -1 or >= 1, got {size!r}")
-    return {"mode": "full", "page": page, "size": size}
 
 
 def extract_team_count(card: Any) -> int:
@@ -261,16 +249,30 @@ def parse_agent_detail(resp: httpx.Response) -> AgentDetail:
     return AgentDetail.from_dict(data)
 
 
-def parse_full_list_servers(resp: httpx.Response) -> list[dict[str, Any]]:
-    """Extract the ``servers`` array from a ``mode=full`` response.
+def parse_agent_list(resp: httpx.Response) -> list[dict[str, Any]]:
+    """Parse a ``mode=filter`` response into flat ``id + card`` dicts.
 
-    Backend quirk: for a2a entries, each item is the raw Agent Card
-    (no ``id`` wrapper); for generic/skill, items have the standard
-    ``{id, type, name, description, metadata}`` shape. Callers that need
-    sids for a2a must join with a ``mode=browse`` call by name.
+    Each wrapped backend entry ``{id, type, name, description, metadata}``
+    is flattened: the wrapper stays, then ``metadata`` is popped and its
+    keys merged up. Metadata keys win on conflict — for a2a that means
+    the raw card ``description`` overrides the ``build_description``-
+    transformed one in the wrapper, giving callers the exact string they
+    originally registered.
+
+    For generic/skill, ``metadata`` has no ``name``/``description``, so
+    the wrapper's values survive. ``type`` is preserved at top level so
+    callers can tell cross-type results apart.
     """
     data = resp.json()
-    if not isinstance(data, dict):
+    if not isinstance(data, list):
         return []
-    servers = data.get("servers", [])
-    return [s for s in servers if isinstance(s, dict)]
+    result: list[dict[str, Any]] = []
+    for wrapped in data:
+        if not isinstance(wrapped, dict):
+            continue
+        flat = dict(wrapped)
+        metadata = flat.pop("metadata", None)
+        if isinstance(metadata, dict):
+            flat.update(metadata)
+        result.append(flat)
+    return result

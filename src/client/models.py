@@ -61,13 +61,6 @@ class DeregisterResponse(_FromDictMixin):
 
 
 @dataclass
-class AgentBrief(_FromDictMixin):
-    id: str
-    name: str
-    description: str
-
-
-@dataclass
 class AgentDetail:
     """Full single-agent response. ``metadata`` is the complete Agent Card."""
 

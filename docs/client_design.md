@@ -37,6 +37,7 @@ sid_a = resp.service_id
 
 # ② Agent B 取最空闲的 blank agent（单次 mode=filter 调用）
 idle: list[dict] = client.list_idle_blank_agents("team_pool", n=3)
+# 每项是 {id, type, name, description, endpoint, agentTeamCount, ...} 扁平 dict
 
 # ③ P2P 协商过程略（不经注册中心）
 
@@ -92,7 +93,7 @@ asyncio.run(main())
 
 ### 2.2 全部 method 解释
 
-`A2XClient` 共 16 个对外方法（含 `__init__` 与 `close`）。`AsyncA2XClient` **一对一镜像**，仅 `close` → `aclose`、调用形式改为 `await client.method(...)`；方法名、参数、返回类型、异常一致。下文仅列同步版。
+`A2XClient` 共 14 个对外方法（含 `__init__` 与 `close`）。`AsyncA2XClient` **一对一镜像**，仅 `close` → `aclose`、调用形式改为 `await client.method(...)`；方法名、参数、返回类型、异常一致。下文仅列同步版。
 
 **通用异常**（每个方法都可能发生，不重复列出）：
 - `A2XConnectionError` — 网络 / 超时
@@ -203,13 +204,36 @@ A2XError
 
 ---
 
-#### `list_agents(dataset)`
+#### `list_agents(dataset, **filters)`
 
-轻量列表（`mode=browse`）：返回数据集**全部**服务，但每行只含 3 个字段。
+列出服务，可选按字段等值筛选（`mode=filter`）。**不传 filters** → 返回全部服务；**传 filters** → AND 语义、字符串等值。
 
-**输入**：`dataset: str`
-**返回**：`list[AgentBrief(id, name, description)]`
-**错误**：无（空数据集或不存在均返回 `[]`）
+**匹配目标**：后端对每个服务按类型取"原始 dict" —— a2a → `entry.agent_card`（原始 `description`，无 `build_description` 转换）；generic → `entry.service_data`；skill → `entry.skill_data`。字段**必须存在且值相等**才命中。
+
+**输入**：
+- `dataset: str`
+- `**filters: Any` — 可省；键不能是 `mode` / `service_id` / `size` / `page`；值不能是 `None`；列表/dict 类型不支持（query param 无法表达）
+
+**返回**：`list[dict]` — 每项是扁平化的 `{id, type, name, description, ...card_fields}`。`metadata` 内的字段被合并上来，对 a2a 顶层 `description` 是**原始** card 描述（不是 `build_description` 加工后的那个）。对 generic/skill，wrapper 的 name/description 被保留（metadata 本来就没 name/description）。
+
+**错误**：
+- `ValueError` — filter 用了保留键 / None 值 / 空字符串键（本地）
+
+**示例**：
+
+```python
+# 列出全部
+all_svcs = client.list_agents("team_pool")
+for s in all_svcs:
+    print(s["id"], s["type"], s["name"])
+
+# 按单字段
+blanks = client.list_agents("team_pool", description="__BLANK__")
+
+# 复合条件
+free_blanks = client.list_agents("team_pool",
+                                 description="__BLANK__", agentTeamCount=0)
+```
 
 ---
 
@@ -266,67 +290,24 @@ A2XError
 
 ---
 
-#### `list_agents_full(dataset, page=1, size=-1)`
-
-整库完整元数据（`mode=full`），面向管理面板的"给我看全部"场景。
-
-**后端行为提醒**：对 a2a 条目，后端直接返回 Agent Card 本体（无 `id` 包装）；generic/skill 保留 `{id, type, name, description, metadata}` 外壳。`AgentDetail.id` 对 a2a **总是空串**。当需要按字段挑选服务时请改用 `list_agents_by_filter`。
-
-**输入**：
-- `dataset: str`
-- `page: int = 1` — 1-indexed，`size > 0` 时生效
-- `size: int = -1` — `-1` 返回全部；否则 `≥ 1`
-
-**返回**：`list[AgentDetail]`
-**错误**：`ValueError` — page/size 非法（本地）
-
----
-
-#### `list_agents_by_filter(dataset, **filters)`
-
-按字段等值筛选（`mode=filter`）。所有 kwargs 都作为 query 参数发给后端，AND 语义，**值与目标字段都强制字符串化比较**。
-
-**匹配目标**：后端对每个服务按类型取"原始 dict" —— a2a → `entry.agent_card`（原始 `description`，无 `build_description` 转换）；generic → `entry.service_data`；skill → `entry.skill_data`。字段**必须存在且值相等**才命中。
-
-**输入**：
-- `dataset: str`
-- `**filters: Any` — 至少 1 个；键不能是 `mode` / `service_id` / `size` / `page`；值不能是 `None`；列表/dict 类型不支持（query param 无法表达）
-
-**返回**：`list[dict]` — 每项是后端标准包装 `{id, type, name, description, metadata}`；对 a2a 来说 `metadata` 就是 Agent Card
-**错误**：
-- `ValueError` — 空字典 / 保留键 / None 值 / 空字符串键（本地）
-- `ValidationError` — 后端 400（空 filters 理论上本地已拦）
-
-**示例**：
-
-```python
-# 找所有 team count 为 0 的 a2a agent（任意描述）
-r = client.list_agents_by_filter("team_pool", agentTeamCount=0)
-# 复合条件
-r = client.list_agents_by_filter("team_pool", description="__BLANK__", agentTeamCount=0)
-```
-
----
-
 #### `list_idle_blank_agents(dataset, n)`
 
-返回最空闲的 N 个空白 agent 的 Agent Card，按 `agentTeamCount` 升序。
+返回最空闲的 N 个 blank agent，按 `agentTeamCount` 升序。薄壳于 `list_agents(dataset, description="__BLANK__")`（SDK 内部用 sentinel，调用方无需感知），本地按 `agentTeamCount`（缺省 0）升序排、取前 N。
 
-**实现**：单次 HTTP，走 `list_agents_by_filter(dataset, description="__BLANK__")`（SDK 内部 sentinel，调用方无需关心），然后本地按 `agentTeamCount`（缺省 0）升序排、取前 N。从每条 wrapped 响应抽出 `metadata`（= Agent Card）作为返回项。
-
-**调用方读法**：
+**调用方读法**（返回形状与 `list_agents` 一致）：
 
 ```python
-for card in client.list_idle_blank_agents("team_pool", n=3):
-    endpoint = card["endpoint"]
-    count    = card.get("agentTeamCount", 0)
+for agent in client.list_idle_blank_agents("team_pool", n=3):
+    sid      = agent["id"]
+    endpoint = agent["endpoint"]
+    count    = agent.get("agentTeamCount", 0)
 ```
 
 **输入**：
 - `dataset: str`
 - `n: int ≥ 0`
 
-**返回**：`list[dict]` — 每项是 Agent Card 本身
+**返回**：`list[dict]` — 形状同 `list_agents`（扁平化的 `{id, type, name, description, ...card_fields}`）
 **错误**：`ValueError` — n 非法（本地）
 
 ---
@@ -433,7 +414,7 @@ src/client/
 | `replace_agent_card` / `restore_to_blank` | ✅（幂等） | ✅ 同上 |
 | `deregister_agent` | 成功后移除 | ✅ 同上 |
 | `delete_dataset` | 成功/400 均清整段 | — |
-| `list_agents` / `list_agents_full` / `list_idle_blank_agents` / `get_agent` / `create_dataset` / `__init__` | — | — |
+| `list_agents` / `list_idle_blank_agents` / `get_agent` / `create_dataset` / `__init__` | — | — |
 
 **自动同步本地与远端**：mutation 命中后端 404 → 自动 `_owned.remove(sid)` 再重抛 `NotFoundError`；`delete_dataset` 命中 400 同理。避免"永远 404 + 本地永远脏"。
 
@@ -447,7 +428,7 @@ src/client/
 
 **异步版差异**：`Client → HTTP` 所有调用前加 `await`；`Own` 的写操作通过 `await asyncio.to_thread(...)` 调度；只读 `contains` 仍同步。
 
-仅画 6 个关键流程。未画方法的流程与其底层方法一致：`register_blank_agent` ≈ 4.2；`set_team_count` ≈ 4.3；`list_agents` / `list_agents_full` / `get_agent` 是直连 GET；`delete_dataset` / `deregister_agent` 与 4.3 的 404 自清模式相同。
+仅画 6 个关键流程。未画方法的流程与其底层方法一致：`register_blank_agent` ≈ 4.2；`set_team_count` ≈ 4.3；`get_agent` 是直连 GET；`delete_dataset` / `deregister_agent` 与 4.3 的 404 自清模式相同。
 
 ### 4.1 `__init__`
 
@@ -601,9 +582,9 @@ sequenceDiagram
     Client-->>Dev: RegisterResponse
 ```
 
-### 4.6 `list_idle_blank_agents`
+### 4.6 `list_agents` / `list_idle_blank_agents`
 
-单次 HTTP：`list_agents_by_filter(dataset, description="__BLANK__")` 让后端过滤，SDK 本地排序并抽出 card。
+`list_agents` 一次 HTTP，可选过滤；`list_idle_blank_agents` 是在此基础上本地排序 + 取前 N 的薄壳。
 
 ```mermaid
 sequenceDiagram
@@ -612,13 +593,22 @@ sequenceDiagram
     participant HTTP
     participant API
 
-    Dev->>Client: list_idle_blank_agents(ds, n)
-    Client->>Client: 校验 n ≥ 0；n=0 直接返回 []
-    Client->>HTTP: GET ?mode=filter&description=__BLANK__
+    alt list_agents(ds, **filters)
+        Dev->>Client: list_agents(ds, **filters)
+    else list_idle_blank_agents(ds, n)
+        Dev->>Client: list_idle_blank_agents(ds, n)
+        Client->>Client: 校验 n ≥ 0；n=0 → []
+        Note over Client: filters = {"description": "__BLANK__"}
+    end
+    Client->>HTTP: GET ?mode=filter[&k=v&...]
     HTTP->>API: GET
-    Note over API: 对每个 entry 取原始 dict：<br/>a2a → agent_card；generic → service_data；skill → skill_data<br/>AND 匹配：k in raw 且 str(raw[k]) == v
+    Note over API: 空 filters → 全量；<br/>否则对每个 entry 取原始 dict：<br/>a2a → agent_card / generic → service_data / skill → skill_data<br/>AND 匹配：k in raw 且 str(raw[k]) == v
     API-->>HTTP: [{id, type, name, description, metadata}, ...]
-    HTTP-->>Client: list[dict]（wrapped）
-    Client->>Client: 抽出 metadata（= Agent Card）<br/>按 metadata["agentTeamCount"] 升序（缺省 0）<br/>取前 n
-    Client-->>Dev: list[dict]（Agent Card 列表）
+    Client->>Client: 扁平化每条：{id, type, name, description, **metadata}<br/>（metadata 键覆盖 wrapper —— a2a 原始 description 回流顶层）
+    alt list_agents
+        Client-->>Dev: list[dict]
+    else list_idle_blank_agents
+        Client->>Client: 按 agentTeamCount 升序（缺省 0）<br/>取前 n
+        Client-->>Dev: list[dict]（前 n 个）
+    end
 ```

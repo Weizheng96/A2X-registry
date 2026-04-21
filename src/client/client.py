@@ -14,7 +14,6 @@ from typing import Any, Literal
 from . import _internal as _i
 from .errors import NotFoundError, NotOwnedError, ValidationError
 from .models import (
-    AgentBrief,
     AgentDetail,
     DatasetCreateResponse,
     DatasetDeleteResponse,
@@ -161,12 +160,33 @@ class A2XClient:
             raise
         return PatchResponse.from_dict(resp.json())
 
-    def list_agents(self, dataset: str) -> list[AgentBrief]:
-        resp = self._transport.request(
-            "GET", _i.services_path(dataset), params={"mode": "browse"}
-        )
-        data = resp.json()
-        return [AgentBrief.from_dict(d) for d in data]
+    def list_agents(
+        self,
+        dataset: str,
+        **filters: Any,
+    ) -> list[dict[str, Any]]:
+        """List services, optionally filtered by field equality.
+
+        Empty ``filters`` (default) → every service in the dataset.
+        Each keyword argument becomes a query-param filter with AND semantics;
+        values are coerced to strings (HTTP query params are strings; backend
+        also string-coerces both sides).
+
+        **Match target**: the backend matches against each entry's raw
+        per-type data — ``agent_card`` for a2a (original, non-transformed
+        ``description``), ``service_data`` for generic, ``skill_data`` for
+        skill. Fields must exist **and** equal for a match.
+
+        **Return shape** — flat ``list[dict]``, one dict per service:
+        ``{id, type, name, description, ...card_fields}``. For a2a, card
+        fields include ``endpoint``, ``agentTeamCount``, ``skills``, etc.
+        Metadata fields take precedence on key conflict — e.g. for a2a the
+        top-level ``description`` is the raw card value (not the taxonomy-
+        facing ``build_description`` output).
+        """
+        params = _i.build_filter_params(filters)
+        resp = self._transport.request("GET", _i.services_path(dataset), params=params)
+        return _i.parse_agent_list(resp)
 
     def get_agent(self, dataset: str, service_id: str) -> AgentDetail:
         resp = self._transport.request(
@@ -202,12 +222,17 @@ class A2XClient:
 
         The blank AgentCard is::
 
-            {"name": "_BlankAgent_<endpoint>", "description": "_",
-             "endpoint": endpoint, "agentTeamCount": 0}
+            {"name": "_BlankAgent_<endpoint>",
+             "description": "__BLANK__",             # BLANK_DESCRIPTION_SENTINEL
+             "endpoint": endpoint,
+             "agentTeamCount": 0}
 
-        The ``name`` prefix is the discovery contract — ``list_idle_blank_agents``
-        identifies blank entries by this prefix. Re-registering the same
-        endpoint is idempotent (same sid → backend ``status="updated"``).
+        The ``description`` sentinel is the discovery contract —
+        ``list_idle_blank_agents`` finds blanks via ``mode=filter``
+        matching this exact value. The ``name`` prefix is only there to
+        make the deterministic ``generate_service_id("agent", name)`` yield
+        a distinct sid per endpoint (re-registering the same endpoint is
+        idempotent; the same sid → backend ``status="updated"``).
         """
         card = _i.build_blank_agent_card(endpoint)
         result = self.register_agent(
@@ -216,85 +241,28 @@ class A2XClient:
         self._blank_endpoints[(dataset, result.service_id)] = endpoint
         return result
 
-    def list_agents_full(
-        self,
-        dataset: str,
-        page: int = 1,
-        size: int = -1,
-    ) -> list[AgentDetail]:
-        """Return full-metadata entries via ``GET ...?mode=full``.
-
-        Backend quirk (see ``_internal.parse_full_list_servers``): a2a entries
-        arrive as raw Agent Cards with no ``id`` wrapper, so for those
-        ``AgentDetail.id`` is empty and ``AgentDetail.raw`` is the card.
-        Generic/skill entries keep the ``{id, type, name, description,
-        metadata}`` shape. Callers needing sids for a2a must cross-reference
-        ``list_agents(dataset)``.
-        """
-        params = _i.build_full_list_params(page, size)
-        resp = self._transport.request("GET", _i.services_path(dataset), params=params)
-        servers = _i.parse_full_list_servers(resp)
-        return [AgentDetail.from_dict(s) for s in servers]
-
-    def list_agents_by_filter(
-        self,
-        dataset: str,
-        **filters: Any,
-    ) -> list[dict[str, Any]]:
-        """Bulk query via ``GET ...?mode=filter&<k>=<v>&...``.
-
-        Every keyword argument becomes a query-param filter with AND semantics.
-        Values are coerced to strings (HTTP query params are strings; backend
-        also string-coerces both sides of the comparison). A service matches
-        iff, for every filter ``(k, v)``, its type-specific raw dict contains
-        ``k`` and ``str(raw[k]) == str(v)``.
-
-        **Filter-target nuance** (mirrors backend ``_entry_filter_dict``):
-        filters operate on the *raw* per-type data — ``entry.agent_card`` for
-        a2a (so the original, non-transformed ``description``),
-        ``entry.service_data`` for generic, ``entry.skill_data`` for skill.
-        This differs from the ``build_description``-transformed
-        ``description`` shown by browse/full.
-
-        Returns the standard wrapped shape per match:
-        ``[{id, type, name, description, metadata}]``. Call
-        ``list_idle_blank_agents`` for the common blank-pool use case.
-        """
-        params = _i.build_filter_params(filters)
-        resp = self._transport.request("GET", _i.services_path(dataset), params=params)
-        data = resp.json()
-        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
-
     def list_idle_blank_agents(
         self,
         dataset: str,
         n: int,
     ) -> list[dict[str, Any]]:
-        """Return up to ``n`` blank agents' Agent Cards, ascending by ``agentTeamCount``.
+        """Return up to ``n`` idle-pool agents, ascending by ``agentTeamCount``.
 
-        Single HTTP call: ``mode=filter&description=__BLANK__`` on the backend
-        returns only entries whose raw card description matches the sentinel.
-        SDK then sorts by ``agentTeamCount`` (missing → 0, most-idle) and
-        extracts the Agent Card (``entry["metadata"]``) from each wrapped
-        response.
-
-        The returned dicts are the raw Agent Cards — read ``card["endpoint"]``
-        and ``card.get("agentTeamCount", 0)`` directly.
+        Thin wrapper over ``list_agents(dataset, description=__BLANK__)`` that
+        sorts by ``agentTeamCount`` (missing → 0, most-idle) and caps at ``n``.
+        Return shape is identical to ``list_agents``: flat dicts with ``id`` +
+        raw card fields (``endpoint``, ``agentTeamCount``, ...).
         """
         if not isinstance(n, int) or isinstance(n, bool) or n < 0:
             raise ValueError(f"n must be a non-negative int, got {n!r}")
         if n == 0:
             return []
 
-        wrapped = self.list_agents_by_filter(
+        agents = self.list_agents(
             dataset, description=_i.BLANK_DESCRIPTION_SENTINEL
         )
-        cards = [
-            w["metadata"] for w in wrapped
-            if isinstance(w.get("metadata"), dict)
-        ]
-        cards.sort(key=_i.extract_team_count)
-        return cards[:n]
+        agents.sort(key=_i.extract_team_count)
+        return agents[:n]
 
     def replace_agent_card(
         self,
@@ -356,8 +324,8 @@ class A2XClient:
         if cached:
             return cached
         detail = self.get_agent(dataset, service_id)
-        # mode=single wraps the card in ``metadata``; try both slots.
-        endpoint = _i.extract_endpoint(detail.metadata) or _i.extract_endpoint(detail.raw)
+        # mode=single returns {id,...,metadata}; endpoint lives inside the card.
+        endpoint = _i.extract_endpoint(detail.metadata)
         if endpoint is None:
             raise ValueError(
                 f"Cannot restore {service_id!r} to blank: 'endpoint' missing "

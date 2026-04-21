@@ -16,7 +16,6 @@ from typing import Any, Literal
 from . import _internal as _i
 from .errors import NotFoundError, NotOwnedError, ValidationError
 from .models import (
-    AgentBrief,
     AgentDetail,
     DatasetCreateResponse,
     DatasetDeleteResponse,
@@ -155,12 +154,17 @@ class AsyncA2XClient:
             raise
         return PatchResponse.from_dict(resp.json())
 
-    async def list_agents(self, dataset: str) -> list[AgentBrief]:
+    async def list_agents(
+        self,
+        dataset: str,
+        **filters: Any,
+    ) -> list[dict[str, Any]]:
+        """See ``A2XClient.list_agents``."""
+        params = _i.build_filter_params(filters)
         resp = await self._transport.request(
-            "GET", _i.services_path(dataset), params={"mode": "browse"}
+            "GET", _i.services_path(dataset), params=params
         )
-        data = resp.json()
-        return [AgentBrief.from_dict(d) for d in data]
+        return _i.parse_agent_list(resp)
 
     async def get_agent(self, dataset: str, service_id: str) -> AgentDetail:
         resp = await self._transport.request(
@@ -202,33 +206,6 @@ class AsyncA2XClient:
         self._blank_endpoints[(dataset, result.service_id)] = endpoint
         return result
 
-    async def list_agents_full(
-        self,
-        dataset: str,
-        page: int = 1,
-        size: int = -1,
-    ) -> list[AgentDetail]:
-        """See ``A2XClient.list_agents_full``."""
-        params = _i.build_full_list_params(page, size)
-        resp = await self._transport.request(
-            "GET", _i.services_path(dataset), params=params
-        )
-        servers = _i.parse_full_list_servers(resp)
-        return [AgentDetail.from_dict(s) for s in servers]
-
-    async def list_agents_by_filter(
-        self,
-        dataset: str,
-        **filters: Any,
-    ) -> list[dict[str, Any]]:
-        """See ``A2XClient.list_agents_by_filter``."""
-        params = _i.build_filter_params(filters)
-        resp = await self._transport.request(
-            "GET", _i.services_path(dataset), params=params
-        )
-        data = resp.json()
-        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
-
     async def list_idle_blank_agents(
         self,
         dataset: str,
@@ -240,15 +217,11 @@ class AsyncA2XClient:
         if n == 0:
             return []
 
-        wrapped = await self.list_agents_by_filter(
+        agents = await self.list_agents(
             dataset, description=_i.BLANK_DESCRIPTION_SENTINEL
         )
-        cards = [
-            w["metadata"] for w in wrapped
-            if isinstance(w.get("metadata"), dict)
-        ]
-        cards.sort(key=_i.extract_team_count)
-        return cards[:n]
+        agents.sort(key=_i.extract_team_count)
+        return agents[:n]
 
     async def replace_agent_card(
         self,
@@ -290,7 +263,7 @@ class AsyncA2XClient:
         if cached:
             return cached
         detail = await self.get_agent(dataset, service_id)
-        endpoint = _i.extract_endpoint(detail.metadata) or _i.extract_endpoint(detail.raw)
+        endpoint = _i.extract_endpoint(detail.metadata)
         if endpoint is None:
             raise ValueError(
                 f"Cannot restore {service_id!r} to blank: 'endpoint' missing "

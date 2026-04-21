@@ -197,7 +197,8 @@ async def list_services(
                (AND semantics, string-coerced equality). Matches on each
                entry's type-specific raw dict (see _entry_filter_dict).
                Returns the standard [{id, type, name, description, metadata}]
-               wrapper; missing fields → not a match.
+               wrapper; missing fields → not a match. Empty filters → every
+               entry matches (full dataset listing).
     """
     if mode == "single":
         if not service_id:
@@ -226,11 +227,9 @@ async def list_services(
             k: v for k, v in request.query_params.items()
             if k not in _RESERVED_QUERY_PARAMS
         }
-        if not filters:
-            raise HTTPException(
-                status_code=400,
-                detail="mode=filter requires at least one non-reserved query param",
-            )
+        # Empty filters → every entry matches (all(...) over {} is True),
+        # i.e. return the whole dataset in the wrapped shape. This lets
+        # clients use mode=filter as the single "list-or-filter" endpoint.
         svc = get_registry_service()
         wrapped_by_id = {s["id"]: s for s in svc.list_services(dataset)}
         output = []

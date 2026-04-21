@@ -24,7 +24,6 @@ from .errors import (
     ValidationError,
 )
 from .models import (
-    AgentBrief,
     AgentDetail,
     DatasetCreateResponse,
     DatasetDeleteResponse,
@@ -53,7 +52,6 @@ __all__ = [
     "RegisterResponse",
     "PatchResponse",
     "DeregisterResponse",
-    "AgentBrief",
     "AgentDetail",
 ]
 

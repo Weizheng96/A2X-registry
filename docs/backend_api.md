@@ -171,11 +171,12 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 ```
 
 **filter 模式约束**：
-- **至少 1 个非保留参数**（保留参数：`mode`/`service_id`/`size`/`page`），否则 400
-- 字段**必须存在**且 `str(raw_value) == query_value`（AND 语义）
+- **空过滤条件 → 返回全量**（当通用 list 接口用）；否则 AND 语义、`str(raw_value) == query_value`
+- 保留参数：`mode` / `service_id` / `size` / `page`（不参与过滤）
+- 字段**必须存在**且值相等才命中
 - 匹配的是**原始数据**：对 a2a 是 `entry.agent_card.model_dump(exclude_none=True)`（`description` 是原始未转换值）；对 generic 是 `entry.service_data`；对 skill 是 `entry.skill_data`
 - 注意响应里外层 `description` 是 `build_description(card)` 的输出（a2a 会带句号），但 `metadata.description` 是原始值
-- 请求示例：`GET /api/datasets/team/services?mode=filter&description=__BLANK__&agentTeamCount=0`
+- 请求示例：`GET /api/datasets/team/services?mode=filter`（全量）或 `?mode=filter&description=__BLANK__&agentTeamCount=0`（筛选）
 
 ---
 
