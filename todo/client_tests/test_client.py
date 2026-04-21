@@ -181,16 +181,26 @@ def test_set_team_count_rejects_negative_before_http(tmp_path):
 
 # ── get_agent / list_agents ─────────────────────────────────────────────────
 
-def test_list_agents_parses_brief_array(tmp_path):
+def test_list_agents_no_filters_hits_mode_filter_with_no_params(tmp_path):
+    """list_agents(ds) should send mode=filter alone → backend returns all."""
+    captured = {}
+
     def handler(req):
-        assert "mode=browse" in str(req.url)
+        captured["params"] = dict(req.url.params.multi_items())
         return httpx.Response(200, json=[
-            {"id": "a", "name": "A", "description": "a-desc"},
-            {"id": "b", "name": "B", "description": "b-desc"},
+            {"id": "a", "type": "a2a", "name": "A", "description": "A.",
+             "metadata": {"name": "A", "description": "A", "endpoint": "http://a"}},
+            {"id": "b", "type": "a2a", "name": "B", "description": "B.",
+             "metadata": {"name": "B", "description": "B", "endpoint": "http://b"}},
         ])
     client, _ = _make_client(handler, tmp_path)
     agents = client.list_agents("ds")
-    assert [a.id for a in agents] == ["a", "b"]
+    assert captured["params"] == {"mode": "filter"}
+    assert [a["id"] for a in agents] == ["a", "b"]
+    # Flat shape: metadata keys surface at top level; a2a raw description
+    # overrides build_description (the "A." with trailing period)
+    assert agents[0]["description"] == "A"
+    assert agents[0]["endpoint"] == "http://a"
     client.close()
 
 
@@ -525,23 +535,118 @@ def test_list_agents_empty_returns_empty_list(tmp_path):
 def test_list_agents_no_ownership_required(tmp_path):
     """Reads work even when _owned is empty."""
     def handler(req):
-        return httpx.Response(200, json=[{"id": "a", "name": "A", "description": "a"}])
+        return httpx.Response(200, json=[
+            {"id": "a", "type": "a2a", "name": "A", "description": "A.",
+             "metadata": {"name": "A", "description": "A"}},
+        ])
     client, _ = _make_client(handler, tmp_path)
     assert client._owned._data == {}
-    briefs = client.list_agents("ds")
-    assert len(briefs) == 1
+    agents = client.list_agents("ds")
+    assert len(agents) == 1
     client.close()
 
 
-def test_list_agents_tolerates_extra_fields(tmp_path):
+def test_list_agents_with_filter_sends_query_params(tmp_path):
+    captured = {}
+
+    def handler(req):
+        captured["params"] = dict(req.url.params.multi_items())
+        return httpx.Response(200, json=[])
+
+    client, _ = _make_client(handler, tmp_path)
+    client.list_agents("ds", description="__BLANK__", agentTeamCount=0)
+    assert captured["params"]["mode"] == "filter"
+    assert captured["params"]["description"] == "__BLANK__"
+    # Non-string values are coerced to strings (HTTP query params)
+    assert captured["params"]["agentTeamCount"] == "0"
+    client.close()
+
+
+def test_list_agents_flat_shape_merges_metadata(tmp_path):
+    """Return dicts should have metadata keys merged at top level."""
     def handler(req):
         return httpx.Response(200, json=[
-            {"id": "a", "name": "A", "description": "a", "type": "a2a", "extra": "x"},
+            {"id": "sid", "type": "a2a", "name": "N", "description": "build_desc.",
+             "metadata": {"name": "N", "description": "raw_desc",
+                          "endpoint": "http://e", "agentTeamCount": 3}},
         ])
     client, _ = _make_client(handler, tmp_path)
-    briefs = client.list_agents("ds")
-    assert briefs[0].id == "a"
-    assert not hasattr(briefs[0], "extra")
+    agents = client.list_agents("ds")
+    a = agents[0]
+    # wrapper fields at top level
+    assert a["id"] == "sid"
+    assert a["type"] == "a2a"
+    # metadata.description overrides wrapper.description (raw > transformed)
+    assert a["description"] == "raw_desc"
+    # card fields surfaced at top level
+    assert a["endpoint"] == "http://e"
+    assert a["agentTeamCount"] == 3
+    # no nested metadata
+    assert "metadata" not in a
+    client.close()
+
+
+def test_list_agents_generic_shape_preserves_wrapper_name(tmp_path):
+    """Generic services: metadata lacks name/description → wrapper survives."""
+    def handler(req):
+        return httpx.Response(200, json=[
+            {"id": "g", "type": "generic", "name": "GenSvc", "description": "generic desc",
+             "metadata": {"url": "http://g", "inputSchema": {"type": "object"}}},
+        ])
+    client, _ = _make_client(handler, tmp_path)
+    agents = client.list_agents("ds")
+    g = agents[0]
+    assert g["name"] == "GenSvc"
+    assert g["description"] == "generic desc"
+    assert g["url"] == "http://g"
+    assert g["inputSchema"] == {"type": "object"}
+    client.close()
+
+
+def test_list_agents_malformed_entries_skipped(tmp_path):
+    """Non-dict items in the array are dropped defensively."""
+    def handler(req):
+        return httpx.Response(200, json=[
+            {"id": "a", "type": "a2a", "name": "A", "description": "A",
+             "metadata": {"name": "A"}},
+            "not-a-dict",
+            42,
+            None,
+        ])
+    client, _ = _make_client(handler, tmp_path)
+    agents = client.list_agents("ds")
+    assert len(agents) == 1
+    assert agents[0]["id"] == "a"
+    client.close()
+
+
+def test_list_agents_rejects_reserved_filter_key(tmp_path):
+    """Reserved keys (mode/service_id/size/page) raise locally, no HTTP."""
+    sent = []
+
+    def handler(req):
+        sent.append(req)
+        return httpx.Response(200, json=[])
+
+    client, _ = _make_client(handler, tmp_path)
+    for k in ["mode", "service_id", "size", "page"]:
+        with pytest.raises(ValueError, match=r"collides with a reserved query param"):
+            client.list_agents("ds", **{k: "x"})
+    assert len(sent) == 0
+    client.close()
+
+
+def test_list_agents_rejects_none_filter_value(tmp_path):
+    sent = []
+
+    def handler(req):
+        sent.append(req)
+        return httpx.Response(200, json=[])
+
+    client, _ = _make_client(handler, tmp_path)
+    with pytest.raises(ValueError, match=r"must not be None"):
+        client.list_agents("ds", description=None)
+    assert len(sent) == 0
     client.close()
 
 

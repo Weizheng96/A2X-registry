@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from src.client.models import (
-    AgentBrief,
     AgentDetail,
     DatasetCreateResponse,
     DatasetDeleteResponse,
@@ -80,13 +79,6 @@ class TestFromDictForwardCompat:
         assert not hasattr(r, "future_field")
         assert not hasattr(r, "another_extra")
 
-    def test_agent_brief_tolerates_extras(self):
-        r = AgentBrief.from_dict({
-            "id": "s", "name": "N", "description": "D",
-            "type": "a2a", "extra": "x",
-        })
-        assert r.id == "s"
-
     def test_missing_required_field_raises(self):
         """Missing required field should surface as TypeError from dataclass."""
         with pytest.raises(TypeError):
@@ -132,18 +124,6 @@ class TestAgentDetail:
         assert d.id == "s"
         assert d.type == "" and d.name == "" and d.description == ""
         assert d.metadata == {}
-
-
-class TestAgentBriefList:
-    def test_parse_multiple(self):
-        items = [
-            {"id": "s1", "name": "N1", "description": "D1"},
-            {"id": "s2", "name": "N2", "description": "D2"},
-        ]
-        briefs = [AgentBrief.from_dict(x) for x in items]
-        assert len(briefs) == 2
-        assert all(isinstance(b, AgentBrief) for b in briefs)
-        assert briefs[0].id == "s1"
 
 
 class TestMutability:
