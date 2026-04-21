@@ -16,7 +16,6 @@ from .errors import NotFoundError, NotOwnedError, ValidationError
 from .models import (
     AgentBrief,
     AgentDetail,
-    BlankAgentInfo,
     DatasetCreateResponse,
     DatasetDeleteResponse,
     DeregisterResponse,
@@ -237,50 +236,65 @@ class A2XClient:
         servers = _i.parse_full_list_servers(resp)
         return [AgentDetail.from_dict(s) for s in servers]
 
+    def list_agents_by_filter(
+        self,
+        dataset: str,
+        **filters: Any,
+    ) -> list[dict[str, Any]]:
+        """Bulk query via ``GET ...?mode=filter&<k>=<v>&...``.
+
+        Every keyword argument becomes a query-param filter with AND semantics.
+        Values are coerced to strings (HTTP query params are strings; backend
+        also string-coerces both sides of the comparison). A service matches
+        iff, for every filter ``(k, v)``, its type-specific raw dict contains
+        ``k`` and ``str(raw[k]) == str(v)``.
+
+        **Filter-target nuance** (mirrors backend ``_entry_filter_dict``):
+        filters operate on the *raw* per-type data — ``entry.agent_card`` for
+        a2a (so the original, non-transformed ``description``),
+        ``entry.service_data`` for generic, ``entry.skill_data`` for skill.
+        This differs from the ``build_description``-transformed
+        ``description`` shown by browse/full.
+
+        Returns the standard wrapped shape per match:
+        ``[{id, type, name, description, metadata}]``. Call
+        ``list_idle_blank_agents`` for the common blank-pool use case.
+        """
+        params = _i.build_filter_params(filters)
+        resp = self._transport.request("GET", _i.services_path(dataset), params=params)
+        data = resp.json()
+        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
     def list_idle_blank_agents(
         self,
         dataset: str,
         n: int,
-    ) -> list[BlankAgentInfo]:
-        """Return up to ``n`` blank agents, sorted by ``agentTeamCount`` ascending.
+    ) -> list[dict[str, Any]]:
+        """Return up to ``n`` blank agents' Agent Cards, ascending by ``agentTeamCount``.
 
-        Two HTTP calls: ``mode=browse`` to recover sids (lost in ``mode=full``
-        for a2a) and ``mode=full`` to read ``endpoint`` + ``agentTeamCount``.
-        Missing ``agentTeamCount`` is treated as 0 (most idle).
+        Single HTTP call: ``mode=filter&description=__BLANK__`` on the backend
+        returns only entries whose raw card description matches the sentinel.
+        SDK then sorts by ``agentTeamCount`` (missing → 0, most-idle) and
+        extracts the Agent Card (``entry["metadata"]``) from each wrapped
+        response.
+
+        The returned dicts are the raw Agent Cards — read ``card["endpoint"]``
+        and ``card.get("agentTeamCount", 0)`` directly.
         """
         if not isinstance(n, int) or isinstance(n, bool) or n < 0:
             raise ValueError(f"n must be a non-negative int, got {n!r}")
         if n == 0:
             return []
 
-        briefs = self.list_agents(dataset)
-        name_to_sid: dict[str, str] = {
-            b.name: b.id for b in briefs if _i.is_blank_agent_name(b.name)
-        }
-        if not name_to_sid:
-            return []
-
-        entries = self.list_agents_full(dataset)
-        result: list[BlankAgentInfo] = []
-        for detail in entries:
-            card = detail.raw
-            name = card.get("name") if isinstance(card, dict) else None
-            sid = name_to_sid.get(name) if isinstance(name, str) else None
-            if sid is None:
-                continue
-            endpoint = _i.extract_endpoint(card)
-            if endpoint is None:
-                continue
-            result.append(
-                BlankAgentInfo(
-                    service_id=sid,
-                    endpoint=endpoint,
-                    agent_team_count=_i.extract_team_count(card),
-                )
-            )
-
-        result.sort(key=lambda b: b.agent_team_count)
-        return result[:n]
+        wrapped = self.list_agents_by_filter(
+            dataset, description=_i.BLANK_DESCRIPTION_SENTINEL
+        )
+        cards = [
+            w["metadata"] for w in wrapped
+            if isinstance(w.get("metadata"), dict)
+        ]
+        cards.sort(key=_i.extract_team_count)
+        return cards[:n]
 
     def replace_agent_card(
         self,

@@ -26,45 +26,73 @@
 Agent A 入池 → Agent B 发现并发起 P2P 组队 → A 更新 card → 解散后 A 恢复空白：
 
 ```python
-from src.client import A2XClient, BlankAgentInfo
+from src.client import A2XClient
 
 client = A2XClient(base_url="http://127.0.0.1:8000")
 client.create_dataset("team_pool")    # 初始化（只做一次）
 
-# ── ① Agent A: 作为空白 agent 入池 ─────────────────────────────
+# ① Agent A 入池
 resp = client.register_blank_agent("team_pool", endpoint="http://a.example:8080")
 sid_a = resp.service_id
 
-# ── ② Agent B: 取 N 个最空闲的 blank agent ──────────────────────
-idle: list[BlankAgentInfo] = client.list_idle_blank_agents("team_pool", n=3)
-# 每条含 service_id / endpoint / agent_team_count（按 count 升序）
+# ② Agent B 取最空闲的 blank agent（单次 mode=filter 调用）
+idle: list[dict] = client.list_idle_blank_agents("team_pool", n=3)
 
-# ── ③ B 选中 A，向 A 的 endpoint 直接发起 P2P 组队请求（绕过注册中心）
-#       A 收到后同意                                              ──
+# ③ P2P 协商过程略（不经注册中心）
 
-# ── ④ A 覆盖自己的 card，team count 置 1 ───────────────────────
+# ④ 组队：A 覆盖 card + 置 team count（endpoint 字段必须保留）
 client.replace_agent_card("team_pool", sid_a, {
     "name": "Task Planner (team-1)",
     "description": "负责拆解任务",
-    "endpoint": "http://a.example:8080",   # 必须保留；SDK 本地校验
+    "endpoint": "http://a.example:8080",
     "agentTeamCount": 1,
     "skills": [{"name": "plan", "description": "子任务拆解"}],
 })
 
-# ── ⑤ B 协作完成，向 A 发起 P2P 解散请求，A 同意 ─────────────────
+# ⑤ P2P 解散协商略
 
-# ── ⑥ A 恢复为空白，team count 归 0 ─────────────────────────────
+# ⑥ 解散：A 恢复空白（L1 缓存命中，无额外 HTTP）
 client.restore_to_blank("team_pool", sid_a)
-# endpoint 从 L1 内存缓存取，无额外 HTTP
 
 client.close()
 ```
 
-**异步版**：把 `A2XClient` 换成 `AsyncA2XClient`，方法前加 `await` 即可（或 `async with AsyncA2XClient(...) as client:`）。
+**异步版简化示例**（`AsyncA2XClient`）：方法名/参数/返回类型与同步版一致，仅每次调用加 `await`；关闭方法为 `aclose()`，或用 `async with` 自动关闭。适合在 FastAPI / aiohttp / 已有 asyncio 事件循环中嵌入。
+
+```python
+import asyncio
+from src.client import AsyncA2XClient
+
+async def main():
+    async with AsyncA2XClient(base_url="http://127.0.0.1:8000") as client:
+        # ① Agent A 入池
+        resp = await client.register_blank_agent(
+            "team_pool", endpoint="http://a.example:8080"
+        )
+        sid_a = resp.service_id
+
+        # ② Agent B 取最空闲的 blank agent（单次 mode=filter 调用）
+        idle = await client.list_idle_blank_agents("team_pool", n=3)
+
+        # ③ P2P 协商过程略（不经注册中心）
+
+        # ④ 组队：A 覆盖 card + 置 team count
+        await client.replace_agent_card("team_pool", sid_a, {
+            "name": "Task Planner (team-1)",
+            "description": "负责拆解任务",
+            "endpoint": "http://a.example:8080",
+            "agentTeamCount": 1,
+        })
+
+        # ⑥ 解散：A 恢复空白（L1 缓存命中，无额外 HTTP）
+        await client.restore_to_blank("team_pool", sid_a)
+
+asyncio.run(main())
+```
 
 ### 2.2 全部 method 解释
 
-`A2XClient` 共 15 个对外方法（含 `__init__` 与 `close`）。`AsyncA2XClient` **一对一镜像**，仅 `close` → `aclose`、调用形式改为 `await client.method(...)`；方法名、参数、返回类型、异常一致。下文仅列同步版。
+`A2XClient` 共 16 个对外方法（含 `__init__` 与 `close`）。`AsyncA2XClient` **一对一镜像**，仅 `close` → `aclose`、调用形式改为 `await client.method(...)`；方法名、参数、返回类型、异常一致。下文仅列同步版。
 
 **通用异常**（每个方法都可能发生，不重复列出）：
 - `A2XConnectionError` — 网络 / 超时
@@ -84,11 +112,9 @@ A2XError
 └── NotOwnedError                     本地所有权校验失败，未发 HTTP
 ```
 
-#### 2.2.1 A2XClient
-
 ---
 
-##### `__init__(base_url, timeout, api_key, ownership_file)`
+#### `__init__(base_url, timeout, api_key, ownership_file)`
 
 构造客户端。不发 HTTP，仅建连接池 + 从磁盘恢复 `_owned`。
 
@@ -104,7 +130,7 @@ A2XError
 
 ---
 
-##### `create_dataset(name, embedding_model, formats)`
+#### `create_dataset(name, embedding_model, formats)`
 
 创建数据集。SDK 默认 `formats={"a2a":"v0.0"}`（Agent Team 场景）；显式传 `None` 则省略，由后端三种类型全开。
 
@@ -118,7 +144,7 @@ A2XError
 
 ---
 
-##### `delete_dataset(name)`
+#### `delete_dataset(name)`
 
 删除数据集全部数据。成功或 400（已不存在）都会清本地 `_owned[name]`。
 
@@ -128,7 +154,7 @@ A2XError
 
 ---
 
-##### `register_agent(dataset, agent_card, service_id=None, persistent=True)`
+#### `register_agent(dataset, agent_card, service_id=None, persistent=True)`
 
 注册 A2A Agent。`agent_card` dict 整体透传后端。`persistent=True` 时成功后写入 `_owned`。
 
@@ -143,7 +169,7 @@ A2XError
 
 ---
 
-##### `update_agent(dataset, service_id, fields)`
+#### `update_agent(dataset, service_id, fields)`
 
 部分字段更新（PUT 顶层 upsert，**只增不减**）。
 
@@ -161,7 +187,7 @@ A2XError
 
 ---
 
-##### `set_team_count(dataset, service_id, count)`
+#### `set_team_count(dataset, service_id, count)`
 
 把 `agentTeamCount` 置为指定非负整数。
 
@@ -177,7 +203,7 @@ A2XError
 
 ---
 
-##### `list_agents(dataset)`
+#### `list_agents(dataset)`
 
 轻量列表（`mode=browse`）：返回数据集**全部**服务，但每行只含 3 个字段。
 
@@ -187,7 +213,7 @@ A2XError
 
 ---
 
-##### `get_agent(dataset, service_id)`
+#### `get_agent(dataset, service_id)`
 
 单个服务完整信息（`mode=single`）。
 
@@ -202,7 +228,7 @@ A2XError
 
 ---
 
-##### `deregister_agent(dataset, service_id)`
+#### `deregister_agent(dataset, service_id)`
 
 注销服务。成功后清本地 `_owned` + L1 endpoint 缓存。
 
@@ -217,7 +243,7 @@ A2XError
 
 ---
 
-##### `register_blank_agent(dataset, endpoint, service_id=None, persistent=True)`
+#### `register_blank_agent(dataset, endpoint, service_id=None, persistent=True)`
 
 薄壳于 `register_agent`，构造 blank 模板：
 
@@ -240,11 +266,11 @@ A2XError
 
 ---
 
-##### `list_agents_full(dataset, page=1, size=-1)`
+#### `list_agents_full(dataset, page=1, size=-1)`
 
-整库完整元数据（`mode=full`）。
+整库完整元数据（`mode=full`），面向管理面板的"给我看全部"场景。
 
-**后端行为提醒**：对 a2a 条目，后端直接返回 Agent Card 本体（无 `id` 包装，见 [`src/backend/routers/dataset.py:232`](../src/backend/routers/dataset.py)）；对 generic/skill 保留 `{id, type, name, description, metadata}` 外壳。所以返回的 `AgentDetail.id` 对 a2a **总是空串**，需要从 `.raw` 读 card；对 generic/skill 正常。
+**后端行为提醒**：对 a2a 条目，后端直接返回 Agent Card 本体（无 `id` 包装）；generic/skill 保留 `{id, type, name, description, metadata}` 外壳。`AgentDetail.id` 对 a2a **总是空串**。当需要按字段挑选服务时请改用 `list_agents_by_filter`。
 
 **输入**：
 - `dataset: str`
@@ -256,25 +282,56 @@ A2XError
 
 ---
 
-##### `list_idle_blank_agents(dataset, n)`
+#### `list_agents_by_filter(dataset, **filters)`
 
-返回最空闲的 N 个空白 agent，按 `agentTeamCount` 升序。内部两次 HTTP：`mode=browse`（拿 sid）+ `mode=full`（拿 endpoint + count），按 `name` 联表。异步版用 `asyncio.gather` 并发。
+按字段等值筛选（`mode=filter`）。所有 kwargs 都作为 query 参数发给后端，AND 语义，**值与目标字段都强制字符串化比较**。
 
-筛选规则：
-- 只收 `name` 以 `_BlankAgent_` 开头的
-- 缺 `agentTeamCount` 视为 0（最空闲）
-- 缺 `endpoint` 的静默跳过（不符契约）
+**匹配目标**：后端对每个服务按类型取"原始 dict" —— a2a → `entry.agent_card`（原始 `description`，无 `build_description` 转换）；generic → `entry.service_data`；skill → `entry.skill_data`。字段**必须存在且值相等**才命中。
+
+**输入**：
+- `dataset: str`
+- `**filters: Any` — 至少 1 个；键不能是 `mode` / `service_id` / `size` / `page`；值不能是 `None`；列表/dict 类型不支持（query param 无法表达）
+
+**返回**：`list[dict]` — 每项是后端标准包装 `{id, type, name, description, metadata}`；对 a2a 来说 `metadata` 就是 Agent Card
+**错误**：
+- `ValueError` — 空字典 / 保留键 / None 值 / 空字符串键（本地）
+- `ValidationError` — 后端 400（空 filters 理论上本地已拦）
+
+**示例**：
+
+```python
+# 找所有 team count 为 0 的 a2a agent（任意描述）
+r = client.list_agents_by_filter("team_pool", agentTeamCount=0)
+# 复合条件
+r = client.list_agents_by_filter("team_pool", description="__BLANK__", agentTeamCount=0)
+```
+
+---
+
+#### `list_idle_blank_agents(dataset, n)`
+
+返回最空闲的 N 个空白 agent 的 Agent Card，按 `agentTeamCount` 升序。
+
+**实现**：单次 HTTP，走 `list_agents_by_filter(dataset, description="__BLANK__")`（SDK 内部 sentinel，调用方无需关心），然后本地按 `agentTeamCount`（缺省 0）升序排、取前 N。从每条 wrapped 响应抽出 `metadata`（= Agent Card）作为返回项。
+
+**调用方读法**：
+
+```python
+for card in client.list_idle_blank_agents("team_pool", n=3):
+    endpoint = card["endpoint"]
+    count    = card.get("agentTeamCount", 0)
+```
 
 **输入**：
 - `dataset: str`
 - `n: int ≥ 0`
 
-**返回**：`list[BlankAgentInfo(service_id, endpoint, agent_team_count)]`
+**返回**：`list[dict]` — 每项是 Agent Card 本身
 **错误**：`ValueError` — n 非法（本地）
 
 ---
 
-##### `replace_agent_card(dataset, service_id, agent_card)`
+#### `replace_agent_card(dataset, service_id, agent_card)`
 
 **整张覆盖** agent card（POST `/services/a2a` 同 sid → `_do_register` 全量替换 entry）。区别于 `update_agent` 的"只增不减"。
 
@@ -296,7 +353,7 @@ A2XError
 
 ---
 
-##### `restore_to_blank(dataset, service_id)`
+#### `restore_to_blank(dataset, service_id)`
 
 恢复为空白 agent（= 用 blank 模板调 `replace_agent_card`）。Endpoint 三层回退：
 
@@ -318,7 +375,7 @@ A2XError
 
 ---
 
-##### `close()` / `__enter__` / `__exit__`
+#### `close()` / `__enter__` / `__exit__`
 
 关闭底层 `httpx.Client` 连接池。支持上下文管理器：
 
@@ -546,7 +603,7 @@ sequenceDiagram
 
 ### 4.6 `list_idle_blank_agents`
 
-两次 HTTP 按 `name` join。异步版走 `asyncio.gather` 并发。
+单次 HTTP：`list_agents_by_filter(dataset, description="__BLANK__")` 让后端过滤，SDK 本地排序并抽出 card。
 
 ```mermaid
 sequenceDiagram
@@ -557,13 +614,11 @@ sequenceDiagram
 
     Dev->>Client: list_idle_blank_agents(ds, n)
     Client->>Client: 校验 n ≥ 0；n=0 直接返回 []
-    par 同步版串行；异步版 asyncio.gather
-        Client->>HTTP: GET ?mode=browse
-        API-->>HTTP: [{id, name, description}, ...]
-    and
-        Client->>HTTP: GET ?mode=full&size=-1
-        API-->>HTTP: {servers: [<raw cards 无 id 包装>], metadata: ...}
-    end
-    Client->>Client: 过滤 name 前缀 "_BlankAgent_"<br/>按 name join：sid ← browse，endpoint+count ← full<br/>缺 agentTeamCount → 0（最空闲）<br/>缺 endpoint → 静默跳过<br/>按 count 升序 → 取前 n
-    Client-->>Dev: list[BlankAgentInfo]
+    Client->>HTTP: GET ?mode=filter&description=__BLANK__
+    HTTP->>API: GET
+    Note over API: 对每个 entry 取原始 dict：<br/>a2a → agent_card；generic → service_data；skill → skill_data<br/>AND 匹配：k in raw 且 str(raw[k]) == v
+    API-->>HTTP: [{id, type, name, description, metadata}, ...]
+    HTTP-->>Client: list[dict]（wrapped）
+    Client->>Client: 抽出 metadata（= Agent Card）<br/>按 metadata["agentTeamCount"] 升序（缺省 0）<br/>取前 n
+    Client-->>Dev: list[dict]（Agent Card 列表）
 ```

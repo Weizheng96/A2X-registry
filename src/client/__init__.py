@@ -26,7 +26,6 @@ from .errors import (
 from .models import (
     AgentBrief,
     AgentDetail,
-    BlankAgentInfo,
     DatasetCreateResponse,
     DatasetDeleteResponse,
     DeregisterResponse,
@@ -56,7 +55,6 @@ __all__ = [
     "DeregisterResponse",
     "AgentBrief",
     "AgentDetail",
-    "BlankAgentInfo",
 ]
 
 __version__ = "0.1.0"

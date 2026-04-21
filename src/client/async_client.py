@@ -18,7 +18,6 @@ from .errors import NotFoundError, NotOwnedError, ValidationError
 from .models import (
     AgentBrief,
     AgentDetail,
-    BlankAgentInfo,
     DatasetCreateResponse,
     DatasetDeleteResponse,
     DeregisterResponse,
@@ -217,50 +216,39 @@ class AsyncA2XClient:
         servers = _i.parse_full_list_servers(resp)
         return [AgentDetail.from_dict(s) for s in servers]
 
+    async def list_agents_by_filter(
+        self,
+        dataset: str,
+        **filters: Any,
+    ) -> list[dict[str, Any]]:
+        """See ``A2XClient.list_agents_by_filter``."""
+        params = _i.build_filter_params(filters)
+        resp = await self._transport.request(
+            "GET", _i.services_path(dataset), params=params
+        )
+        data = resp.json()
+        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
     async def list_idle_blank_agents(
         self,
         dataset: str,
         n: int,
-    ) -> list[BlankAgentInfo]:
-        """See ``A2XClient.list_idle_blank_agents``.
-
-        Runs the two required HTTP calls concurrently via ``asyncio.gather``.
-        """
+    ) -> list[dict[str, Any]]:
+        """See ``A2XClient.list_idle_blank_agents``. One HTTP call."""
         if not isinstance(n, int) or isinstance(n, bool) or n < 0:
             raise ValueError(f"n must be a non-negative int, got {n!r}")
         if n == 0:
             return []
 
-        briefs, entries = await asyncio.gather(
-            self.list_agents(dataset),
-            self.list_agents_full(dataset),
+        wrapped = await self.list_agents_by_filter(
+            dataset, description=_i.BLANK_DESCRIPTION_SENTINEL
         )
-        name_to_sid: dict[str, str] = {
-            b.name: b.id for b in briefs if _i.is_blank_agent_name(b.name)
-        }
-        if not name_to_sid:
-            return []
-
-        result: list[BlankAgentInfo] = []
-        for detail in entries:
-            card = detail.raw
-            name = card.get("name") if isinstance(card, dict) else None
-            sid = name_to_sid.get(name) if isinstance(name, str) else None
-            if sid is None:
-                continue
-            endpoint = _i.extract_endpoint(card)
-            if endpoint is None:
-                continue
-            result.append(
-                BlankAgentInfo(
-                    service_id=sid,
-                    endpoint=endpoint,
-                    agent_team_count=_i.extract_team_count(card),
-                )
-            )
-
-        result.sort(key=lambda b: b.agent_team_count)
-        return result[:n]
+        cards = [
+            w["metadata"] for w in wrapped
+            if isinstance(w.get("metadata"), dict)
+        ]
+        cards.sort(key=_i.extract_team_count)
+        return cards[:n]
 
     async def replace_agent_card(
         self,

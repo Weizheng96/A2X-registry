@@ -119,10 +119,11 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `mode` | string | `"browse"` | `browse` \| `admin` \| `full` \| `single` |
+| `mode` | string | `"browse"` | `browse` \| `admin` \| `full` \| `single` \| `filter` |
 | `service_id` | string | — | 服务 ID，仅 `single` 模式必填 |
 | `size` | int | `-1` | 分页大小，`-1` 返回全部 |
 | `page` | int | `1` | 页码（从 1 开始），仅 `full` 模式 + `size>0` 时生效 |
+| **其他任意 key** | string | — | `filter` 模式下非保留参数全部作为筛选条件（AND，字符串等值） |
 
 **mode 说明：**
 
@@ -132,6 +133,7 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `admin` | `id, name, description, type, source` | 管理面板条目列表 |
 | `full` | 完整元数据（分页） | 管理面板详细查看 |
 | `single` | 单个服务完整信息（skill 类型返回 ZIP） | 按 ID 精确查询 |
+| `filter` | `[{id, type, name, description, metadata}]` | 按字段等值筛选（AND 语义，字符串化比较）；匹配目标是服务**原始**数据（a2a 用 `agent_card`、generic 用 `service_data`、skill 用 `skill_data`），与 browse/full 展示的 `build_description` 结果**不一致但各自正确** |
 
 **响应 — browse 模式：**
 ```json
@@ -154,6 +156,26 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
   "metadata": { "count": 20, "total": 100, "page": 1, "total_pages": 5, "size": 20 }
 }
 ```
+
+**响应 — filter 模式：**
+```json
+[
+  {
+    "id": "agent_abc",
+    "type": "a2a",
+    "name": "_BlankAgent_http://a.example",
+    "description": "__BLANK__.",
+    "metadata": { "name": "...", "description": "__BLANK__", "endpoint": "...", "agentTeamCount": 0 }
+  }
+]
+```
+
+**filter 模式约束**：
+- **至少 1 个非保留参数**（保留参数：`mode`/`service_id`/`size`/`page`），否则 400
+- 字段**必须存在**且 `str(raw_value) == query_value`（AND 语义）
+- 匹配的是**原始数据**：对 a2a 是 `entry.agent_card.model_dump(exclude_none=True)`（`description` 是原始未转换值）；对 generic 是 `entry.service_data`；对 skill 是 `entry.skill_data`
+- 注意响应里外层 `description` 是 `build_description(card)` 的输出（a2a 会带句号），但 `metadata.description` 是原始值
+- 请求示例：`GET /api/datasets/team/services?mode=filter&description=__BLANK__&agentTeamCount=0`
 
 ---
 

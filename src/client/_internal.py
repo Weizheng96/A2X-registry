@@ -28,9 +28,14 @@ DEFAULT_OWNERSHIP_FILE: Final[Path] = Path.home() / ".a2x_client" / "owned.json"
 TEAM_COUNT_FIELD: Final[str] = "agentTeamCount"
 
 BLANK_AGENT_NAME_PREFIX: Final[str] = "_BlankAgent_"
-"""Name-prefix contract identifying idle-pool agents. Any agent whose
-``name`` starts with this string is treated as blank by ``list_idle_blank_agents``.
-Changing it breaks interop across SDK versions."""
+"""Name prefix used when constructing a blank card. Kept distinct so two
+blank agents with different endpoints get different ``name``s (and thus
+different sids via ``generate_service_id``); no longer used for discovery."""
+
+BLANK_DESCRIPTION_SENTINEL: Final[str] = "__BLANK__"
+"""Description sentinel identifying idle-pool agents. Matched exactly via
+``mode=filter`` against the **raw** agent_card.description (pre-
+build_description transform). Changing it breaks cross-SDK interop."""
 
 ENDPOINT_FIELD: Final[str] = "endpoint"
 """Custom AgentCard field holding the agent's endpoint URL. AgentCard uses
@@ -108,17 +113,50 @@ def build_team_count_body(count: int) -> dict[str, Any]:
 
 
 def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
-    """Blank-agent AgentCard template. ``name`` encodes the endpoint so
-    the deterministic ``generate_service_id("agent", name)`` on the backend
-    keeps sid stable across re-registrations of the same endpoint."""
+    """Blank-agent AgentCard template.
+
+    ``name`` encodes the endpoint so the deterministic
+    ``generate_service_id("agent", name)`` on the backend keeps sid stable
+    across re-registrations of the same endpoint.
+
+    ``description`` carries the ``BLANK_DESCRIPTION_SENTINEL`` — this is
+    what ``mode=filter`` matches to discover idle-pool agents.
+    """
     if not isinstance(endpoint, str) or not endpoint.strip():
         raise ValueError(f"endpoint must be a non-empty string, got {endpoint!r}")
     return {
         "name": f"{BLANK_AGENT_NAME_PREFIX}{endpoint}",
-        "description": "_",
+        "description": BLANK_DESCRIPTION_SENTINEL,
         ENDPOINT_FIELD: endpoint,
         TEAM_COUNT_FIELD: 0,
     }
+
+
+def build_filter_params(filters: dict[str, Any]) -> dict[str, Any]:
+    """Build query params for ``GET .../services?mode=filter&...``.
+
+    Every ``(k, v)`` in ``filters`` becomes a query param. Values are
+    coerced to strings (HTTP query params are strings; backend also
+    string-coerces its comparison). Empty filter dict raises locally.
+    """
+    if not isinstance(filters, dict) or not filters:
+        raise ValueError(
+            f"filters must be a non-empty dict, got {filters!r}"
+        )
+    reserved = {"mode", "service_id", "size", "page"}
+    params: dict[str, Any] = {"mode": "filter"}
+    for k, v in filters.items():
+        if not isinstance(k, str) or not k:
+            raise ValueError(f"filter keys must be non-empty strings, got {k!r}")
+        if k in reserved:
+            raise ValueError(
+                f"filter key {k!r} collides with a reserved query param "
+                f"({reserved}); backend would drop it before filtering"
+            )
+        if v is None:
+            raise ValueError(f"filter value for {k!r} must not be None")
+        params[k] = str(v)
+    return params
 
 
 def build_full_list_params(page: int, size: int) -> dict[str, Any]:
@@ -132,10 +170,6 @@ def build_full_list_params(page: int, size: int) -> dict[str, Any]:
     if not isinstance(size, int) or isinstance(size, bool) or (size < -1 or size == 0):
         raise ValueError(f"size must be -1 or >= 1, got {size!r}")
     return {"mode": "full", "page": page, "size": size}
-
-
-def is_blank_agent_name(name: Any) -> bool:
-    return isinstance(name, str) and name.startswith(BLANK_AGENT_NAME_PREFIX)
 
 
 def extract_team_count(card: Any) -> int:

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -155,10 +155,33 @@ async def delete_dataset(dataset: str):
 
 # ── Services (register / deregister / list) ───────────────────────────────────
 
+_RESERVED_QUERY_PARAMS = frozenset({"mode", "service_id", "size", "page"})
+
+
+def _entry_filter_dict(entry) -> Optional[dict]:
+    """Type-specific 'raw' dict used for ``mode=filter`` matching.
+
+    Returns the untransformed per-type data model — AgentCard for a2a
+    (with ``extra=allow`` custom fields like ``endpoint``/``agentTeamCount``
+    preserved), GenericServiceData for generic, SkillData for skill. This
+    intentionally differs from the ``build_description``-transformed
+    ``description`` exposed by ``list_services`` / browse / full, giving
+    filter callers predictable equality semantics on what they wrote in.
+    """
+    if entry.type == "a2a" and entry.agent_card:
+        return entry.agent_card.model_dump(exclude_none=True)
+    if entry.type == "generic" and entry.service_data:
+        return entry.service_data.model_dump()
+    if entry.type == "skill" and entry.skill_data:
+        return entry.skill_data.model_dump()
+    return None
+
+
 @router.get("/{dataset}/services")
 async def list_services(
     dataset: str,
-    mode: str = Query("browse", description="browse | admin | full | single"),
+    request: Request,
+    mode: str = Query("browse", description="browse | admin | full | single | filter"),
     service_id: Optional[str] = Query(None, description="Service ID (required for single mode)"),
     size: int = Query(-1, ge=-1),
     page: int = Query(1, ge=1),
@@ -170,6 +193,11 @@ async def list_services(
       admin  — with type/source: [{id, name, description, type, source}]
       full   — paginated full metadata (for admin panel list op)
       single — query one service by ID; returns full entry (ZIP for skill type)
+      filter — every non-reserved query param becomes a filter condition
+               (AND semantics, string-coerced equality). Matches on each
+               entry's type-specific raw dict (see _entry_filter_dict).
+               Returns the standard [{id, type, name, description, metadata}]
+               wrapper; missing fields → not a match.
     """
     if mode == "single":
         if not service_id:
@@ -192,6 +220,29 @@ async def list_services(
         # Generic/A2A: return full service.json entry
         output = [s for s in svc.list_services(dataset) if s["id"] == service_id]
         return output[0] if output else None
+
+    if mode == "filter":
+        filters = {
+            k: v for k, v in request.query_params.items()
+            if k not in _RESERVED_QUERY_PARAMS
+        }
+        if not filters:
+            raise HTTPException(
+                status_code=400,
+                detail="mode=filter requires at least one non-reserved query param",
+            )
+        svc = get_registry_service()
+        wrapped_by_id = {s["id"]: s for s in svc.list_services(dataset)}
+        output = []
+        for entry in svc.list_entries(dataset):
+            match = _entry_filter_dict(entry)
+            if match is None:
+                continue
+            if all(k in match and str(match[k]) == v for k, v in filters.items()):
+                wrapped = wrapped_by_id.get(entry.service_id)
+                if wrapped is not None:
+                    output.append(wrapped)
+        return output
 
     if mode == "browse":
         service_file = PROJECT_ROOT / "database" / dataset / "service.json"
