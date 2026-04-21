@@ -16,6 +16,7 @@ from .errors import NotFoundError, NotOwnedError, ValidationError
 from .models import (
     AgentBrief,
     AgentDetail,
+    BlankAgentInfo,
     DatasetCreateResponse,
     DatasetDeleteResponse,
     DeregisterResponse,
@@ -46,6 +47,11 @@ class A2XClient:
             file_path=_i.resolve_ownership_file(ownership_file),
             base_url=self._base_url,
         )
+        # L1 cache for restore_to_blank: {(dataset, service_id): endpoint}.
+        # Populated by register_blank_agent / restore_to_blank in the same
+        # process; not persisted (by design). L2 fallback in
+        # restore_to_blank reads the endpoint from the current card.
+        self._blank_endpoints: dict[tuple[str, str], str] = {}
 
     # ── Read-only config exposure ────────────────────────────────────────────
     # Stored as underscore attributes because changing them at runtime would
@@ -177,7 +183,172 @@ class A2XClient:
             resp = self._transport.request("DELETE", _i.service_path(dataset, service_id))
         except NotFoundError:
             self._owned.remove(dataset, service_id)  # D3
+            self._blank_endpoints.pop((dataset, service_id), None)
             raise
         result = DeregisterResponse.from_dict(resp.json())
         self._owned.remove(dataset, service_id)
+        self._blank_endpoints.pop((dataset, service_id), None)
         return result
+
+    # ── Team-agent helpers ───────────────────────────────────────────────────
+
+    def register_blank_agent(
+        self,
+        dataset: str,
+        endpoint: str,
+        service_id: str | None = None,
+        persistent: bool = True,
+    ) -> RegisterResponse:
+        """Register a blank/idle agent into the idle pool.
+
+        The blank AgentCard is::
+
+            {"name": "_BlankAgent_<endpoint>", "description": "_",
+             "endpoint": endpoint, "agentTeamCount": 0}
+
+        The ``name`` prefix is the discovery contract — ``list_idle_blank_agents``
+        identifies blank entries by this prefix. Re-registering the same
+        endpoint is idempotent (same sid → backend ``status="updated"``).
+        """
+        card = _i.build_blank_agent_card(endpoint)
+        result = self.register_agent(
+            dataset, card, service_id=service_id, persistent=persistent
+        )
+        self._blank_endpoints[(dataset, result.service_id)] = endpoint
+        return result
+
+    def list_agents_full(
+        self,
+        dataset: str,
+        page: int = 1,
+        size: int = -1,
+    ) -> list[AgentDetail]:
+        """Return full-metadata entries via ``GET ...?mode=full``.
+
+        Backend quirk (see ``_internal.parse_full_list_servers``): a2a entries
+        arrive as raw Agent Cards with no ``id`` wrapper, so for those
+        ``AgentDetail.id`` is empty and ``AgentDetail.raw`` is the card.
+        Generic/skill entries keep the ``{id, type, name, description,
+        metadata}`` shape. Callers needing sids for a2a must cross-reference
+        ``list_agents(dataset)``.
+        """
+        params = _i.build_full_list_params(page, size)
+        resp = self._transport.request("GET", _i.services_path(dataset), params=params)
+        servers = _i.parse_full_list_servers(resp)
+        return [AgentDetail.from_dict(s) for s in servers]
+
+    def list_idle_blank_agents(
+        self,
+        dataset: str,
+        n: int,
+    ) -> list[BlankAgentInfo]:
+        """Return up to ``n`` blank agents, sorted by ``agentTeamCount`` ascending.
+
+        Two HTTP calls: ``mode=browse`` to recover sids (lost in ``mode=full``
+        for a2a) and ``mode=full`` to read ``endpoint`` + ``agentTeamCount``.
+        Missing ``agentTeamCount`` is treated as 0 (most idle).
+        """
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"n must be a non-negative int, got {n!r}")
+        if n == 0:
+            return []
+
+        briefs = self.list_agents(dataset)
+        name_to_sid: dict[str, str] = {
+            b.name: b.id for b in briefs if _i.is_blank_agent_name(b.name)
+        }
+        if not name_to_sid:
+            return []
+
+        entries = self.list_agents_full(dataset)
+        result: list[BlankAgentInfo] = []
+        for detail in entries:
+            card = detail.raw
+            name = card.get("name") if isinstance(card, dict) else None
+            sid = name_to_sid.get(name) if isinstance(name, str) else None
+            if sid is None:
+                continue
+            endpoint = _i.extract_endpoint(card)
+            if endpoint is None:
+                continue
+            result.append(
+                BlankAgentInfo(
+                    service_id=sid,
+                    endpoint=endpoint,
+                    agent_team_count=_i.extract_team_count(card),
+                )
+            )
+
+        result.sort(key=lambda b: b.agent_team_count)
+        return result[:n]
+
+    def replace_agent_card(
+        self,
+        dataset: str,
+        service_id: str,
+        agent_card: dict[str, Any],
+    ) -> RegisterResponse:
+        """Fully replace an owned a2a agent's card (not a partial merge).
+
+        Routes through ``POST /api/datasets/{ds}/services/a2a`` with the
+        existing ``service_id``; ``_do_register`` replaces the whole entry
+        (see ``src/register/service.py``), so omitted fields are dropped —
+        the opposite of ``update_agent`` (PUT upsert).
+
+        Enforces that ``agent_card`` contains a non-empty ``endpoint`` field
+        (raises ``ValueError`` locally, no HTTP): ``restore_to_blank`` relies
+        on this field for its L2 fallback across process restarts.
+        """
+        _i.assert_card_has_endpoint(agent_card)
+        self._assert_owned(dataset, service_id)
+        body = _i.build_register_agent_body(agent_card, service_id, persistent=True)
+        try:
+            resp = self._transport.request(
+                "POST", _i.a2a_register_path(dataset), json=body
+            )
+        except NotFoundError:
+            self._owned.remove(dataset, service_id)  # D3 parity
+            self._blank_endpoints.pop((dataset, service_id), None)
+            raise
+        result = RegisterResponse.from_dict(resp.json())
+        self._owned.add(dataset, result.service_id)  # idempotent
+        return result
+
+    def restore_to_blank(
+        self,
+        dataset: str,
+        service_id: str,
+    ) -> RegisterResponse:
+        """Overwrite an owned agent with the blank card template.
+
+        Endpoint resolution:
+          - **L1**: in-memory cache populated at ``register_blank_agent`` /
+            previous ``restore_to_blank`` — zero extra HTTP in the common
+            single-process flow.
+          - **L2**: ``get_agent`` reads ``endpoint`` from the current card
+            (works across process restarts if the non-blank card preserved
+            the field).
+          - **L3**: ``ValueError`` if neither path yields an endpoint.
+        """
+        self._assert_owned(dataset, service_id)
+        endpoint = self._resolve_blank_endpoint(dataset, service_id)
+        card = _i.build_blank_agent_card(endpoint)
+        result = self.replace_agent_card(dataset, service_id, card)
+        self._blank_endpoints[(dataset, service_id)] = endpoint
+        return result
+
+    def _resolve_blank_endpoint(self, dataset: str, service_id: str) -> str:
+        cached = self._blank_endpoints.get((dataset, service_id))
+        if cached:
+            return cached
+        detail = self.get_agent(dataset, service_id)
+        # mode=single wraps the card in ``metadata``; try both slots.
+        endpoint = _i.extract_endpoint(detail.metadata) or _i.extract_endpoint(detail.raw)
+        if endpoint is None:
+            raise ValueError(
+                f"Cannot restore {service_id!r} to blank: 'endpoint' missing "
+                "from the current Agent Card. Either preserve the 'endpoint' "
+                "field when calling replace_agent_card, or call "
+                "register_blank_agent again with the desired endpoint."
+            )
+        return endpoint

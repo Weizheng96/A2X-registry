@@ -1,408 +1,400 @@
 # Client SDK 设计文档
 
-本文档描述 Python 客户端 SDK（`src/client/`）的设计。系统整体视图及其他模块见 [a2x_design.md](a2x_design.md)；后端 HTTP API 规范见 [backend_api.md](backend_api.md)。
+## 1. 整体介绍
 
-## 模块定位
+`src/client/` 是 A2X Registry 的 Python 客户端 SDK，把对 FastAPI 后端的 HTTP 请求包装成类型清晰、幂等安全的方法。
 
-`src/client/` 为开发者提供简化接口，将函数参数翻译为对 A2X Registry FastAPI 后端的 HTTP 请求。
-
-**首要使用场景**：**Agent Team 注册与发现**。开发者将团队中的每个 Agent 以 A2A Agent Card v0.0 格式注册到一个数据集中，通过数据集管理团队成员、更新组队状态、查询成员。
-
-**独立分发约束**：
-
-- SDK 必须**自包含**，不依赖 `src/backend/` / `src/register/` / `src/common/` / `src/a2x/` 等项目内部模块
-- 对外依赖仅 `httpx`（及 Python 标准库），Python ≥ 3.10
-- 两种使用方式：
-  1. 包内使用：`from src.client import A2XClient, AsyncA2XClient`
-  2. 独立分发：打包为 `a2x-registry-client` 后 `from a2x_client import A2XClient, AsyncA2XClient`
+**首要场景**：**Agent Team 动态组队** —— 每个 Agent 以"空白 agent"身份进入空闲池；另一个 Agent 发现它们、发起 P2P 组队；组队期间各自更新 card 的 `agentTeamCount`；解散后恢复空白。SDK 提供 blank 注册 / 空闲发现 / 整体覆盖 / 恢复空白 4 个团队原语。
 
 **同步 + 异步双入口**：
 
-| 入口 | 底层 | 上下文管理 |
-|------|------|-----------|
-| `A2XClient` | `httpx.Client` | `with A2XClient(...) as c:` |
-| `AsyncA2XClient` | `httpx.AsyncClient` | `async with AsyncA2XClient(...) as c:` |
+| 入口 | 底层 |
+|------|------|
+| `A2XClient` | `httpx.Client` |
+| `AsyncA2XClient` | `httpx.AsyncClient` |
 
-两者**方法签名完全对称**（名称、参数、返回类型、异常层级一致），仅 async 版每个方法以 `async def` 定义、返回 `Awaitable[T]`。
+方法名、参数、返回类型、异常体系完全对称；async 版每个方法以 `async def` 定义，关闭方法为 `aclose()`。
+
+**独立分发约束**：SDK 自包含，仅依赖 `httpx`（Python ≥ 3.10），不引用项目其他模块。`from src.client import ...` 或打包后 `from a2x_client import ...` 均可。
 
 ---
 
-## 1. 如何使用
+## 2. 如何使用
 
-### 1.1 Agent Team 完整流程（同步）
+### 2.1 经典流程代码
+
+Agent A 入池 → Agent B 发现并发起 P2P 组队 → A 更新 card → 解散后 A 恢复空白：
 
 ```python
-from src.client import A2XClient    # 或: from a2x_client import A2XClient
+from src.client import A2XClient, BlankAgentInfo
 
 client = A2XClient(base_url="http://127.0.0.1:8000")
+client.create_dataset("team_pool")    # 初始化（只做一次）
 
-# ① 创建团队数据集（默认锁定仅接受 A2A v0.0 格式）
-client.create_dataset("research_team")
+# ── ① Agent A: 作为空白 agent 入池 ─────────────────────────────
+resp = client.register_blank_agent("team_pool", endpoint="http://a.example:8080")
+sid_a = resp.service_id
 
-# ② 注册团队成员（Agent Card v0.0 最小字段：name + description）
-planner = client.register_agent("research_team", {
-    "protocolVersion": "0.0",
-    "name": "Task Planner",
-    "description": "拆解复杂任务为可执行子任务",
+# ── ② Agent B: 取 N 个最空闲的 blank agent ──────────────────────
+idle: list[BlankAgentInfo] = client.list_idle_blank_agents("team_pool", n=3)
+# 每条含 service_id / endpoint / agent_team_count（按 count 升序）
+
+# ── ③ B 选中 A，向 A 的 endpoint 直接发起 P2P 组队请求（绕过注册中心）
+#       A 收到后同意                                              ──
+
+# ── ④ A 覆盖自己的 card，team count 置 1 ───────────────────────
+client.replace_agent_card("team_pool", sid_a, {
+    "name": "Task Planner (team-1)",
+    "description": "负责拆解任务",
+    "endpoint": "http://a.example:8080",   # 必须保留；SDK 本地校验
+    "agentTeamCount": 1,
+    "skills": [{"name": "plan", "description": "子任务拆解"}],
 })
 
-researcher = client.register_agent("research_team", {
-    "protocolVersion": "0.0",
-    "name": "Web Researcher",
-    "description": "基于关键词检索网页并摘要",
-    "skills": [
-        {"name": "search", "description": "搜索互联网"},
-        {"name": "summarize", "description": "提炼关键信息"},
-    ],
-})
+# ── ⑤ B 协作完成，向 A 发起 P2P 解散请求，A 同意 ─────────────────
 
-# ③ 初始化组队状态字段（可选）
-client.set_team_count("research_team", planner.service_id, 0)
-client.set_team_count("research_team", researcher.service_id, 0)
-
-# ④ 部分字段更新（顶层 upsert，未列出字段保持不变）
-client.update_agent(
-    dataset="research_team",
-    service_id=researcher.service_id,
-    fields={"description": "检索 + 摘要 + 多语种翻译"},
-)
-
-# ⑤ 实际组队时更新 count
-client.set_team_count("research_team", planner.service_id, 2)
-client.set_team_count("research_team", researcher.service_id, 2)
-
-# ⑥ 列出成员
-for brief in client.list_agents("research_team"):
-    print(brief.id, "-", brief.name, ":", brief.description)
-
-# ⑦ 查询某成员完整信息（含自定义字段）
-detail = client.get_agent("research_team", planner.service_id)
-print(detail.name, "team count:", detail.metadata.get("agentTeamCount"))
-
-# ⑧ 注销成员
-client.deregister_agent("research_team", researcher.service_id)
-
-# ⑨ 清理数据集
-client.delete_dataset("research_team")
+# ── ⑥ A 恢复为空白，team count 归 0 ─────────────────────────────
+client.restore_to_blank("team_pool", sid_a)
+# endpoint 从 L1 内存缓存取，无额外 HTTP
 
 client.close()
 ```
 
-### 1.2 异步等价流程
+**异步版**：把 `A2XClient` 换成 `AsyncA2XClient`，方法前加 `await` 即可（或 `async with AsyncA2XClient(...) as client:`）。
 
-```python
-import asyncio
-from src.client import AsyncA2XClient
+### 2.2 全部 method 解释
 
-async def main():
-    async with AsyncA2XClient(base_url="http://127.0.0.1:8000") as client:
-        await client.create_dataset("research_team")
+`A2XClient` 共 15 个对外方法（含 `__init__` 与 `close`）。`AsyncA2XClient` **一对一镜像**，仅 `close` → `aclose`、调用形式改为 `await client.method(...)`；方法名、参数、返回类型、异常一致。下文仅列同步版。
 
-        planner = await client.register_agent("research_team", {
-            "protocolVersion": "0.0", "name": "Planner", "description": "d",
-        })
-        researcher = await client.register_agent("research_team", {
-            "protocolVersion": "0.0", "name": "Researcher", "description": "d",
-        })
+**通用异常**（每个方法都可能发生，不重复列出）：
+- `A2XConnectionError` — 网络 / 超时
+- `A2XError` — 基类兜底
 
-        # 并发初始化 team count
-        await asyncio.gather(
-            client.set_team_count("research_team", planner.service_id, 0),
-            client.set_team_count("research_team", researcher.service_id, 0),
-        )
-
-        # 并发查询所有成员详情
-        details = await asyncio.gather(
-            client.get_agent("research_team", planner.service_id),
-            client.get_agent("research_team", researcher.service_id),
-        )
-        for d in details:
-            print(d.name, "team count:", d.metadata.get("agentTeamCount"))
-
-        await client.delete_dataset("research_team")
-
-asyncio.run(main())
-```
-
-**何时选异步**：并发注册/查询多个 Agent（如 Agent Team 初始化），或集成到已有的 asyncio / FastAPI / aiohttp 应用时。其余场景同步版足够。
-
-### 1.3 初始化参数
-
-```python
-A2XClient(
-    base_url: str = "http://127.0.0.1:8000",
-    timeout: float = 30.0,
-    api_key: str | None = None,
-    ownership_file: Path | str | Literal[False] | None = None,
-)
-```
-
-| 参数 | 说明 |
-|------|------|
-| `base_url` | 后端地址。**自动补尾 `/`**，以支持挂载在子路径下的后端（如 `http://host/a2x/`） |
-| `timeout` | HTTP 超时（秒） |
-| `api_key` | 非空时自动添加请求头 `Authorization: Bearer <api_key>` |
-| `ownership_file` | `None` → 默认 `~/.a2x_client/owned.json`；`False` → 禁用持久化仅内存；`Path`/`str` → 自定义路径 |
-
-构造函数不发任何 HTTP 请求；`base_url` / `timeout` / `api_key` 以**只读 property** 暴露，运行时改写不会生效。
-
-### 1.4 所有权约束
-
-SDK 维护 `_owned: {dataset: {service_id}}`，记录**本客户端注册过的服务**。只允许更新/注销自己注册的服务，从而避免误改他人。
-
-| method | 写入 `_owned` | 校验 `_owned` |
-|--------|:------------:|:------------:|
-| `register_agent(..., persistent=True)` | ✅ 成功后加入 | — |
-| `register_agent(..., persistent=False)` | — （跳过，避免服务器重启后的 404 级联） | — |
-| `update_agent` | — | ✅ 不属于本客户端 → `NotOwnedError`（**不发 HTTP**） |
-| `set_team_count` | — | ✅ 同上 |
-| `deregister_agent` | 成功后移除 | ✅ 同上 |
-| `delete_dataset` | 成功/400 均移除该数据集整段 | — |
-| `list_agents` / `get_agent` / `create_dataset` | — | — （只读或跨所有权） |
-
-**自动同步本地与远端**：
-
-- 任一 mutation 命中后端 404 → SDK 自动从 `_owned` 移除该 `service_id` 再重抛 `NotFoundError`（避免本地缓存与后端永久偏差）
-- `delete_dataset` 命中 400（数据集早被删）→ 也清本地再重抛 `ValidationError`
-
-### 1.5 持久化：`owned.json`
-
-默认存于 `~/.a2x_client/owned.json`，**每次变更后立即原子写盘**。支持同一开发者连接多个后端：
-
-```json
-{
-  "schema_version": 1,
-  "data": {
-    "https://registry.example.com/": {
-      "research_team": ["agent_planner_xxx", "agent_researcher_yyy"]
-    },
-    "http://127.0.0.1:8000/": {
-      "test_team": ["agent_test_zzz"]
-    }
-  }
-}
-```
-
-**并发安全**：
-
-- **跨进程**：`owned.json.lock` 兄弟文件持锁（POSIX `fcntl.flock`、Windows `msvcrt.locking`），保护整个 read-modify-write
-- **同进程**：`threading.Lock` 串行化所有 mutation
-- **掉电安全**：`fsync(tmp)` → `os.replace(tmp, final)`，保证永远不会留下半写入文件
-- **I/O 失败降级**：磁盘满等 OSError 降级为 `warnings.warn`——HTTP 已成功时若抛异常会诱导调用方重试，反而在后端制造重复
-
-**向后兼容**：旧格式（无 `schema_version` 的扁平 `{base_url: {...}}`）读取时静默迁移为 v1。
-
-### 1.6 异常体系
+完整异常层级：
 
 ```
-A2XError                                基类，携带 status_code + payload
-├── A2XConnectionError                 网络 / 超时
-├── A2XHTTPError                       4xx/5xx 通用
+A2XError
+├── A2XConnectionError                网络 / 超时
+├── A2XHTTPError                      4xx/5xx 通用
 │   ├── NotFoundError                 404
 │   ├── ValidationError               400 / 422
-│   │   └── UserConfigServiceImmutableError   user_config 来源服务不可改
-│   ├── UnexpectedServiceTypeError    get_agent 收到非 JSON（如 skill ZIP）
+│   │   └── UserConfigServiceImmutableError   user_config 来源不可改
+│   ├── UnexpectedServiceTypeError    get_agent 收到非 JSON（skill ZIP）
 │   └── ServerError                   5xx
-└── NotOwnedError                      本地所有权校验失败，未发 HTTP
+└── NotOwnedError                     本地所有权校验失败，未发 HTTP
 ```
 
-> `UserConfigDeregisterForbiddenError` 作为 `UserConfigServiceImmutableError` 的别名保留，兼容旧代码。
-
-常见处理示例：
-
-```python
-from src.client import (
-    A2XClient, NotOwnedError, NotFoundError,
-    ValidationError, A2XConnectionError,
-)
-
-try:
-    client.update_agent("ds", sid, {"description": "x"})
-except NotOwnedError:
-    ...  # 本地 fail-fast，sid 不是本 client 注册的
-except NotFoundError:
-    ...  # 后端已找不到该 service（本地 _owned 已自动清理）
-except ValidationError as e:
-    ...  # 字段校验失败、user_config 来源等；e.payload 含细节
-except A2XConnectionError:
-    ...  # 网络层失败
-```
-
-### 1.7 幂等性建议
-
-`register_agent` 省略 `service_id` 时由后端生成 ID。**若调用返回失败但服务已在后端创建**（响应在网络上丢失），重试会产生孤儿服务。
-
-需要 retry-safe 行为的调用方应**显式传入 `service_id`**（例如 UUID），重试将变为等价的"重注册 → status=updated"，不会产生重复：
-
-```python
-import uuid
-sid = f"agent_{uuid.uuid4().hex}"
-client.register_agent("team", card, service_id=sid)   # 重试同 sid 幂等
-```
+#### 2.2.1 A2XClient
 
 ---
 
-## 2. 整体架构
+##### `__init__(base_url, timeout, api_key, ownership_file)`
 
-### 2.1 模块划分
+构造客户端。不发 HTTP，仅建连接池 + 从磁盘恢复 `_owned`。
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `base_url` | `str` | `"http://127.0.0.1:8000"` | 自动补尾斜杠，支持子路径挂载 |
+| `timeout` | `float` | `30.0` | HTTP 超时（秒） |
+| `api_key` | `str \| None` | `None` | 非空时加请求头 `Authorization: Bearer ...` |
+| `ownership_file` | `Path \| str \| False \| None` | `None` | `None`=`~/.a2x_client/owned.json`；`False`=仅内存；其他=显式路径 |
+
+**返回**：`A2XClient`
+**错误**：无（磁盘读失败降级为 warning）
+
+---
+
+##### `create_dataset(name, embedding_model, formats)`
+
+创建数据集。SDK 默认 `formats={"a2a":"v0.0"}`（Agent Team 场景）；显式传 `None` 则省略，由后端三种类型全开。
+
+**输入**：
+- `name: str`
+- `embedding_model: str = "all-MiniLM-L6-v2"`
+- `formats: dict | None` — 允许的注册格式；省略走 SDK 默认
+
+**返回**：`DatasetCreateResponse(dataset, embedding_model, formats, status)`
+**错误**：`ValidationError`（名字非法 / formats 规范化后为空）
+
+---
+
+##### `delete_dataset(name)`
+
+删除数据集全部数据。成功或 400（已不存在）都会清本地 `_owned[name]`。
+
+**输入**：`name: str`
+**返回**：`DatasetDeleteResponse(dataset, status)`
+**错误**：`ValidationError`（数据集不存在）
+
+---
+
+##### `register_agent(dataset, agent_card, service_id=None, persistent=True)`
+
+注册 A2A Agent。`agent_card` dict 整体透传后端。`persistent=True` 时成功后写入 `_owned`。
+
+**输入**：
+- `dataset: str`
+- `agent_card: dict` — 至少含 `name` + `description`
+- `service_id: str | None` — 省略由后端 `generate_service_id("agent", name)` 派生（SHA256 前 16 hex）
+- `persistent: bool = True`
+
+**返回**：`RegisterResponse(service_id, dataset, status)`，`status ∈ {"registered","updated"}`
+**错误**：`ValidationError`（card 格式校验失败 / 数据集不存在 / 该类型未允许）
+
+---
+
+##### `update_agent(dataset, service_id, fields)`
+
+部分字段更新（PUT 顶层 upsert，**只增不减**）。
+
+**输入**：
+- `dataset: str`
+- `service_id: str`
+- `fields: dict` — 任意 `{field: value}`
+
+**返回**：`PatchResponse(service_id, dataset, status, changed_fields, taxonomy_affected)`
+**错误**：
+- `NotOwnedError` — sid 不属于本客户端（本地 fail-fast，**不发 HTTP**）
+- `NotFoundError` — 后端 404；自动清 `_owned` 后重抛
+- `ValidationError` — 未知字段 / 改名冲突
+- `UserConfigServiceImmutableError` — 服务源于 `user_config.json`
+
+---
+
+##### `set_team_count(dataset, service_id, count)`
+
+把 `agentTeamCount` 置为指定非负整数。
+
+**输入**：
+- `dataset: str`
+- `service_id: str`
+- `count: int ≥ 0`
+
+**返回**：`PatchResponse`，`changed_fields=["agentTeamCount"]`，`taxonomy_affected=False`
+**错误**：
+- `ValueError` — count 非法（本地）
+- `NotOwnedError` / `NotFoundError` — 同 `update_agent`
+
+---
+
+##### `list_agents(dataset)`
+
+轻量列表（`mode=browse`）：返回数据集**全部**服务，但每行只含 3 个字段。
+
+**输入**：`dataset: str`
+**返回**：`list[AgentBrief(id, name, description)]`
+**错误**：无（空数据集或不存在均返回 `[]`）
+
+---
+
+##### `get_agent(dataset, service_id)`
+
+单个服务完整信息（`mode=single`）。
+
+**输入**：
+- `dataset: str`
+- `service_id: str`
+
+**返回**：`AgentDetail(id, type, name, description, metadata, raw)` — `metadata` 是完整 Agent Card，`raw` 保留原始响应
+**错误**：
+- `NotFoundError` — sid 不存在
+- `UnexpectedServiceTypeError` — 服务是 skill 类型（后端返回 ZIP）
+
+---
+
+##### `deregister_agent(dataset, service_id)`
+
+注销服务。成功后清本地 `_owned` + L1 endpoint 缓存。
+
+**输入**：
+- `dataset: str`
+- `service_id: str`
+
+**返回**：`DeregisterResponse(service_id, status)`，`status ∈ {"deregistered","not_found"}`
+**错误**：
+- `NotOwnedError` — 本地未拥有
+- `NotFoundError` — 后端 404（自动清本地后重抛）
+
+---
+
+##### `register_blank_agent(dataset, endpoint, service_id=None, persistent=True)`
+
+薄壳于 `register_agent`，构造 blank 模板：
+
+```json
+{"name": "_BlankAgent_<endpoint>", "description": "_", "endpoint": "<endpoint>", "agentTeamCount": 0}
+```
+
+成功后把 `(dataset, sid) → endpoint` 写入 L1 内存缓存，供 `restore_to_blank` 使用。同 endpoint 重复注册幂等（sid 基于 name 的 SHA256）。
+
+**输入**：
+- `dataset: str`
+- `endpoint: str` — 非空字符串
+- `service_id: str | None`
+- `persistent: bool = True`
+
+**返回**：`RegisterResponse(service_id, dataset, status)`
+**错误**：
+- `ValueError` — endpoint 空/非字符串（本地）
+- `ValidationError` — 同 `register_agent`
+
+---
+
+##### `list_agents_full(dataset, page=1, size=-1)`
+
+整库完整元数据（`mode=full`）。
+
+**后端行为提醒**：对 a2a 条目，后端直接返回 Agent Card 本体（无 `id` 包装，见 [`src/backend/routers/dataset.py:232`](../src/backend/routers/dataset.py)）；对 generic/skill 保留 `{id, type, name, description, metadata}` 外壳。所以返回的 `AgentDetail.id` 对 a2a **总是空串**，需要从 `.raw` 读 card；对 generic/skill 正常。
+
+**输入**：
+- `dataset: str`
+- `page: int = 1` — 1-indexed，`size > 0` 时生效
+- `size: int = -1` — `-1` 返回全部；否则 `≥ 1`
+
+**返回**：`list[AgentDetail]`
+**错误**：`ValueError` — page/size 非法（本地）
+
+---
+
+##### `list_idle_blank_agents(dataset, n)`
+
+返回最空闲的 N 个空白 agent，按 `agentTeamCount` 升序。内部两次 HTTP：`mode=browse`（拿 sid）+ `mode=full`（拿 endpoint + count），按 `name` 联表。异步版用 `asyncio.gather` 并发。
+
+筛选规则：
+- 只收 `name` 以 `_BlankAgent_` 开头的
+- 缺 `agentTeamCount` 视为 0（最空闲）
+- 缺 `endpoint` 的静默跳过（不符契约）
+
+**输入**：
+- `dataset: str`
+- `n: int ≥ 0`
+
+**返回**：`list[BlankAgentInfo(service_id, endpoint, agent_team_count)]`
+**错误**：`ValueError` — n 非法（本地）
+
+---
+
+##### `replace_agent_card(dataset, service_id, agent_card)`
+
+**整张覆盖** agent card（POST `/services/a2a` 同 sid → `_do_register` 全量替换 entry）。区别于 `update_agent` 的"只增不减"。
+
+本地校验顺序（都 fail-fast，**不发 HTTP**）：
+1. `agent_card["endpoint"]` 必须非空字符串 —— 保证 `restore_to_blank` 的 L2 回退可用
+2. `service_id` 必须属于本客户端
+
+**输入**：
+- `dataset: str`
+- `service_id: str`
+- `agent_card: dict` — 必含非空 `endpoint`
+
+**返回**：`RegisterResponse(service_id, dataset, status="updated")`
+**错误**：
+- `ValueError` — card 无 `endpoint`（本地，先于 ownership 校验）
+- `NotOwnedError` — sid 不属于本客户端（本地）
+- `NotFoundError` — 后端 404；自动清本地后重抛
+- `ValidationError` — 后端 card 格式校验失败
+
+---
+
+##### `restore_to_blank(dataset, service_id)`
+
+恢复为空白 agent（= 用 blank 模板调 `replace_agent_card`）。Endpoint 三层回退：
+
+| 层级 | 数据源 | 何时命中 |
+|------|--------|----------|
+| L1 | 进程内缓存 `_blank_endpoints[(ds,sid)]` | 同进程 register → replace → restore，**0 次额外 HTTP** |
+| L2 | `get_agent` 读 `metadata["endpoint"]` | 进程重启 / 缓存清空；依赖上游调用方在 replace 时保留 endpoint |
+| L3 | `ValueError` | card 丢失 `endpoint` 字段（契约违反） |
+
+**输入**：
+- `dataset: str`
+- `service_id: str`
+
+**返回**：`RegisterResponse`
+**错误**：
+- `NotOwnedError` — 本地未拥有
+- `ValueError` — L3 触发
+- `NotFoundError` — L2 的 GET 或最终 POST 时 404
+
+---
+
+##### `close()` / `__enter__` / `__exit__`
+
+关闭底层 `httpx.Client` 连接池。支持上下文管理器：
+
+```python
+with A2XClient(...) as client:
+    client.register_blank_agent(...)
+# 退出时自动 close()
+```
+
+异步版对应 `aclose()` + `__aenter__` / `__aexit__`。
+
+---
+
+## 3. 整体架构
+
+### 3.1 模块划分
 
 ```
-src/client/                # 纯 SDK 主体，独立分发时原样打包
-├── __init__.py            # 导出 A2XClient / AsyncA2XClient / 异常 / dataclass
-├── client.py              # A2XClient（同步入口）
-├── async_client.py        # AsyncA2XClient（异步入口，镜像同步）
-├── transport.py           # HTTPTransport + AsyncHTTPTransport
-├── ownership.py           # OwnershipStore（同步文件 I/O + 跨进程锁）
-├── _internal.py           # 共享纯函数（URL / body / 哨兵 / header 构造）
-├── models.py              # 响应 dataclass（from_dict 容忍未知字段）
-├── errors.py              # 异常层级
-├── py.typed               # PEP 561 类型标记
-├── pyproject.toml         # 独立打包时用
-└── README.md
-
-todo/client_tests/         # pytest 单元测试（与 SDK 代码分离，不纳入 wheel）
-├── conftest.py
-├── pytest.ini
-├── test_internal.py
-├── test_ownership.py
-├── test_transport.py
-├── test_client.py
-└── test_async_client.py
+src/client/
+├── __init__.py       # 导出 A2XClient / AsyncA2XClient / 异常 / dataclass
+├── client.py         # A2XClient（同步入口）
+├── async_client.py   # AsyncA2XClient（异步镜像）
+├── transport.py      # HTTPTransport + AsyncHTTPTransport
+├── ownership.py      # OwnershipStore（文件持久化 + 跨进程锁）
+├── _internal.py      # 共享纯函数：URL / body / 校验 / 哨兵
+├── models.py         # 响应 dataclass
+├── errors.py         # 异常层级
+└── pyproject.toml    # 独立打包配置
 ```
 
 **独立性自检**：`grep -r "from src\." src/client/ | grep -v "from src\.client"` 应无命中。
 
-### 2.2 类图
-
-```mermaid
-classDiagram
-    class A2XClient {
-        +base_url: str [readonly]
-        +timeout: float [readonly]
-        +api_key: str [readonly]
-        -_transport: HTTPTransport
-        -_owned: OwnershipStore
-        +create_dataset(...) DatasetCreateResponse
-        +delete_dataset(name) DatasetDeleteResponse
-        +register_agent(...) RegisterResponse
-        +update_agent(...) PatchResponse
-        +set_team_count(...) PatchResponse
-        +list_agents(dataset) list~AgentBrief~
-        +get_agent(dataset, service_id) AgentDetail
-        +deregister_agent(...) DeregisterResponse
-        +close() None
-        +__enter__ / __exit__
-        -_assert_owned(ds, sid) None
-    }
-
-    class AsyncA2XClient {
-        +base_url / timeout / api_key [readonly]
-        -_transport: AsyncHTTPTransport
-        -_owned: OwnershipStore
-        +create_dataset(...) Awaitable~...~
-        +register_agent(...) Awaitable~...~
-        +... (8 methods mirror A2XClient)
-        +aclose() Awaitable~None~
-        +__aenter__ / __aexit__
-    }
-
-    class HTTPTransport {
-        -_client: httpx.Client
-        +request(method, path, json, params) Response
-        +close() None
-    }
-
-    class AsyncHTTPTransport {
-        -_client: httpx.AsyncClient
-        +request(method, path, json, params) Awaitable~Response~
-        +aclose() Awaitable~None~
-    }
-
-    class OwnershipStore {
-        -_file_path: Path?
-        -_base_url: str
-        -_data: dict~str, set~str~~
-        -_lock: threading.Lock
-        +contains(dataset, sid) bool
-        +add(dataset, sid) None
-        +remove(dataset, sid) None
-        +remove_dataset(dataset) None
-    }
-
-    class ErrorHierarchy {
-        <<module>>
-        A2XError
-        A2XConnectionError
-        A2XHTTPError
-        NotFoundError
-        ValidationError
-        UserConfigServiceImmutableError
-        UnexpectedServiceTypeError
-        ServerError
-        NotOwnedError
-    }
-
-    class ResponseModels {
-        <<module>>
-        DatasetCreateResponse
-        DatasetDeleteResponse
-        RegisterResponse
-        PatchResponse
-        DeregisterResponse
-        AgentBrief
-        AgentDetail
-    }
-
-    A2XClient *-- HTTPTransport : owns
-    A2XClient *-- OwnershipStore : owns
-    AsyncA2XClient *-- AsyncHTTPTransport : owns
-    AsyncA2XClient *-- OwnershipStore : owns
-    HTTPTransport ..> ErrorHierarchy : raises
-    AsyncHTTPTransport ..> ErrorHierarchy : raises
-    A2XClient ..> NotOwnedError : raises
-    AsyncA2XClient ..> NotOwnedError : raises
-    A2XClient ..> ResponseModels : returns
-    AsyncA2XClient ..> ResponseModels : returns
-```
-
-### 2.3 模块职责表
+### 3.2 职责分层
 
 | 模块 | 职责 | 依赖 |
 |------|------|------|
-| `client.py` / `async_client.py` | **业务编排**：参数组装、所有权前置检查、响应反序列化、404/400 自动清理 | `_internal` / `transport` / `ownership` / `models` / `errors` |
-| `transport.py` | **HTTP 出口**：唯一网络出口；2xx 返回 `httpx.Response`；4xx/5xx 通过共享 `_wrap_http_error` 映射为 `A2XError` 子类；网络/超时异常映射为 `A2XConnectionError` | `httpx` / `errors` |
-| `ownership.py` | **本地状态 + 持久化**：内存维护 `{ds: {sid}}`；每次变更在跨平台文件锁下 atomic write；I/O 失败降级为 warning | `stdlib` only |
-| `_internal.py` | **共享纯函数**：URL 构造、body 构造、`UNSET` 哨兵、ownership-file 解析、header 构造、`parse_agent_detail`。让同步/异步两个入口类不用共享基类也能复用逻辑 | `httpx` (type hint only) / `errors` / `models` |
-| `models.py` | **响应映射**：每个后端端点对应一个 `@dataclass`；`from_dict` 容忍未知字段；`AgentDetail.raw` 保留完整原 dict | `stdlib` only |
-| `errors.py` | **异常层级**：基类 `A2XError` 携带 `status_code` / `payload`；HTTP 类与本地类分两支 | `stdlib` only |
+| `client.py` / `async_client.py` | **业务编排**：参数校验、ownership 前置检查、响应解析、404/400 自动清本地 | `_internal` / `transport` / `ownership` / `models` / `errors` |
+| `transport.py` | **HTTP 出口**：唯一网络入口；4xx/5xx 通过 `_wrap_http_error` 映射为 `A2XError` 子类 | `httpx` / `errors` |
+| `ownership.py` | **本地状态 + 持久化**：内存 `{ds: {sid}}`；跨平台文件锁（POSIX `fcntl.flock` / Windows `msvcrt.locking`）+ `fsync` + atomic replace | stdlib |
+| `_internal.py` | **共享纯函数**：URL 拼接、body 构造、blank card 模板、`endpoint` 字段校验、哨兵 | `httpx`（仅类型标注） |
+| `models.py` | **响应 dataclass**：`from_dict` 容忍未知字段；`AgentDetail.raw` 保留原响应 | stdlib |
+| `errors.py` | **异常层级**：基类 `A2XError` 携带 `status_code` / `payload` | stdlib |
 
-**职责边界**：
+**边界**：`client.py` 不直接 `httpx`、不做文件 I/O；`transport.py` 不知道"所有权"和数据模型；`ownership.py` 不知道 HTTP。
 
-- `client.py` 不直接用 `httpx`、不做文件 I/O（分别委托给 transport / ownership）
-- `transport.py` 不知道"所有权"、"data model"（只管 HTTP 和错误映射）
-- `ownership.py` 不知道"后端"、"HTTP"（只管 JSON 文件持久化）
+### 3.3 所有权与状态
+
+`OwnershipStore` 维护 `_owned: {dataset: {service_id}}`，记录本客户端注册过的服务，默认持久化到 `~/.a2x_client/owned.json`。
+
+| 方法 | 写 `_owned` | 读 `_owned` |
+|------|:-:|:-:|
+| `register_agent(persistent=True)` / `register_blank_agent(persistent=True)` | ✅ | — |
+| `register_agent(persistent=False)` / `register_blank_agent(persistent=False)` | — | — |
+| `update_agent` / `set_team_count` | — | ✅ `NotOwnedError` |
+| `replace_agent_card` / `restore_to_blank` | ✅（幂等） | ✅ 同上 |
+| `deregister_agent` | 成功后移除 | ✅ 同上 |
+| `delete_dataset` | 成功/400 均清整段 | — |
+| `list_agents` / `list_agents_full` / `list_idle_blank_agents` / `get_agent` / `create_dataset` / `__init__` | — | — |
+
+**自动同步本地与远端**：mutation 命中后端 404 → 自动 `_owned.remove(sid)` 再重抛 `NotFoundError`；`delete_dataset` 命中 400 同理。避免"永远 404 + 本地永远脏"。
+
+**L1 endpoint 缓存**（独立于 `_owned`）：`_blank_endpoints: {(ds, sid): endpoint}`，仅内存、不持久化，由 `register_blank_agent` / `restore_to_blank` 写入，由 `restore_to_blank` 读。`deregister_agent` / `replace_agent_card` 404 时一并清理。
 
 ---
 
-## 3. 对外接口 → 内部调用时序图
+## 4. 对外接口 → 内部调用时序图
 
-共 9 个对外接口（含 `__init__`）。以下时序图同步/异步通用，**差异仅在**：
+**图例**：`Dev` 调用方 · `Client` A2XClient · `Own` OwnershipStore · `HTTP` HTTPTransport · `API` FastAPI 后端 · `FS` 本地文件系统
 
-- 异步版中 `Client → HTTP` 所有调用前加 `await`，HTTP 走 `httpx.AsyncClient`
-- 异步版中 `Client → Own` 的**写入**（`add`/`remove`/`remove_dataset`）通过 `await asyncio.to_thread(...)` 调度；只读 `contains` 仍同步
-- 异步版调用方使用 `await client.method(...)`
+**异步版差异**：`Client → HTTP` 所有调用前加 `await`；`Own` 的写操作通过 `await asyncio.to_thread(...)` 调度；只读 `contains` 仍同步。
 
-图例：
-- `Dev` — 开发者代码
-- `Client` — `A2XClient` / `AsyncA2XClient`
-- `Own` — `OwnershipStore`
-- `HTTP` — `HTTPTransport` / `AsyncHTTPTransport`
-- `API` — FastAPI 后端
-- `FS` — 本地文件系统
+仅画 6 个关键流程。未画方法的流程与其底层方法一致：`register_blank_agent` ≈ 4.2；`set_team_count` ≈ 4.3；`list_agents` / `list_agents_full` / `get_agent` 是直连 GET；`delete_dataset` / `deregister_agent` 与 4.3 的 404 自清模式相同。
 
-### 3.1 `__init__`
+### 4.1 `__init__`
 
-不发 HTTP，仅建连接池 + 从磁盘恢复所有权。
+不发 HTTP，仅建连接池 + 从磁盘恢复 `_owned`。
 
 ```mermaid
 sequenceDiagram
@@ -412,40 +404,21 @@ sequenceDiagram
     participant Own
     participant FS
 
-    Dev->>Client: A2XClient(base_url, timeout, api_key, ownership_file)
-    Client->>Client: normalize_base_url(base_url)<br/>build_default_headers(api_key)
-    Client->>HTTP: HTTPTransport(base_url+'/', timeout, headers)
-    HTTP-->>Client: transport 实例（未发 HTTP）
-
-    Client->>Own: OwnershipStore(resolve_ownership_file(...), base_url)
-    Own->>FS: 读 owned.json（若存在）
-    FS-->>Own: JSON / 不存在 / 损坏
-    Own->>Own: 解析 data[base_url] → 反序列化为 {ds: set(sid)}<br/>若 schema_version 缺失则走 legacy 迁移路径
-    Own-->>Client: store 实例
-
-    Client-->>Dev: A2XClient 实例
+    Dev->>Client: A2XClient(base_url, ownership_file, ...)
+    Client->>Client: normalize_base_url + build_headers
+    Client->>HTTP: HTTPTransport(base_url, timeout, headers)
+    HTTP-->>Client: transport（未发 HTTP）
+    Client->>Own: OwnershipStore(file_path, base_url)
+    Own->>FS: 读 owned.json
+    FS-->>Own: JSON / 缺失 / 损坏
+    Own->>Own: 解析本 base_url 段落<br/>v0 扁平格式静默迁移为 v1
+    Own-->>Client: store（内存恢复完成）
+    Client-->>Dev: A2XClient
 ```
 
-### 3.2 `create_dataset`
+### 4.2 `register_agent`
 
-```mermaid
-sequenceDiagram
-    participant Dev
-    participant Client
-    participant HTTP
-    participant API
-
-    Dev->>Client: create_dataset(name, embedding_model, formats)
-    Client->>Client: body = {name, embedding_model, formats?}<br/>默认 formats={"a2a":"v0.0"}；显式 None 则省略
-    Client->>HTTP: request("POST", "api/datasets", json=body)
-    HTTP->>API: POST /api/datasets
-    API-->>HTTP: 200 {dataset, embedding_model, formats, status}
-    HTTP-->>Client: Response
-    Client->>Client: DatasetCreateResponse.from_dict(resp.json())
-    Client-->>Dev: DatasetCreateResponse
-```
-
-### 3.3 `register_agent`
+`register_blank_agent` 是其薄壳（先构造 blank card，注册成功后额外记 L1 endpoint 缓存）。
 
 ```mermaid
 sequenceDiagram
@@ -455,27 +428,22 @@ sequenceDiagram
     participant API
     participant Own
 
-    Dev->>Client: register_agent(dataset, agent_card, service_id?, persistent)
-    Client->>Client: body = {agent_card, service_id?, persistent}
-    Client->>HTTP: request("POST", a2a_register_path(ds), json=body)
-    HTTP->>API: POST /api/datasets/{ds}/services/a2a
-    API-->>HTTP: 200 {service_id, dataset, status:"registered"|"updated"}
-    HTTP-->>Client: Response
-    Client->>Client: resp = RegisterResponse.from_dict(...)
-
+    Dev->>Client: register_agent(ds, card, sid?, persistent)
+    Client->>Client: build_register_agent_body
+    Client->>HTTP: POST /api/datasets/{ds}/services/a2a
+    HTTP->>API: POST
+    API-->>HTTP: 200 {service_id, status}
+    HTTP-->>Client: RegisterResponse
     alt persistent=True
-        Client->>Own: add(dataset, resp.service_id)
-        Own->>Own: lock → _data[ds].add(sid)
-        Own->>Own: _save_locked()<br/>（文件锁 + fsync + atomic replace）
-        Own-->>Client: 
-    else persistent=False
-        Note over Client: 跳过 _owned.add（避免服务器重启后 404 级联）
+        Client->>Own: add(ds, sid)
+        Own->>Own: 文件锁 + fsync + atomic replace
     end
-
     Client-->>Dev: RegisterResponse
 ```
 
-### 3.4 `update_agent`
+### 4.3 `update_agent`
+
+带 ownership fail-fast 和 404 自清。`set_team_count` 完全同构，仅 body 固定为 `{"agentTeamCount": count}`。
 
 ```mermaid
 sequenceDiagram
@@ -485,32 +453,28 @@ sequenceDiagram
     participant HTTP
     participant API
 
-    Dev->>Client: update_agent(dataset, sid, fields)
-    Client->>Own: contains(dataset, sid)?
-
-    alt 不属于本客户端
+    Dev->>Client: update_agent(ds, sid, fields)
+    Client->>Own: contains(ds, sid)?
+    alt 不拥有
         Own-->>Client: False
         Client--xDev: NotOwnedError（不发 HTTP）
-    else 属于本客户端
+    else 拥有
         Own-->>Client: True
-        Client->>HTTP: request("PUT", service_path(ds, sid), json=fields)
-        HTTP->>API: PUT /api/datasets/{ds}/services/{sid}
-
+        Client->>HTTP: PUT /services/{sid}
         alt 后端 404
-            API-->>HTTP: 404
             HTTP--xClient: NotFoundError
-            Client->>Own: remove(dataset, sid)<br/>（自动修复本地/远端偏差）
+            Client->>Own: remove(ds, sid)
             Client--xDev: 重抛 NotFoundError
         else 后端 200
-            API-->>HTTP: 200 {service_id, dataset, status:"updated",<br/>changed_fields, taxonomy_affected}
-            HTTP-->>Client: Response
-            Client->>Client: PatchResponse.from_dict(...)
+            HTTP-->>Client: PatchResponse
             Client-->>Dev: PatchResponse
         end
     end
 ```
 
-### 3.5 `set_team_count`
+### 4.4 `replace_agent_card`
+
+整张覆盖 + `endpoint` 字段本地校验（**先于** ownership）。404 时额外清 L1 缓存。
 
 ```mermaid
 sequenceDiagram
@@ -520,114 +484,69 @@ sequenceDiagram
     participant HTTP
     participant API
 
-    Dev->>Client: set_team_count(dataset, sid, count)
-    Client->>Client: build_team_count_body(count)<br/>校验 count 是非负 int，否则 ValueError（不发 HTTP）
-    Client->>Own: contains(dataset, sid)?
-
-    alt 不属于本客户端
-        Own-->>Client: False
-        Client--xDev: NotOwnedError
-    else 属于本客户端
-        Own-->>Client: True
-        Client->>HTTP: request("PUT", service_path(ds, sid),<br/>json={"agentTeamCount": count})
-        HTTP->>API: PUT /api/datasets/{ds}/services/{sid}
-        API-->>HTTP: 200 {...changed_fields:["agentTeamCount"],<br/>taxonomy_affected: false}
-        HTTP-->>Client: Response
-        Client->>Client: PatchResponse.from_dict(...)
-        Client-->>Dev: PatchResponse
+    Dev->>Client: replace_agent_card(ds, sid, card)
+    Client->>Client: assert_card_has_endpoint(card)
+    alt endpoint 缺失 / 空串 / 非字符串
+        Client--xDev: ValueError（不发 HTTP）
     end
-```
-
-> 404 分支与 `update_agent` 相同——自动清本地再重抛。图略。
-
-### 3.6 `list_agents`
-
-```mermaid
-sequenceDiagram
-    participant Dev
-    participant Client
-    participant HTTP
-    participant API
-
-    Dev->>Client: list_agents(dataset)
-    Note over Client: 只读，不查 OwnershipStore
-    Client->>HTTP: request("GET", services_path(ds),<br/>params={"mode": "browse"})
-    HTTP->>API: GET /api/datasets/{ds}/services?mode=browse
-    API-->>HTTP: 200 [{id, name, description}, ...]<br/>空数据集或不存在 → []
-    HTTP-->>Client: Response
-    Client->>Client: [AgentBrief.from_dict(d) for d in resp.json()]
-    Client-->>Dev: list[AgentBrief]
-```
-
-### 3.7 `get_agent`
-
-```mermaid
-sequenceDiagram
-    participant Dev
-    participant Client
-    participant HTTP
-    participant API
-
-    Dev->>Client: get_agent(dataset, service_id)
-    Note over Client: 只读，不查 OwnershipStore
-    Client->>HTTP: request("GET", services_path(ds),<br/>params={"mode":"single", "service_id":sid})
-    HTTP->>API: GET /api/datasets/{ds}/services?mode=single&service_id=...
-
-    alt a2a / generic 类型
-        API-->>HTTP: 200 application/json {id, type, name, description, metadata}
-        HTTP-->>Client: Response
-        Client->>Client: parse_agent_detail(resp)<br/>检查 content-type 含 "application/json"<br/>AgentDetail.from_dict(resp.json())
-        Client-->>Dev: AgentDetail（含完整 raw）
-    else skill 类型（不在本 SDK 范围）
-        API-->>HTTP: 200 application/zip (ZIP 字节流)
-        HTTP-->>Client: Response
-        Client--xDev: UnexpectedServiceTypeError
-    else service_id 不存在
-        API-->>HTTP: 404
-        HTTP--xDev: NotFoundError
-    end
-```
-
-### 3.8 `deregister_agent`
-
-```mermaid
-sequenceDiagram
-    participant Dev
-    participant Client
-    participant Own
-    participant HTTP
-    participant API
-
-    Dev->>Client: deregister_agent(dataset, sid)
-    Client->>Own: contains(dataset, sid)?
-
-    alt 不属于本客户端
-        Own-->>Client: False
-        Client--xDev: NotOwnedError
-    else 属于本客户端
-        Own-->>Client: True
-        Client->>HTTP: request("DELETE", service_path(ds, sid))
-
-        alt 404
-            API-->>HTTP: 404
+    Client->>Own: contains(ds, sid)?
+    alt 不拥有
+        Client--xDev: NotOwnedError（不发 HTTP）
+    else 拥有
+        Client->>HTTP: POST /services/a2a (body.service_id=sid)
+        alt 后端 404
             HTTP--xClient: NotFoundError
-            Client->>Own: remove(dataset, sid)
+            Client->>Own: remove(ds, sid)
+            Client->>Client: _blank_endpoints.pop((ds,sid))
             Client--xDev: 重抛 NotFoundError
-        else 200
-            API-->>HTTP: 200 {service_id, status:"deregistered"|"not_found"}
-            HTTP-->>Client: Response
-            Client->>Client: DeregisterResponse.from_dict(...)
-            Client->>Own: remove(dataset, sid)<br/>（"not_found" 也清，保持一致）
-            Own->>Own: lock → _data[ds].discard(sid)<br/>_save_locked()
-            Own-->>Client: 
-            Client-->>Dev: DeregisterResponse
+        else 后端 200
+            HTTP-->>Client: RegisterResponse (status="updated")
+            Client->>Own: add(ds, sid)（幂等）
+            Client-->>Dev: RegisterResponse
         end
     end
 ```
 
-> 后端 `status:"not_found"` 仍返回 200，SDK 同样从 `_owned` 移除。
+### 4.5 `restore_to_blank`
 
-### 3.9 `delete_dataset`
+L1 → L2 → L3 的 endpoint 回退链，末尾复用 `replace_agent_card`。
+
+```mermaid
+sequenceDiagram
+    participant Dev
+    participant Client
+    participant Own
+    participant HTTP
+    participant API
+
+    Dev->>Client: restore_to_blank(ds, sid)
+    Client->>Own: contains(ds, sid)?
+    alt 不拥有
+        Client--xDev: NotOwnedError
+    end
+    Client->>Client: _resolve_blank_endpoint(ds, sid)
+    alt L1 命中
+        Client->>Client: 读 _blank_endpoints[(ds,sid)]
+    else L1 未命中
+        Client->>HTTP: GET /services?mode=single&sid=...
+        API-->>HTTP: 200 {metadata: {endpoint?, ...}}
+        HTTP-->>Client: AgentDetail
+        alt metadata["endpoint"] 存在
+            Client->>Client: 提取 endpoint
+        else endpoint 缺失
+            Client--xDev: ValueError（L3）
+        end
+    end
+    Client->>Client: build_blank_agent_card(endpoint)
+    Note over Client: 复用 4.4 流程<br/>（endpoint 已就位，assert 必过）
+    Client->>Client: replace_agent_card(ds, sid, blank_card)
+    Client->>Client: 更新 _blank_endpoints 缓存
+    Client-->>Dev: RegisterResponse
+```
+
+### 4.6 `list_idle_blank_agents`
+
+两次 HTTP 按 `name` join。异步版走 `asyncio.gather` 并发。
 
 ```mermaid
 sequenceDiagram
@@ -635,80 +554,16 @@ sequenceDiagram
     participant Client
     participant HTTP
     participant API
-    participant Own
 
-    Dev->>Client: delete_dataset(name)
-    Note over Client: 数据集层面无创建者追踪，不做所有权检查
-    Client->>HTTP: request("DELETE", dataset_path(name))
-
-    alt 200
-        API-->>HTTP: 200 {dataset, status:"deleted"}
-        HTTP-->>Client: Response
-        Client->>Client: DatasetDeleteResponse.from_dict(...)
-        Client->>Own: remove_dataset(name)
-        Own->>Own: _data.pop(name); _save_locked()
-        Client-->>Dev: DatasetDeleteResponse
-    else 400（数据集早已不存在）
-        API-->>HTTP: 400 {detail:"... does not exist"}
-        HTTP--xClient: ValidationError
-        Client->>Own: remove_dataset(name)<br/>（避免"永远 400 + 永远残留"）
-        Client--xDev: 重抛 ValidationError
+    Dev->>Client: list_idle_blank_agents(ds, n)
+    Client->>Client: 校验 n ≥ 0；n=0 直接返回 []
+    par 同步版串行；异步版 asyncio.gather
+        Client->>HTTP: GET ?mode=browse
+        API-->>HTTP: [{id, name, description}, ...]
+    and
+        Client->>HTTP: GET ?mode=full&size=-1
+        API-->>HTTP: {servers: [<raw cards 无 id 包装>], metadata: ...}
     end
+    Client->>Client: 过滤 name 前缀 "_BlankAgent_"<br/>按 name join：sid ← browse，endpoint+count ← full<br/>缺 agentTeamCount → 0（最空闲）<br/>缺 endpoint → 静默跳过<br/>按 count 升序 → 取前 n
+    Client-->>Dev: list[BlankAgentInfo]
 ```
-
----
-
-## 4. 后端 API 对照
-
-| SDK 方法 | HTTP | 端点 | 关键行为 |
-|---------|------|------|---------|
-| `create_dataset` | `POST` | `/api/datasets` | 默认 `formats={"a2a":"v0.0"}` |
-| `register_agent` | `POST` | `/api/datasets/{ds}/services/a2a` | `agent_card` dict 整体透传；成功后按 `persistent` 选择性入 `_owned` |
-| `update_agent` | `PUT` | `/api/datasets/{ds}/services/{sid}` | `fields` dict 作为 body；顶层字段 upsert；404 自动清 `_owned` |
-| `set_team_count` | `PUT` | 同上 | body 固定为 `{"agentTeamCount": count}`；count 本地校验 |
-| `list_agents` | `GET` | `/api/datasets/{ds}/services?mode=browse` | 空数据集/不存在 → `[]` |
-| `get_agent` | `GET` | `/api/datasets/{ds}/services?mode=single&service_id=...` | content-type 分支：JSON → AgentDetail；ZIP → `UnexpectedServiceTypeError` |
-| `deregister_agent` | `DELETE` | `/api/datasets/{ds}/services/{sid}` | 200 `"not_found"` 与 `"deregistered"` 同路径处理；成功后清 `_owned` |
-| `delete_dataset` | `DELETE` | `/api/datasets/{ds}` | 200 和 400 都清 `_owned[name]` |
-
-**参数转换通用规则**：
-
-| 规则 | 说明 |
-|------|------|
-| URL path | 路径段由 `urllib.parse.quote(segment, safe="")` 显式 URL-encode；路径**不以 `/` 开头**，依赖 `base_url` 结尾的 `/` 拼接 |
-| `None` 字段过滤 | body 组装时剔除值为 `None` 的键 |
-| Agent Card 透传 | `agent_card` / `fields` dict 整体作为 body，**不做字段重命名**（保留 camelCase 如 `protocolVersion`） |
-| 所有权 fail-fast | 本地校验失败抛 `NotOwnedError`，不发 HTTP |
-| HTTP 错误 | 4xx/5xx 通过 `_wrap_http_error` 映射为 `A2XError` 子类 |
-| JSON 反序列化 | dataclass `from_dict` 工厂容忍多余字段；`AgentDetail.raw` 保留原始响应 |
-
----
-
-## 5. 测试
-
-单元测试位于 `todo/client_tests/`（与 SDK 代码分离，不纳入独立分发的 wheel），用 `pytest` + `pytest-asyncio` + `httpx.MockTransport` 驱动，**不需要真实后端**。
-
-```bash
-pip install pytest pytest-asyncio
-python -m pytest todo/client_tests/
-```
-
-覆盖范围：
-
-| 测试文件 | 覆盖对象 |
-|---------|----------|
-| `test_internal.py` | body 构造、URL 编码、`UNSET` 哨兵、ownership-file 解析、header 构造 |
-| `test_ownership.py` | 读写、v0/v1 schema 迁移、损坏文件容忍、多 base_url 隔离、线程并发、`_save` 失败降级为 warning、掉电原子性（无残留 tmp） |
-| `test_transport.py` | 状态码 → 异常映射、`user_config` 分支、连接异常、body/params 转发 |
-| `test_client.py` | 8 个对外方法的完整路径；持久化开关、所有权 fail-fast、404 自清、400 自清、子路径 base_url 正确拼接 |
-| `test_async_client.py` | 异步版对等行为子集（确认同步/异步对称） |
-
-打包时测试不纳入 wheel：测试文件物理位置就不在 `src/client/` 内，`pyproject.toml` 的 `packages = ["a2x_client"]` 只导出 SDK 主体，与测试目录完全解耦。
-
----
-
-## 6. 扩展预留
-
-- **register-config 管理**：后端 `GET/POST /api/datasets/{ds}/register-config` 可管理允许格式。如需支持，加 `get_register_config(ds)` / `set_register_config(ds, formats)`（同步 + 异步双份）
-- **其他端点**：generic 服务注册、skill 上传、模糊检索（`POST /api/search`）、构建（`build.*`）、SSE/WebSocket — 按相同模式扩展，每个方法同时加到 `A2XClient` 和 `AsyncA2XClient`
-- **URL 模式注册**：`register_agent_from_url(agent_card_url)` 对应后端的 `agent_card_url` 入参

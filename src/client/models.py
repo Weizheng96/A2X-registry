@@ -68,6 +68,19 @@ class AgentBrief(_FromDictMixin):
 
 
 @dataclass
+class BlankAgentInfo:
+    """Result row for ``list_idle_blank_agents``.
+
+    Combines the ``service_id`` from ``mode=browse`` with the ``endpoint`` +
+    ``agentTeamCount`` pulled from the Agent Card via ``mode=full``.
+    """
+
+    service_id: str
+    endpoint: str
+    agent_team_count: int = 0
+
+
+@dataclass
 class AgentDetail:
     """Full single-agent response. ``metadata`` is the complete Agent Card."""
 

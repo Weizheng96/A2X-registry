@@ -18,6 +18,7 @@ from .errors import NotFoundError, NotOwnedError, ValidationError
 from .models import (
     AgentBrief,
     AgentDetail,
+    BlankAgentInfo,
     DatasetCreateResponse,
     DatasetDeleteResponse,
     DeregisterResponse,
@@ -48,6 +49,9 @@ class AsyncA2XClient:
             file_path=_i.resolve_ownership_file(ownership_file),
             base_url=self._base_url,
         )
+        # L1 cache for restore_to_blank (see A2XClient.__init__ for rationale).
+        # Pure in-memory dict; the event loop serialises access so no lock needed.
+        self._blank_endpoints: dict[tuple[str, str], str] = {}
 
     # ── Read-only config exposure ────────────────────────────────────────────
 
@@ -175,7 +179,135 @@ class AsyncA2XClient:
             )
         except NotFoundError:
             await asyncio.to_thread(self._owned.remove, dataset, service_id)  # D3
+            self._blank_endpoints.pop((dataset, service_id), None)
             raise
         result = DeregisterResponse.from_dict(resp.json())
         await asyncio.to_thread(self._owned.remove, dataset, service_id)
+        self._blank_endpoints.pop((dataset, service_id), None)
         return result
+
+    # ── Team-agent helpers ───────────────────────────────────────────────────
+
+    async def register_blank_agent(
+        self,
+        dataset: str,
+        endpoint: str,
+        service_id: str | None = None,
+        persistent: bool = True,
+    ) -> RegisterResponse:
+        """See ``A2XClient.register_blank_agent``."""
+        card = _i.build_blank_agent_card(endpoint)
+        result = await self.register_agent(
+            dataset, card, service_id=service_id, persistent=persistent
+        )
+        self._blank_endpoints[(dataset, result.service_id)] = endpoint
+        return result
+
+    async def list_agents_full(
+        self,
+        dataset: str,
+        page: int = 1,
+        size: int = -1,
+    ) -> list[AgentDetail]:
+        """See ``A2XClient.list_agents_full``."""
+        params = _i.build_full_list_params(page, size)
+        resp = await self._transport.request(
+            "GET", _i.services_path(dataset), params=params
+        )
+        servers = _i.parse_full_list_servers(resp)
+        return [AgentDetail.from_dict(s) for s in servers]
+
+    async def list_idle_blank_agents(
+        self,
+        dataset: str,
+        n: int,
+    ) -> list[BlankAgentInfo]:
+        """See ``A2XClient.list_idle_blank_agents``.
+
+        Runs the two required HTTP calls concurrently via ``asyncio.gather``.
+        """
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"n must be a non-negative int, got {n!r}")
+        if n == 0:
+            return []
+
+        briefs, entries = await asyncio.gather(
+            self.list_agents(dataset),
+            self.list_agents_full(dataset),
+        )
+        name_to_sid: dict[str, str] = {
+            b.name: b.id for b in briefs if _i.is_blank_agent_name(b.name)
+        }
+        if not name_to_sid:
+            return []
+
+        result: list[BlankAgentInfo] = []
+        for detail in entries:
+            card = detail.raw
+            name = card.get("name") if isinstance(card, dict) else None
+            sid = name_to_sid.get(name) if isinstance(name, str) else None
+            if sid is None:
+                continue
+            endpoint = _i.extract_endpoint(card)
+            if endpoint is None:
+                continue
+            result.append(
+                BlankAgentInfo(
+                    service_id=sid,
+                    endpoint=endpoint,
+                    agent_team_count=_i.extract_team_count(card),
+                )
+            )
+
+        result.sort(key=lambda b: b.agent_team_count)
+        return result[:n]
+
+    async def replace_agent_card(
+        self,
+        dataset: str,
+        service_id: str,
+        agent_card: dict[str, Any],
+    ) -> RegisterResponse:
+        """See ``A2XClient.replace_agent_card``."""
+        _i.assert_card_has_endpoint(agent_card)
+        self._assert_owned(dataset, service_id)
+        body = _i.build_register_agent_body(agent_card, service_id, persistent=True)
+        try:
+            resp = await self._transport.request(
+                "POST", _i.a2a_register_path(dataset), json=body
+            )
+        except NotFoundError:
+            await asyncio.to_thread(self._owned.remove, dataset, service_id)
+            self._blank_endpoints.pop((dataset, service_id), None)
+            raise
+        result = RegisterResponse.from_dict(resp.json())
+        await asyncio.to_thread(self._owned.add, dataset, result.service_id)
+        return result
+
+    async def restore_to_blank(
+        self,
+        dataset: str,
+        service_id: str,
+    ) -> RegisterResponse:
+        """See ``A2XClient.restore_to_blank``."""
+        self._assert_owned(dataset, service_id)
+        endpoint = await self._resolve_blank_endpoint(dataset, service_id)
+        card = _i.build_blank_agent_card(endpoint)
+        result = await self.replace_agent_card(dataset, service_id, card)
+        self._blank_endpoints[(dataset, service_id)] = endpoint
+        return result
+
+    async def _resolve_blank_endpoint(self, dataset: str, service_id: str) -> str:
+        cached = self._blank_endpoints.get((dataset, service_id))
+        if cached:
+            return cached
+        detail = await self.get_agent(dataset, service_id)
+        endpoint = _i.extract_endpoint(detail.metadata) or _i.extract_endpoint(detail.raw)
+        if endpoint is None:
+            raise ValueError(
+                f"Cannot restore {service_id!r} to blank: 'endpoint' missing "
+                "from the current Agent Card. Either preserve the 'endpoint' "
+                "field when calling replace_agent_card, or call "
+                "register_blank_agent again with the desired endpoint."
+            )
+        return endpoint

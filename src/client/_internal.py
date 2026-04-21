@@ -27,6 +27,17 @@ DEFAULT_OWNERSHIP_FILE: Final[Path] = Path.home() / ".a2x_client" / "owned.json"
 
 TEAM_COUNT_FIELD: Final[str] = "agentTeamCount"
 
+BLANK_AGENT_NAME_PREFIX: Final[str] = "_BlankAgent_"
+"""Name-prefix contract identifying idle-pool agents. Any agent whose
+``name`` starts with this string is treated as blank by ``list_idle_blank_agents``.
+Changing it breaks interop across SDK versions."""
+
+ENDPOINT_FIELD: Final[str] = "endpoint"
+"""Custom AgentCard field holding the agent's endpoint URL. AgentCard uses
+``extra="allow"`` (see ``src/register/models.py``), so the backend stores it
+verbatim. Callers of ``replace_agent_card`` must preserve this field so
+``restore_to_blank`` can recover the endpoint after process restart."""
+
 _CONTENT_TYPE_JSON: Final[str] = "application/json"
 
 
@@ -96,6 +107,77 @@ def build_team_count_body(count: int) -> dict[str, Any]:
     return {TEAM_COUNT_FIELD: count}
 
 
+def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
+    """Blank-agent AgentCard template. ``name`` encodes the endpoint so
+    the deterministic ``generate_service_id("agent", name)`` on the backend
+    keeps sid stable across re-registrations of the same endpoint."""
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        raise ValueError(f"endpoint must be a non-empty string, got {endpoint!r}")
+    return {
+        "name": f"{BLANK_AGENT_NAME_PREFIX}{endpoint}",
+        "description": "_",
+        ENDPOINT_FIELD: endpoint,
+        TEAM_COUNT_FIELD: 0,
+    }
+
+
+def build_full_list_params(page: int, size: int) -> dict[str, Any]:
+    """Build query params for ``GET .../services?mode=full``.
+
+    ``size=-1`` returns the full dataset in one page (backend default);
+    ``size>=1`` paginates with ``page`` (1-indexed).
+    """
+    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        raise ValueError(f"page must be >= 1, got {page!r}")
+    if not isinstance(size, int) or isinstance(size, bool) or (size < -1 or size == 0):
+        raise ValueError(f"size must be -1 or >= 1, got {size!r}")
+    return {"mode": "full", "page": page, "size": size}
+
+
+def is_blank_agent_name(name: Any) -> bool:
+    return isinstance(name, str) and name.startswith(BLANK_AGENT_NAME_PREFIX)
+
+
+def extract_team_count(card: Any) -> int:
+    """Read ``agentTeamCount`` from an AgentCard dict.
+
+    Defaults to 0 (most-idle) for missing/invalid values, matching the
+    blank-agent invariant that idle agents always have count=0.
+    """
+    if not isinstance(card, dict):
+        return 0
+    count = card.get(TEAM_COUNT_FIELD, 0)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return 0
+    return count
+
+
+def extract_endpoint(card: Any) -> str | None:
+    if not isinstance(card, dict):
+        return None
+    value = card.get(ENDPOINT_FIELD)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def assert_card_has_endpoint(agent_card: Any) -> None:
+    """Fail-fast guard for ``replace_agent_card``.
+
+    The ``endpoint`` field is load-bearing: ``restore_to_blank``'s L2 fallback
+    reads it back from the current card across process restarts. A
+    ``replace_agent_card`` call that drops it would silently block future
+    restores. Raising locally (no HTTP) gives callers a clear signal before
+    the registry is mutated.
+    """
+    if extract_endpoint(agent_card) is None:
+        raise ValueError(
+            "agent_card must include a non-empty 'endpoint' field; it is "
+            "required so restore_to_blank can recover the endpoint later. "
+            f"Got card: {agent_card!r}"
+        )
+
+
 # ── Ownership-file resolution ────────────────────────────────────────────────
 
 def resolve_ownership_file(raw: Any) -> Path | None:
@@ -143,3 +225,18 @@ def parse_agent_detail(resp: httpx.Response) -> AgentDetail:
             payload=None,
         )
     return AgentDetail.from_dict(data)
+
+
+def parse_full_list_servers(resp: httpx.Response) -> list[dict[str, Any]]:
+    """Extract the ``servers`` array from a ``mode=full`` response.
+
+    Backend quirk: for a2a entries, each item is the raw Agent Card
+    (no ``id`` wrapper); for generic/skill, items have the standard
+    ``{id, type, name, description, metadata}`` shape. Callers that need
+    sids for a2a must join with a ``mode=browse`` call by name.
+    """
+    data = resp.json()
+    if not isinstance(data, dict):
+        return []
+    servers = data.get("servers", [])
+    return [s for s in servers if isinstance(s, dict)]
