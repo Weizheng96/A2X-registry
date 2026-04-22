@@ -129,8 +129,9 @@ isPolling: boolean  — 构建 SSE 流是否活跃
 | 注册通用服务 | POST | `/api/datasets/{dataset}/services/generic` |
 | 注册 A2A Agent | POST | `/api/datasets/{dataset}/services/a2a` |
 | 注销服务 | DELETE | `/api/datasets/{dataset}/services/{service_id}` |
-| 查询服务列表 | GET | `/api/datasets/{dataset}/services?mode=full&size={n}&page={p}` |
-| 管理员条目列表 | GET | `/api/datasets/{dataset}/services?mode=admin` |
+| 查询服务列表 | GET | `/api/datasets/{dataset}/services?fields=detail&size={n}&page={p}`（分页元数据通过响应 header `X-Total-Count` / `X-Page` / `X-Total-Pages`） |
+| 管理员条目列表 | GET | `/api/datasets/{dataset}/services?fields=detail` |
+| 单条精确查询 | GET | `/api/datasets/{dataset}/services/{service_id}`（skill 类型返回 ZIP） |
 | 查询构建状态 | GET | `/api/datasets/{dataset}/build/status` |
 | 启动构建 | POST | `/api/datasets/{dataset}/build` |
 | 取消构建 | DELETE | `/api/datasets/{dataset}/build` |

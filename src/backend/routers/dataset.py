@@ -192,13 +192,13 @@ def _filter_matches(filters: dict, raw: dict) -> bool:
 
 
 def _entry_filter_dict(entry) -> Optional[dict]:
-    """Type-specific 'raw' dict used for ``mode=filter`` matching.
+    """Type-specific 'raw' dict used for filter matching on GET /services.
 
     Returns the untransformed per-type data model — AgentCard for a2a
     (with ``extra=allow`` custom fields like ``endpoint``/``status``
     preserved), GenericServiceData for generic, SkillData for skill. This
     intentionally differs from the ``build_description``-transformed
-    ``description`` exposed by ``list_services`` / browse / full, giving
+    ``description`` exposed at the wrapped output's top level, giving
     filter callers predictable equality semantics on what they wrote in.
     """
     if entry.type == "a2a" and entry.agent_card:

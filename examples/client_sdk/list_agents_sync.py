@@ -2,7 +2,7 @@
 
 This file demonstrates:
 
-1. listing all services (no filters → mode=filter with empty params)
+1. listing all services (no filters → GET /services with no query params)
 2. filtering by a single field (description)
 3. composite AND filters (description + status)
 4. flat return shape: list[dict] with id + raw card fields merged

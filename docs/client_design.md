@@ -516,8 +516,10 @@ src/client/
 | `update_agent` / `set_status` | — | ✅ `NotOwnedError` |
 | `replace_agent_card` / `restore_to_blank` | ✅（幂等） | ✅ 同上 |
 | `deregister_agent` | 成功后移除 | ✅ 同上 |
+| `release_my_lease` | — | ✅ 同上（teammate 只能释放自己 sid 上的 lease） |
 | `delete_dataset` | 成功/400 均清整段 | — |
 | `list_agents` / `list_idle_blank_agents` / `get_agent` / `create_dataset` / `__init__` | — | — |
+| `reserve_blank_agents` / `release_reservation` / `extend_reservation` | — | — |（leader 不必拥有候选，授权由 holder_id 兜底）
 
 **自动同步本地与远端**：mutation 命中后端 404 → 自动 `_owned.remove(sid)` 再重抛 `NotFoundError`；`delete_dataset` 命中 400 同理。避免"永远 404 + 本地永远脏"。
 
@@ -692,6 +694,14 @@ sequenceDiagram
         HTTP-->>Client: RegisterResponse (status="updated")
         Client->>Own: add(ds, sid)（幂等）
         Client->>Client: _blank_endpoints[(ds,sid)] = endpoint （刷新缓存）
+        opt release_lease=True（默认）
+            Client->>HTTP: DELETE /services/{sid}/lease （自动钩子）
+            alt 200
+                Note over Client: lease 已释放，无事
+            else A2XConnectionError / ServerError / NotFoundError
+                Note over Client: warnings.warn(...)，不抛错<br/>（主操作已成功；lease 反正会 TTL 过期）
+            end
+        end
         Client-->>Dev: RegisterResponse
     end
 ```
@@ -752,7 +762,7 @@ sequenceDiagram
     end
     Client->>HTTP: GET /services[?k=v&...]
     HTTP->>API: GET
-    Note over API: 空 filters → 全量；<br/>否则对每个 entry 取原始 dict：<br/>a2a → agent_card / generic → service_data / skill → skill_data<br/>AND 匹配：k in raw 且 str(raw[k]) == v
+    Note over API: 空 filters → 全量；<br/>否则对每个 entry 取原始 dict：<br/>a2a → agent_card / generic → service_data / skill → skill_data<br/>AND 匹配：k in raw 且 str(raw[k]) == v；<br/>默认 include_leased=false → 跳过被 lease 锁定的 entry
     API-->>HTTP: [{id, type, name, description, metadata}, ...]
     Client->>Client: 扁平化每条：{id, type, name, description, **metadata}<br/>（metadata 键覆盖 wrapper —— a2a 原始 description 回流顶层）
     alt list_agents
@@ -762,3 +772,45 @@ sequenceDiagram
         Client-->>Dev: list[dict]（前 n 个）
     end
 ```
+
+### 4.7 `reserve_blank_agents` / `release_my_lease`
+
+Lease 是 SQS visibility-timeout 风格的内存级短锁。`reserve` 在后端 `_lock` 内做"过滤+认领"原子操作，避免 leader 间双重分配。`Reservation` 是 context manager，退出时 best-effort 释放（idempotent）。
+
+```mermaid
+sequenceDiagram
+    participant Leader as Dev (leader)
+    participant LClient as Client (leader)
+    participant HTTP
+    participant API
+    participant TClient as Client (teammate)
+    participant Mate as Dev (teammate)
+
+    Leader->>LClient: reserve_blank_agents(ds, n=1, ttl=30)
+    LClient->>HTTP: POST /reservations<br/>body: {filters, n, ttl_seconds, holder_id?}
+    HTTP->>API: POST
+    Note over API: with _lock:<br/>  sweep_expired<br/>  filter+claim 原子（TOCTOU-safe）<br/>  插入 _Lease(holder, now+ttl)
+    API-->>HTTP: {holder_id, ttl_seconds, expires_at_unix, reservations: [...]}
+    HTTP-->>LClient: Reservation (context manager)
+    LClient-->>Leader: Reservation r
+
+    Note over Leader,Mate: P2P 谈判（不经注册中心）
+    Leader->>Mate: invite(teammate_endpoint)
+    Mate-->>Leader: accept
+
+    Mate->>TClient: replace_agent_card(ds, sid, team_card)
+    TClient->>HTTP: POST /services/a2a
+    HTTP-->>TClient: 200
+    TClient->>HTTP: DELETE /services/{sid}/lease （自动钩子）
+    HTTP->>API: DELETE
+    Note over API: release_lease_by_sid<br/>(任意 holder 都释放，<br/> SDK _owned 是授权关)
+    API-->>HTTP: {released: true, prev_holder_id: "..."}
+    HTTP-->>TClient: True
+    TClient-->>Mate: RegisterResponse
+
+    Note over Leader: with 块退出
+    LClient->>HTTP: DELETE /reservations/{holder_id}
+    HTTP-->>LClient: {released: []} （已被 teammate 释放过；idempotent no-op）
+```
+
+**失败路径**：谈判超时 / teammate 拒绝 / Leader 端异常 → `with` 退出仍会调 `release_reservation`，立刻把 lease 还回池里，其他 leader 可立刻重试（无需等 30s TTL）。

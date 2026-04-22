@@ -48,8 +48,8 @@ blank agents with different endpoints get different ``name``s (and thus
 different sids via ``generate_service_id``); no longer used for discovery."""
 
 BLANK_DESCRIPTION_SENTINEL: Final[str] = "__BLANK__"
-"""Description sentinel identifying idle-pool agents. Matched exactly via
-``mode=filter`` against the **raw** agent_card.description (pre-
+"""Description sentinel identifying idle-pool agents. Matched exactly by
+the backend filter against the **raw** agent_card.description (pre-
 build_description transform). Changing it breaks cross-SDK interop."""
 
 ENDPOINT_FIELD: Final[str] = "endpoint"
@@ -168,7 +168,7 @@ def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
     across re-registrations of the same endpoint.
 
     ``description`` carries the ``BLANK_DESCRIPTION_SENTINEL`` — this is
-    what ``mode=filter`` matches to discover idle-pool agents.
+    what the backend filter matches to discover idle-pool agents.
 
     ``status`` is set to ``online`` so the agent is immediately visible
     to ``status=online`` filters.
@@ -251,7 +251,7 @@ def build_default_headers(api_key: str | None) -> dict[str, str] | None:
 # ── Response post-processing ─────────────────────────────────────────────────
 
 def parse_agent_detail(resp: httpx.Response) -> AgentDetail:
-    """Decode a ``mode=single`` response or raise ``UnexpectedServiceTypeError``."""
+    """Decode a ``GET /services/{sid}`` response or raise ``UnexpectedServiceTypeError``."""
     content_type = resp.headers.get("content-type", "")
     if _CONTENT_TYPE_JSON not in content_type.lower():
         raise UnexpectedServiceTypeError(
@@ -270,7 +270,7 @@ def parse_agent_detail(resp: httpx.Response) -> AgentDetail:
 
 
 def parse_agent_list(resp: httpx.Response) -> list[dict[str, Any]]:
-    """Parse a ``mode=filter`` response into flat ``id + card`` dicts.
+    """Parse a ``GET /services?<filters>`` response into flat ``id + card`` dicts.
 
     Each wrapped backend entry ``{id, type, name, description, metadata}``
     is flattened: the wrapper stays, then ``metadata`` is popped and its
