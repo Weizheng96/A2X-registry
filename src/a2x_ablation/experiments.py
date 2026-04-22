@@ -167,6 +167,44 @@ def _build_experiment_list():
             build_config_overrides={"keyword_threshold": 99999},
             reuse_keywords_from=None,
         ),
+
+        # ------------------------------------------------------------------
+        # 增强消融 1+/2+/3+：针对每个模块的核心问题做更彻底的消融
+        #   - 1+ 超长上下文：真正把 1839 条完整描述注入 prompt
+        #   - 2+ 无分类方案校验：同时移除代码层根验证 + prompt 层维度约束
+        #   - 3+ 允许泛用分类：移除反 catch-all 约束 + 禁用反馈迭代
+        # 这些消融会让模块的"保护作用"真正显性化。
+        # ------------------------------------------------------------------
+        Experiment(
+            id="增强消融1_超长上下文",
+            label="增强消融 1+（无关键词频率表 · 超长上下文压力）",
+            description="消融 1 基础上，关闭服务描述 150 字截断——完整 1839 条描述直接入 B3 prompt",
+            needs_build=True,
+            build_output_dir="database/ToolRet_clean/taxonomy_abl1plus",
+            build_config_overrides={"keyword_threshold": 99999},
+            build_patch=patches.patch_ultra_long_context,
+            reuse_keywords_from=None,
+        ),
+        Experiment(
+            id="增强消融2_无分类方案校验",
+            label="增强消融 2+（无独立分类校验 · 移除维度一致性约束）",
+            description="同时移除：代码层根节点 LLM 验证、早停、B3/B3-desc 的维度一致性 prompt",
+            needs_build=True,
+            build_output_dir="database/ToolRet_clean/taxonomy_abl2plus",
+            build_config_overrides={},
+            build_patch=patches.patch_no_dimension_validation,
+            reuse_keywords_from=BASELINE_TAXONOMY_DIR,
+        ),
+        Experiment(
+            id="增强消融3_允许泛用分类",
+            label="增强消融 3+（无反馈迭代 · 允许泛用/catch-all 分类）",
+            description="max_refine=1 + 移除反 catch-all prompt + 关闭根验证，允许'General/Other'桶产生",
+            needs_build=True,
+            build_output_dir="database/ToolRet_clean/taxonomy_abl3plus",
+            build_config_overrides={"max_refine_iterations": 1},
+            build_patch=patches.patch_allow_catchall_no_refine,
+            reuse_keywords_from=BASELINE_TAXONOMY_DIR,
+        ),
     ]
 
 

@@ -37,7 +37,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from tqdm import tqdm
 
 from src.a2x_ablation.experiments import get_experiments
-from src.a2x_ablation.runner import run_one_experiment, ExperimentResult
+from src.a2x_ablation.runner import run_one_experiment, ExperimentResult, aggregate_runs
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +106,12 @@ def print_summary_table(results: list[ExperimentResult]):
     print()
 
 
-def write_consolidated_summary(results: list[ExperimentResult], output_path: Path):
-    """Write a single JSON file with all experiment rows — for the patent disclosure table."""
+def write_consolidated_summary(
+    results: list[ExperimentResult],
+    output_path: Path,
+    agg_by_experiment: list[tuple[str, str, dict]] = None,
+):
+    """Write a single JSON file with all experiment rows + aggregated stats."""
     data = {
         "description": "A2X ablation sweep results — populates reference/patent/专利交底书.md §4.3",
         "dataset": "ToolRet_clean",
@@ -131,6 +135,11 @@ def write_consolidated_summary(results: list[ExperimentResult], output_path: Pat
             for r in results
         ],
     }
+    if agg_by_experiment:
+        data["aggregated"] = [
+            {"id": eid, "label": label, **agg}
+            for eid, label, agg in agg_by_experiment
+        ]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -158,8 +167,14 @@ def main():
     )
     parser.add_argument(
         "--only", type=str, default=None,
-        help="Run only experiments whose id contains this substring "
-             "(e.g. --only 消融2 or --only 基线)",
+        help="Run only experiments whose id matches ANY of the comma-separated "
+             "substrings (e.g. --only 消融2 or --only 增强消融,完整方案)",
+    )
+    parser.add_argument(
+        "--n-runs", type=int, default=1,
+        help="Number of repeated runs per experiment for std-deviation estimation "
+             "(default: 1). Build taxonomy is shared; each run gets its own eval "
+             "output at {eval_output_dir}_run{N}. Reuse-only rows are never repeated.",
     )
     parser.add_argument(
         "--summary-path", type=str,
@@ -170,39 +185,96 @@ def main():
 
     experiments = get_experiments()
     if args.only:
-        experiments = [e for e in experiments if args.only in e.id]
+        patterns = [p.strip() for p in args.only.split(",") if p.strip()]
+        experiments = [e for e in experiments if any(p in e.id for p in patterns)]
         if not experiments:
             print(f"No experiments match --only {args.only!r}", file=sys.stderr)
             sys.exit(1)
 
     total = len(experiments)
-    print(f"\nA2X ablation sweep: {total} experiments planned")
+    print(f"\nA2X ablation sweep: {total} experiments planned (n_runs={args.n_runs})")
     for e in experiments:
         tag = "REUSE" if e.reuse_eval_from else ("BUILD+EVAL" if e.needs_build else "EVAL")
         print(f"  [{tag:>10}] {e.id}: {e.label}")
     print()
 
     results: list[ExperimentResult] = []
+    # Per-experiment aggregated view when n_runs > 1
+    agg_by_experiment: list[tuple[str, str, dict]] = []
+
     overall_start = time.time()
 
     with tqdm(experiments, desc="Ablation sweep", unit="exp", position=0) as outer_bar:
         for exp in outer_bar:
             outer_bar.set_postfix_str(exp.id[:30])
-            res = run_one_experiment(exp, workers=args.workers)
-            results.append(res)
 
-            if res.status in ("failed",):
-                outer_bar.write(f"✗ {exp.id} FAILED: {res.notes}")
-            else:
-                metric = f"Recall={_format_pct(res.recall).strip()}, HitRate={_format_pct(res.hit_rate).strip()}"
-                outer_bar.write(f"✓ {exp.id} [{res.status}] {metric}")
+            # Reuse-only: just one run regardless of --n-runs
+            effective_runs = 1 if exp.reuse_eval_from else args.n_runs
+
+            per_exp_results: list[ExperimentResult] = []
+            for run_idx in range(effective_runs):
+                res = run_one_experiment(
+                    exp, workers=args.workers,
+                    run_idx=run_idx, n_runs=effective_runs,
+                )
+                results.append(res)
+                per_exp_results.append(res)
+
+                if res.status == "failed":
+                    outer_bar.write(f"✗ {exp.id} run {run_idx + 1}/{effective_runs} FAILED: {res.notes}")
+                else:
+                    metric = (
+                        f"Recall={_format_pct(res.recall).strip()}, "
+                        f"HitRate={_format_pct(res.hit_rate).strip()}"
+                    )
+                    outer_bar.write(
+                        f"✓ {exp.id} run {run_idx + 1}/{effective_runs} "
+                        f"[{res.status}] {metric}"
+                    )
+
+            # Aggregate if n_runs > 1
+            if effective_runs > 1:
+                agg = aggregate_runs(per_exp_results)
+                agg_by_experiment.append((exp.id, exp.label, agg))
+                outer_bar.write(
+                    f"  ↳ {exp.id} aggregated: "
+                    f"Recall={agg['recall_mean']*100:.2f}%±{agg['recall_std']*100:.2f}pp, "
+                    f"HitRate={agg['hit_rate_mean']*100:.2f}%±{agg['hit_rate_std']*100:.2f}pp"
+                )
 
     overall_elapsed = time.time() - overall_start
     print(f"\nAblation sweep finished in {_format_duration(overall_elapsed).strip()}")
 
     # Display + persist
     print_summary_table(results)
-    write_consolidated_summary(results, Path(args.summary_path))
+    write_consolidated_summary(results, Path(args.summary_path), agg_by_experiment)
+
+    # Aggregated table (only if n_runs > 1 and we have aggregated data)
+    if agg_by_experiment:
+        print("\n" + "=" * 130)
+        print(f"AGGREGATED (n_runs={args.n_runs}) — mean ± std")
+        print("=" * 130)
+        print(f"{'实验':<40} {'HitRate μ±σ':>17} {'Recall μ±σ':>17} {'Precision μ±σ':>18} {'Tokens μ±σ':>17} {'Calls μ±σ':>14}")
+        print("-" * 130)
+        for eid, label, agg in agg_by_experiment:
+            def fmt_pct_ms(m, s):
+                if m is None: return "       —        "
+                return f"{m*100:6.2f}% ± {s*100:5.2f}pp"
+            def fmt_num_ms(m, s):
+                if m is None: return "       —        "
+                return f"{m:7.0f} ± {s:6.0f}"
+            def fmt_call_ms(m, s):
+                if m is None: return "     —       "
+                return f"{m:5.2f} ± {s:5.2f}"
+            print(
+                f"{label[:38]:<40} "
+                f"{fmt_pct_ms(agg['hit_rate_mean'], agg['hit_rate_std']):>17} "
+                f"{fmt_pct_ms(agg['recall_mean'], agg['recall_std']):>17} "
+                f"{fmt_pct_ms(agg['precision_mean'], agg['precision_std']):>18} "
+                f"{fmt_num_ms(agg['avg_tokens_mean'], agg['avg_tokens_std']):>17} "
+                f"{fmt_call_ms(agg['avg_llm_calls_mean'], agg['avg_llm_calls_std']):>14}"
+            )
+        print("=" * 130)
 
     # Exit code: non-zero if any experiment failed
     n_failed = sum(1 for r in results if r.status == "failed")

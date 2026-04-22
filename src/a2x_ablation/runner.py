@@ -282,46 +282,86 @@ def run_evaluation(experiment, workers: int = 20) -> tuple[float, Dict]:
 # --------------------------------------------------------------------------
 
 
-def run_one_experiment(experiment, workers: int = 20) -> ExperimentResult:
-    """Run a single ablation experiment end-to-end."""
+def run_one_experiment(
+    experiment, workers: int = 20, run_idx: int = 0, n_runs: int = 1
+) -> ExperimentResult:
+    """Run a single ablation experiment end-to-end.
+
+    When n_runs > 1, each run's eval output goes to {eval_output_dir}_run{N+1}
+    so multiple runs don't overwrite each other. The taxonomy build is shared
+    across runs of the same experiment (build artifacts are cached).
+    """
+    suffix = f" (run {run_idx + 1}/{n_runs})" if n_runs > 1 else ""
     logger.info("\n" + "=" * 80)
-    logger.info("[%s] %s", experiment.id, experiment.label)
+    logger.info("[%s]%s %s", experiment.id, suffix, experiment.label)
     logger.info("    %s", experiment.description)
     logger.info("=" * 80)
 
-    # Reuse path
-    if experiment.reuse_eval_from:
-        return reuse_existing_result(experiment, experiment.eval_output_dir)
+    # For multi-run, vary the eval output directory per run; restore afterward.
+    original_eval_dir = experiment.eval_output_dir
+    if n_runs > 1:
+        experiment.eval_output_dir = f"{original_eval_dir}_run{run_idx + 1}"
 
-    # Build taxonomy if needed
-    build_elapsed = None
     try:
-        if experiment.needs_build:
-            build_elapsed = build_taxonomy(experiment)
-        eval_elapsed, summary = run_evaluation(experiment, workers=workers)
-    except Exception as e:
-        logger.exception("[%s] failed: %s", experiment.id, e)
+        # Reuse path (baselines) — no LLM variance, only one run is meaningful
+        if experiment.reuse_eval_from:
+            return reuse_existing_result(experiment, experiment.eval_output_dir)
+
+        build_elapsed = None
+        try:
+            if experiment.needs_build:
+                build_elapsed = build_taxonomy(experiment)
+            eval_elapsed, summary = run_evaluation(experiment, workers=workers)
+        except Exception as e:
+            logger.exception("[%s]%s failed: %s", experiment.id, suffix, e)
+            return ExperimentResult(
+                experiment_id=experiment.id, label=experiment.label, status="failed",
+                hit_rate=None, recall=None, precision=None,
+                avg_tokens=None, avg_llm_calls=None,
+                eval_output_dir=experiment.eval_output_dir,
+                build_elapsed_sec=build_elapsed,
+                eval_elapsed_sec=None,
+                notes=f"error: {e}",
+            )
+
         return ExperimentResult(
-            experiment_id=experiment.id, label=experiment.label, status="failed",
-            hit_rate=None, recall=None, precision=None,
-            avg_tokens=None, avg_llm_calls=None,
+            experiment_id=experiment.id,
+            label=experiment.label,
+            status="built+evaluated" if experiment.needs_build else "evaluated",
+            hit_rate=summary.get("hit_rate"),
+            recall=summary.get("recall"),
+            precision=summary.get("precision"),
+            avg_tokens=summary.get("avg_tokens"),
+            avg_llm_calls=summary.get("avg_llm_calls"),
             eval_output_dir=experiment.eval_output_dir,
             build_elapsed_sec=build_elapsed,
-            eval_elapsed_sec=None,
-            notes=f"error: {e}",
+            eval_elapsed_sec=eval_elapsed,
+            notes=f"run {run_idx + 1}/{n_runs}" if n_runs > 1 else "",
         )
+    finally:
+        experiment.eval_output_dir = original_eval_dir
 
-    return ExperimentResult(
-        experiment_id=experiment.id,
-        label=experiment.label,
-        status="built+evaluated" if experiment.needs_build else "evaluated",
-        hit_rate=summary.get("hit_rate"),
-        recall=summary.get("recall"),
-        precision=summary.get("precision"),
-        avg_tokens=summary.get("avg_tokens"),
-        avg_llm_calls=summary.get("avg_llm_calls"),
-        eval_output_dir=experiment.eval_output_dir,
-        build_elapsed_sec=build_elapsed,
-        eval_elapsed_sec=eval_elapsed,
-        notes="",
-    )
+
+def aggregate_runs(results: list) -> dict:
+    """Aggregate metrics across multiple runs of the same experiment.
+
+    Returns a dict with `{metric}_mean` and `{metric}_std` keys. Std=0 when
+    only one run succeeded (to preserve a valid numeric for downstream code).
+    """
+    import statistics
+
+    metrics = ("hit_rate", "recall", "precision", "avg_tokens", "avg_llm_calls")
+    agg = {"n_runs_completed": len([r for r in results if r.status != "failed"])}
+    for key in metrics:
+        values = [getattr(r, key) for r in results
+                  if getattr(r, key) is not None and r.status != "failed"]
+        if not values:
+            agg[f"{key}_mean"] = None
+            agg[f"{key}_std"] = None
+        elif len(values) == 1:
+            agg[f"{key}_mean"] = values[0]
+            agg[f"{key}_std"] = 0.0
+        else:
+            agg[f"{key}_mean"] = statistics.mean(values)
+            agg[f"{key}_std"] = statistics.stdev(values)
+    return agg
