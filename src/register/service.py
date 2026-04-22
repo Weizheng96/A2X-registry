@@ -592,6 +592,20 @@ class RegistryService:
         with self._lock:
             return list(self._entries.keys())
 
+    def dataset_dir(self, dataset: str) -> Path:
+        """Return the on-disk directory for a dataset.
+
+        Lets callers (build pipeline, search service, frontend export
+        helpers) ask "where does this dataset live?" without rebuilding
+        the path from PROJECT_ROOT themselves.
+        """
+        return self._database_dir / dataset
+
+    def service_json_path(self, dataset: str) -> Path:
+        """Return the path to ``service.json`` for a dataset (the unified
+        output file used by downstream build / search / vector pipelines)."""
+        return self.dataset_dir(dataset) / "service.json"
+
     def list_datasets_with_counts(self) -> List[Dict[str, Any]]:
         """List all datasets on disk with their service + query counts.
 

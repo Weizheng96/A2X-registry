@@ -10,7 +10,6 @@ import logging
 import queue as _queue
 import threading
 import time
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -204,10 +203,12 @@ def _run_taxonomy_build(dataset: str, resume: str, extra_params: dict = None,
     try:
         from src.a2x.build.config import AutoHierarchicalConfig
         from src.a2x.build.taxonomy_builder import TaxonomyBuilder
-        database_dir = Path(__file__).parent.parent.parent.parent / "database"
-        service_path = database_dir / dataset / "service.json"
+        service_path = _get_service().service_json_path(dataset)
         if not service_path.exists():
-            msg = f"service.json not found for dataset '{dataset}'"
+            msg = (
+                f"No services registered for dataset '{dataset}' yet "
+                "(service.json missing). Register at least one service first."
+            )
             job.update({"status": "error", "message": msg, "finished_at": time.time()})
             _push_to_subs(dataset, {"type": "status", "status": "error", "message": msg})
             return
