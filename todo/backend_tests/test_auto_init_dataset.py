@@ -127,16 +127,17 @@ class TestIdempotent:
 
     def test_explicit_create_then_register_works_unchanged(self, client):
         """User-driven create_dataset still wins; register is a no-op for init."""
+        target = "paraphrase-multilingual-MiniLM-L12-v2"
         r = client.post(
             "/api/datasets",
-            json={"name": "explicit", "embedding_model": "bge-small-zh-v1.5"},
+            json={"name": "explicit", "embedding_model": target},
         )
         assert r.status_code == 200
         _register_a2a(client, "explicit")
         vc = json.loads(
             (_ds_path(client, "explicit") / "vector_config.json").read_text(encoding="utf-8")
         )
-        assert vc["embedding_model"] == "bge-small-zh-v1.5"  # not clobbered
+        assert vc["embedding_model"] == target  # not clobbered
 
 
 # ── Reservation path also benefits ───────────────────────────────────────────

@@ -199,24 +199,16 @@ class RegistryService:
         Embedding model and formats can be changed later via the dedicated
         ``POST /vector-config`` and ``POST /register-config`` endpoints.
         """
+        from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL
         config_file = self._database_dir / dataset / "vector_config.json"
         if config_file.exists():
             return
-        try:
-            self.create_dataset(dataset)
-            logger.info("Auto-initialized dataset '%s' with defaults", dataset)
-        except ValueError:
-            # Either another thread won the create race, or a legacy
-            # half-formed directory pre-existed. If config now exists, the
-            # winner finished the init for us.
-            if config_file.exists():
-                return
-            # Half-formed legacy directory — reconcile by completing the
-            # writes through the same store helpers create_dataset uses.
-            (self._database_dir / dataset / "query").mkdir(parents=True, exist_ok=True)
-            self.set_vector_config(dataset)  # default embedding model + dim
-            self.set_register_config(dataset, dict(DEFAULT_FORMAT_CONFIG))
-            logger.info("Auto-initialized dataset '%s' (reconciled legacy half-formed dir)", dataset)
+        # Idempotent file writes via the same helper create_dataset uses.
+        # Tolerates an existing-but-half-formed directory (legacy data).
+        self._init_dataset_files(
+            dataset, DEFAULT_EMBEDDING_MODEL, dict(DEFAULT_FORMAT_CONFIG),
+        )
+        logger.info("Auto-initialized dataset '%s' with defaults", dataset)
 
     def register_generic(self, req: RegisterGenericRequest) -> RegisterResponse:
         """Register a generic service."""
@@ -977,37 +969,55 @@ class RegistryService:
         ``formats`` normalizes to an empty dict (which would reject every
         registration).
         """
-        from src.vector.utils.embedding import EMBEDDING_MODELS
         ds_dir = self._database_dir / name
         if ds_dir.exists():
             raise ValueError(f"Dataset '{name}' already exists")
-
-        # Normalize formats BEFORE creating the directory so we fail fast on bad input.
-        if formats is None:
-            normalized = dict(DEFAULT_FORMAT_CONFIG)
-        else:
-            normalized = normalize_format_config(formats)
-            if not normalized:
-                raise ValueError(
-                    "formats must declare at least one valid type/version. "
-                    f"Supported types: {list(SUPPORTED_SERVICE_TYPES)}")
-
-        ds_dir.mkdir(parents=True)
-        (ds_dir / "query").mkdir()
-        info = EMBEDDING_MODELS.get(embedding_model, {})
-        dim = info.get("dim", 384)
-        vc = {"embedding_model": embedding_model, "embedding_dim": dim}
-        (ds_dir / "vector_config.json").write_text(
-            json.dumps(vc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-        # Write register_config.json via the store (atomic) and cache it.
-        self._get_store(name).write_register_config(normalized)
-        with self._lock:
-            self._format_configs[name] = dict(normalized)
-
+        # Validate formats first so we fail fast before touching disk.
+        normalized = self._normalize_or_default_formats(formats)
+        self._init_dataset_files(name, embedding_model, normalized)
         logger.info("Created dataset '%s' (embedding: %s, formats: %s)",
                     name, embedding_model, normalized)
         return ds_dir
+
+    def _normalize_or_default_formats(
+        self, formats: Optional[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        """Resolve a caller-supplied ``formats`` arg to a usable map.
+
+        - ``None`` → defaults (all three types at v0.0)
+        - dict → normalized via ``normalize_format_config``; raises if the
+          result is empty (would reject every registration)
+        """
+        if formats is None:
+            return dict(DEFAULT_FORMAT_CONFIG)
+        normalized = normalize_format_config(formats)
+        if not normalized:
+            raise ValueError(
+                "formats must declare at least one valid type/version. "
+                f"Supported types: {list(SUPPORTED_SERVICE_TYPES)}")
+        return normalized
+
+    def _init_dataset_files(
+        self,
+        name: str,
+        embedding_model: str,
+        formats: Dict[str, str],
+    ) -> None:
+        """Idempotent: create the dataset dir + write both config files.
+
+        Single source of truth for "what files make a dataset valid"
+        (used by both ``create_dataset`` happy-path and
+        ``_ensure_dataset_initialized``'s reconcile fallback). Never
+        clobbers an existing ``vector_config.json``: if it's already
+        there, the embedding-config write is skipped (so manually-set
+        models survive auto-init).
+        """
+        ds_dir = self._database_dir / name
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        (ds_dir / "query").mkdir(exist_ok=True)
+        if not (ds_dir / "vector_config.json").exists():
+            self.set_vector_config(name, embedding_model)
+        self.set_register_config(name, formats)
 
     def delete_dataset(self, name: str) -> None:
         """Delete a dataset directory and all internal caches.
