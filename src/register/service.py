@@ -598,6 +598,26 @@ class RegistryService:
         output file used by downstream build / search / vector pipelines)."""
         return self.dataset_dir(dataset) / "service.json"
 
+    def query_path(self, dataset: str) -> Path:
+        """Path to ``query/query.json`` (evaluation query set)."""
+        return self.dataset_dir(dataset) / "query" / "query.json"
+
+    def taxonomy_dir(self, dataset: str) -> Path:
+        """Directory holding ``taxonomy.json`` / ``class.json`` etc."""
+        return self.dataset_dir(dataset) / "taxonomy"
+
+    def taxonomy_path(self, dataset: str) -> Path:
+        """Path to ``taxonomy.json`` (built tree structure)."""
+        return self.taxonomy_dir(dataset) / "taxonomy.json"
+
+    def class_path(self, dataset: str) -> Path:
+        """Path to ``class.json`` (per-category labels + descriptions)."""
+        return self.taxonomy_dir(dataset) / "class.json"
+
+    def chroma_dir(self) -> Path:
+        """Shared ChromaDB directory (one per database root, not per dataset)."""
+        return self._database_dir / "chroma"
+
     def list_datasets_with_counts(self) -> List[Dict[str, Any]]:
         """List all datasets on disk with their service + query counts.
 

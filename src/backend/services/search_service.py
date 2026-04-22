@@ -42,26 +42,34 @@ def _check_taxonomy(dataset: str) -> None:
         )
 
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+def _require_registry():
+    """Resolve the bound registry or fail loudly (these path-resolving
+    helpers are useless without it)."""
+    if _registry is None:
+        raise RuntimeError(
+            "SearchService called before set_registry(); call init_registry_service "
+            "in the dataset router and search_service.set_registry on startup."
+        )
+    return _registry
 
 
 def discover_datasets() -> List[str]:
     """Return names of all datasets that have both service.json and query.json."""
-    db_dir = PROJECT_ROOT / "database"
+    reg = _require_registry()
     return [
-        d.name for d in sorted(db_dir.iterdir())
-        if d.is_dir() and (d / "service.json").exists() and (d / "query" / "query.json").exists()
+        info["name"] for info in reg.list_datasets_with_counts()
+        if reg.query_path(info["name"]).exists()
     ]
 
 
 def resolve_dataset_paths(dataset: str) -> Dict[str, Path]:
     """Resolve file paths for a given dataset name."""
-    base = PROJECT_ROOT / "database" / dataset
+    reg = _require_registry()
     return {
-        "service_path": base / "service.json",
-        "query_path": base / "query" / "query.json",
-        "taxonomy_path": base / "taxonomy" / "taxonomy.json",
-        "class_path": base / "taxonomy" / "class.json",
+        "service_path": reg.service_json_path(dataset),
+        "query_path": reg.query_path(dataset),
+        "taxonomy_path": reg.taxonomy_path(dataset),
+        "class_path": reg.class_path(dataset),
     }
 
 
@@ -94,16 +102,8 @@ class SearchService:
 
     @staticmethod
     def read_vector_config(dataset: str) -> str:
-        """Read embedding model name from vector_config.json, default if missing."""
-        from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL
-        config_path = PROJECT_ROOT / "database" / dataset / "vector_config.json"
-        if config_path.exists():
-            try:
-                with open(config_path, encoding="utf-8") as f:
-                    return json.load(f).get("embedding_model", DEFAULT_EMBEDDING_MODEL)
-            except (json.JSONDecodeError, OSError):
-                pass
-        return DEFAULT_EMBEDDING_MODEL
+        """Read the embedding-model name for a dataset (default if missing)."""
+        return _require_registry().get_vector_config(dataset)["embedding_model"]
 
     def _get_embedding_model(self, model_name: str | None = None):
         """Get or create an EmbeddingModel by name (cached by model name)."""
@@ -185,7 +185,7 @@ class SearchService:
         try:
             from src.vector.utils.chroma_store import ChromaStore
             collection = dataset.lower().replace("-", "_")
-            chroma_dir = str(PROJECT_ROOT / "database" / "chroma")
+            chroma_dir = str(_require_registry().chroma_dir())
             ChromaStore(collection, chroma_dir).clear()
             logger.info("Cleared ChromaDB collection: %s", collection)
         except Exception as e:
@@ -227,7 +227,7 @@ class SearchService:
 
         from src.vector.utils.chroma_store import ChromaStore
         collection = dataset.lower().replace("-", "_")
-        chroma_dir = str(PROJECT_ROOT / "database" / "chroma")
+        chroma_dir = str(_require_registry().chroma_dir())
         store = ChromaStore(collection, chroma_dir, embedding_model=model_name)
 
         # Detect embedding model mismatch → full rebuild

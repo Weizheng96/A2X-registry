@@ -1,7 +1,6 @@
 """Dataset management API — CRUD, services, taxonomy, embedding config."""
 
 import asyncio
-import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,7 +24,6 @@ from src.register.service import RegistryService
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 _service: Optional[RegistryService] = None
 _executor = ThreadPoolExecutor(max_workers=2)
 

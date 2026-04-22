@@ -21,11 +21,15 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     """TestClient bound to a FastAPI app with a temp RegistryService."""
     from fastapi import FastAPI
     from src.backend.routers import dataset as dataset_router
+    from src.backend.services import search_service as search_module
 
     # Fresh service rooted at tmp_path/database — isolated from the real repo
     db_dir = tmp_path / "database"
     db_dir.mkdir()
-    dataset_router.init_registry_service(db_dir)
+    svc = dataset_router.init_registry_service(db_dir)
+    # Bind SearchService to this registry so its path helpers resolve
+    # against the tmp_path database (not the real one).
+    search_module.set_registry(svc)
 
     # Minimal app — only the dataset router (enough for filter-mode tests)
     app = FastAPI()
