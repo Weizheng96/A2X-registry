@@ -1,5 +1,6 @@
 """Registration module for A2X Registry."""
 
+from .errors import RegistryNotFoundError
 from .service import RegistryService
 from .store import RegistryStore
 from .validation import (
@@ -15,6 +16,7 @@ from .validation import (
 __all__ = [
     "RegistryService",
     "RegistryStore",
+    "RegistryNotFoundError",
     "FormatValidator",
     "ValidationResult",
     "DEFAULT_FORMAT_CONFIG",

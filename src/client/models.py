@@ -56,6 +56,10 @@ class PatchResponse(_FromDictMixin):
 
 @dataclass
 class DeregisterResponse(_FromDictMixin):
+    """Successful deregister. ``status`` is always ``"deregistered"`` —
+    a missing service surfaces as ``NotFoundError`` (HTTP 404), not as a
+    200 with ``status="not_found"``."""
+
     service_id: str
     status: str
 

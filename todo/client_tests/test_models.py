@@ -61,10 +61,11 @@ class TestFromDictBasic:
         r = RegisterResponse.from_dict({"service_id": "s", "dataset": "d", "status": status})
         assert r.status == status
 
-    @pytest.mark.parametrize("status", ["deregistered", "not_found"])
-    def test_deregister_status_enum(self, status):
-        r = DeregisterResponse.from_dict({"service_id": "s", "status": status})
-        assert r.status == status
+    def test_deregister_status_only_deregistered(self):
+        """Post PR-#3: missing service → 404 (NotFoundError), not 200+not_found.
+        DeregisterResponse therefore only carries status='deregistered'."""
+        r = DeregisterResponse.from_dict({"service_id": "s", "status": "deregistered"})
+        assert r.status == "deregistered"
 
 
 class TestFromDictForwardCompat:

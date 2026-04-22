@@ -15,6 +15,7 @@ from src.backend.schemas.models import DatasetInfo, DefaultQuery
 from src.backend.services.search_service import search_service
 from src.backend.services.taxonomy_service import get_taxonomy_tree
 from src.backend.default_queries import get_default_queries
+from src.register.errors import RegistryNotFoundError
 from src.register.models import (
     RegisterGenericRequest, RegisterA2ARequest,
     RegisterResponse, DeregisterResponse, SkillResponse, UpdateResponse,
@@ -44,10 +45,19 @@ def get_registry_service() -> RegistryService:
 
 
 async def _run(fn, *args):
-    """Run a blocking function in the thread pool, mapping exceptions to HTTP errors."""
+    """Run a blocking function in the thread pool, mapping exceptions to HTTP errors.
+
+    Layered error contract (see docs/client_design.md §3.4):
+      RegistryNotFoundError → 404   (business "resource doesn't exist")
+      ValueError            → 400   (validation / forbidden source)
+      FileNotFoundError     → 404   (skill folder missing on disk)
+      KeyError              → 404   (legacy fallback for any not-yet-migrated path)
+    """
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(_executor, fn, *args)
+    except RegistryNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except KeyError as e:
@@ -206,7 +216,10 @@ async def list_services(
         svc = get_registry_service()
         entry = svc.get_entry(dataset, service_id)
         if not entry:
-            raise HTTPException(status_code=404, detail="Service not found")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Service '{service_id}' not found in dataset '{dataset}'",
+            )
         # Skill type: return ZIP download
         if entry.type == "skill" and entry.skill_data:
             try:

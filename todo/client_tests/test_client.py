@@ -849,16 +849,17 @@ def test_connection_error_wrapped(tmp_path):
 
 # ── Deregister additional cases ──────────────────────────────────────────────
 
-def test_deregister_returning_not_found_status_still_clears(tmp_path):
-    """Backend 200 + status='not_found' is success; local _owned must still clear."""
+def test_deregister_404_clears_local_then_reraises(tmp_path):
+    """After PR-#3 contract: missing service → 404 (not 200+not_found).
+    SDK must scrub local _owned and re-raise NotFoundError."""
     def handler(req):
-        return httpx.Response(200, json={
-            "service_id": "sid", "status": "not_found",
+        return httpx.Response(404, json={
+            "detail": "Service 'sid' not found in dataset 'ds'",
         })
     client, _ = _make_client(handler, tmp_path)
     client._owned.add("ds", "sid")
-    r = client.deregister_agent("ds", "sid")
-    assert r.status == "not_found"
+    with pytest.raises(NotFoundError):
+        client.deregister_agent("ds", "sid")
     assert not client._owned.contains("ds", "sid")
     client.close()
 

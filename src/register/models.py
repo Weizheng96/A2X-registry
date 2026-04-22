@@ -120,13 +120,13 @@ class RegisterResponse(BaseModel):
 
 class DeregisterResponse(BaseModel):
     service_id: str
-    status: str  # "deregistered" | "not_found"
+    status: str  # "deregistered" — missing service raises RegistryNotFoundError → 404
 
 
 class UpdateResponse(BaseModel):
     service_id: str
     dataset: str
-    status: str                       # "updated" | "not_found"
+    status: str                       # "updated" — missing service raises RegistryNotFoundError → 404
     changed_fields: List[str] = []    # top-level keys whose value actually changed
     taxonomy_affected: bool = False   # True iff name or description changed
 

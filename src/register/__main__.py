@@ -27,6 +27,7 @@ import logging
 import sys
 from pathlib import Path
 
+from .errors import RegistryNotFoundError
 from .models import AgentCard, RegisterA2ARequest, RegisterGenericRequest
 from .service import RegistryService
 
@@ -366,13 +367,17 @@ def _cmd_update(service: RegistryService, args):
 
 
 def _cmd_deregister(service: RegistryService, args):
-    resp = service.deregister(args.dataset, args.service_id)
+    try:
+        resp = service.deregister(args.dataset, args.service_id)
+    except RegistryNotFoundError as exc:
+        if args.json_output:
+            _print_json({"service_id": args.service_id, "status": "not_found"})
+        else:
+            print(str(exc), file=sys.stderr)
+        sys.exit(1)
     if args.json_output:
         _print_json(resp.model_dump())
         return
-    if resp.status == "not_found":
-        print(f"Service '{args.service_id}' not found in '{args.dataset}'.", file=sys.stderr)
-        sys.exit(1)
     print(f"Deregistered service")
     _print_kv([
         ("ID", resp.service_id),

@@ -258,10 +258,10 @@ free_blanks = client.list_agents("team_pool",
 - `dataset: str`
 - `service_id: str`
 
-**返回**：`DeregisterResponse(service_id, status)`，`status ∈ {"deregistered","not_found"}`
+**返回**：`DeregisterResponse(service_id, status)`，`status` 仅 `"deregistered"`（不存在的 sid 走 `NotFoundError` 分支，**不会返回 200 + `"not_found"`**）
 **错误**：
 - `NotOwnedError` — 本地未拥有
-- `NotFoundError` — 后端 404（自动清本地后重抛）
+- `NotFoundError` — 后端 404（业务层 `RegistryNotFoundError` → 路由 404 → SDK `NotFoundError`，自动清本地后重抛）
 
 ---
 
@@ -426,6 +426,40 @@ src/client/
 **自动同步本地与远端**：mutation 命中后端 404 → 自动 `_owned.remove(sid)` 再重抛 `NotFoundError`；`delete_dataset` 命中 400 同理。避免"永远 404 + 本地永远脏"。
 
 **L1 endpoint 缓存**（独立于 `_owned`）：`_blank_endpoints: {(ds, sid): endpoint}`，仅内存、不持久化。**写入方**：`register_blank_agent`、`replace_agent_card`（成功后刷新为新 card 的 endpoint）；**读取方**：`replace_agent_card`（auto-fill 缺失 endpoint）、`restore_to_blank`（构建 blank 模板）。`deregister_agent` / `replace_agent_card` 404 时一并清理。
+
+### 3.4 NotFound 分层错误约定
+
+`update_agent` / `set_team_count` / `deregister_agent` 等 mutation 在"目标 service 不存在"时遵循三层契约：
+
+```mermaid
+flowchart LR
+    A["RegistryService<br/>(后端业务层)"] -->|raise RegistryNotFoundError| B["FastAPI Router<br/>(协议适配层)"]
+    B -->|map to HTTPException 404| C["HTTP 404"]
+    C -->|httpx receives 404| D["SDK Transport<br/>_wrap_http_error"]
+    D -->|raise NotFoundError| E["A2XClient / AsyncA2XClient"]
+    E -->|cleanup _owned + L1 cache,<br/>then re-raise| F["Developer Code"]
+```
+
+| 层 | 抛出 | 职责 |
+|---|------|------|
+| `RegistryService`（业务层） | `RegistryNotFoundError`（在 [`src/register/errors.py`](../src/register/errors.py)） | 只表达"业务上找不到"，不持有 HTTP 语义、不依赖 web 框架 |
+| FastAPI Router（协议层） | `HTTPException(404, ...)` | 把业务异常翻译成统一 HTTP 状态码（在 [`src/backend/routers/dataset.py`](../src/backend/routers/dataset.py) 的 `_run` 包装器内） |
+| SDK Transport（Python 层） | `NotFoundError` | 反向把 HTTP 404 映射成 SDK 异常 |
+| A2XClient（业务方法层） | 重抛前清本地 `_owned` / L1 缓存 | 自动维护本地与远端的一致性 |
+
+**设计原则**：
+
+- **业务层不直接抛 `HTTPException`** —— 否则 `RegistryService` 依赖 `fastapi`，无法独立测试或被非 web 调用方复用
+- **业务层不用裸 `KeyError`** —— 语义太泛（任何 `dict[bad_key]` 也会触发），且 `str(KeyError(...))` 文案带额外引号
+- **不存在 → 404，而非 200 + `status="not_found"`** —— 否则 SDK 不能稳定触发 `NotFoundError` 分支与 ownership 自动清理；调用方还得多写一层 `if resp.status == "not_found":`
+
+**调用链**：
+
+1. `RegistryService.deregister(...)` 发现 sid 不存在 → 抛 `RegistryNotFoundError`
+2. Router `_run` 捕获 → `HTTPException(status_code=404, detail=str(exc))`
+3. SDK transport `_wrap_http_error` → `NotFoundError(message, status_code=404, payload={"detail": ...})`
+4. `A2XClient.deregister_agent` 捕获 `NotFoundError` → `_owned.remove(...)` + `_blank_endpoints.pop(...)` → 重抛
+5. 调用方按业务需要处理 `NotFoundError`（或继续上抛）
 
 ---
 

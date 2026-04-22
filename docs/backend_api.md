@@ -294,14 +294,19 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 
 注销指定服务。
 
-**响应：**
+**响应（200）：**
 ```json
 { "service_id": "flight_booking", "status": "deregistered" }
 ```
 
-`status` 取值：`"deregistered"` | `"not_found"`
+`status` 取值：仅 `"deregistered"`。
 
-> **注意**：`skill_folder` 来源的服务不能通过此端点注销，需使用 `DELETE /skills/{name}` 端点。
+**错误响应**：
+
+| 状态码 | 触发 |
+|--------|------|
+| 400 | `user_config` 来源的服务（需直接编辑 `user_config.json`）/ `skill_folder` 来源的服务（需使用 `DELETE /skills/{name}` 端点） |
+| 404 | `service_id` 不存在（业务层抛 `RegistryNotFoundError`，路由层映射为 404；不再返回 200 + `status="not_found"`） |
 
 ---
 

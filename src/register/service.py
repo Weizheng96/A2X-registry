@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from .agent_card import build_description, fetch_agent_card
+from .errors import RegistryNotFoundError
 from .models import (
     AgentCard,
     DeregisterResponse,
@@ -306,8 +307,8 @@ class RegistryService:
             also renames the ``skills/{name}/`` folder.
 
         Raises:
-          KeyError    — service_id not found in dataset
-          ValueError  — user_config source / unknown fields / rename collision
+          RegistryNotFoundError — service_id not found in dataset
+          ValueError            — user_config source / unknown fields / rename collision
         """
         if not isinstance(updates, dict):
             raise ValueError("updates must be a dict of {field: value}")
@@ -316,7 +317,9 @@ class RegistryService:
             ds = self._entries.get(dataset, {})
             entry = ds.get(service_id)
             if entry is None:
-                raise KeyError(f"Service '{service_id}' not found in dataset '{dataset}'")
+                raise RegistryNotFoundError(
+                    f"Service '{service_id}' not found in dataset '{dataset}'"
+                )
             if entry.source == "user_config":
                 raise ValueError(
                     "Cannot update user_config entries via API. "
@@ -339,8 +342,9 @@ class RegistryService:
         with self._lock:
             ds = self._entries.get(dataset, {})
             if service_id not in ds:
-                raise KeyError(
-                    f"Service '{service_id}' was removed during update")
+                raise RegistryNotFoundError(
+                    f"Service '{service_id}' was removed during update in dataset '{dataset}'"
+                )
             ds[service_id] = new_entry
 
         # Persist: api_config entries round-trip to disk; skill_folder entries
@@ -434,11 +438,18 @@ class RegistryService:
     # -----------------------------------------------------------------------
 
     def deregister(self, dataset: str, service_id: str) -> DeregisterResponse:
-        """Deregister a service."""
+        """Deregister a service.
+
+        Raises:
+          RegistryNotFoundError — service_id not found in dataset
+          ValueError            — entry source is user_config / skill_folder
+        """
         with self._lock:
             ds = self._entries.get(dataset, {})
             if service_id not in ds:
-                return DeregisterResponse(service_id=service_id, status="not_found")
+                raise RegistryNotFoundError(
+                    f"Service '{service_id}' not found in dataset '{dataset}'"
+                )
 
             entry = ds[service_id]
             if entry.source == "user_config":
