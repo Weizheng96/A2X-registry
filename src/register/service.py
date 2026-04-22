@@ -1032,16 +1032,20 @@ class RegistryService:
         Single source of truth for "what files make a dataset valid"
         (used by both ``create_dataset`` happy-path and
         ``_ensure_dataset_initialized``'s reconcile fallback). Never
-        clobbers an existing ``vector_config.json``: if it's already
-        there, the embedding-config write is skipped (so manually-set
-        models survive auto-init).
+        clobbers either config file if it's already present, so:
+
+        - manually-set embedding models survive an auto-init (e.g. user
+          ran ``POST /vector-config`` before the first register)
+        - manually-restricted formats survive an auto-init (e.g. user
+          ran ``POST /register-config`` before the first register)
         """
         ds_dir = self._database_dir / name
         ds_dir.mkdir(parents=True, exist_ok=True)
         (ds_dir / "query").mkdir(exist_ok=True)
         if not (ds_dir / "vector_config.json").exists():
             self.set_vector_config(name, embedding_model)
-        self.set_register_config(name, formats)
+        if not (ds_dir / "register_config.json").exists():
+            self.set_register_config(name, formats)
 
     def delete_dataset(self, name: str) -> None:
         """Delete a dataset directory and all internal caches.

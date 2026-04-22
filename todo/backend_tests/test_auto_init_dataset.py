@@ -139,6 +139,33 @@ class TestIdempotent:
         )
         assert vc["embedding_model"] == target  # not clobbered
 
+    def test_register_config_set_first_then_register_keeps_custom_formats(self, client):
+        """Regression: when register_config.json exists but vector_config.json
+        does not, auto-init must NOT clobber the user's custom formats with
+        the default (all three at v0.0).
+
+        Order of operations matters: an operator can restrict which service
+        types this dataset will accept BEFORE any service is registered.
+        """
+        # Step 1: explicitly restrict to a2a only — no register yet, so no
+        # vector_config.json gets written, but register_config.json does
+        r = client.post(
+            "/api/datasets/probe/register-config",
+            json={"formats": {"a2a": "v0.0"}},
+        )
+        assert r.status_code == 200, r.text
+
+        # Step 2: register an a2a service — triggers _ensure_dataset_initialized
+        _register_a2a(client, "probe")
+
+        # Step 3: confirm formats survived (auto-init wrote vector_config but
+        # left the existing register_config alone)
+        r = client.get("/api/datasets/probe/register-config")
+        formats = r.json()["formats"]
+        assert formats == {"a2a": "v0.0"}, (
+            f"Expected custom formats preserved, got {formats}"
+        )
+
 
 # ── Reservation path also benefits ───────────────────────────────────────────
 

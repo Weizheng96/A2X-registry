@@ -108,11 +108,12 @@ class TestRegistryRequired:
     """Calling the path helpers without set_registry() should fail loudly."""
 
     def test_resolve_dataset_paths_without_registry_raises(self):
+        import pytest
         from src.backend.services import search_service as sm
+        prev = sm._registry  # snapshot for restore
         sm._registry = None  # explicit unbind
         try:
-            with __import__("pytest").raises(RuntimeError):
+            with pytest.raises(RuntimeError, match="set_registry"):
                 sm.resolve_dataset_paths("any")
         finally:
-            # Don't pollute other tests — re-bind happens in fixture
-            pass
+            sm._registry = prev  # restore so subsequent tests aren't affected
