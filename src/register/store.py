@@ -14,7 +14,7 @@ import shutil
 import threading
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .models import AgentCard, GenericServiceData, RegistryEntry, SkillData
 
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 USER_CONFIG_FILE = "user_config.json"
 API_CONFIG_FILE = "api_config.json"
 REGISTER_CONFIG_FILE = "register_config.json"
+VECTOR_CONFIG_FILE = "vector_config.json"
 SERVICE_JSON_FILE = "service.json"
 SKILLS_DIR = "skills"
 REMOVED_SKILLS_DIR = "removed_skills"
@@ -286,6 +287,31 @@ class RegistryStore:
     def write_register_config(self, formats: Dict[str, str]) -> None:
         """Persist ``register_config.json`` with normalized formats dict."""
         _atomic_write(self._dir / REGISTER_CONFIG_FILE, {"formats": formats})
+
+    def load_vector_config(self) -> Optional[Dict[str, Any]]:
+        """Read ``vector_config.json`` → ``{embedding_model, embedding_dim}``.
+
+        Returns ``None`` if the file is missing or malformed (caller decides
+        what default to apply).
+        """
+        path = self._dir / VECTOR_CONFIG_FILE
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return None
+            return data
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def write_vector_config(self, embedding_model: str, embedding_dim: int) -> None:
+        """Persist ``vector_config.json`` atomically."""
+        _atomic_write(
+            self._dir / VECTOR_CONFIG_FILE,
+            {"embedding_model": embedding_model, "embedding_dim": embedding_dim},
+        )
 
 
 # ---------------------------------------------------------------------------

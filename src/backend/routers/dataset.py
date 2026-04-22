@@ -505,33 +505,17 @@ async def list_embedding_models():
 @router.get("/{dataset}/vector-config")
 async def get_vector_config(dataset: str):
     """Get the vector (embedding) config for a dataset."""
-    from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS
-    config_path = PROJECT_ROOT / "database" / dataset / "vector_config.json"
-    if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-    else:
-        cfg = {"embedding_model": DEFAULT_EMBEDDING_MODEL,
-               "embedding_dim": EMBEDDING_MODELS[DEFAULT_EMBEDDING_MODEL]["dim"]}
+    cfg = get_registry_service().get_vector_config(dataset)
     return {"dataset": dataset, **cfg}
 
 
 @router.post("/{dataset}/vector-config")
 async def set_vector_config(dataset: str, body: dict):
     """Set the embedding model for a dataset. Triggers vector index rebuild."""
-    from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS
-
-    model_name = body.get("embedding_model", DEFAULT_EMBEDDING_MODEL)
-    info = EMBEDDING_MODELS.get(model_name)
-    dim = info["dim"] if info else body.get("embedding_dim")
-    if dim is None:
-        raise HTTPException(status_code=400,
-                            detail=f"Unknown model '{model_name}'; provide embedding_dim")
-
-    config_path = PROJECT_ROOT / "database" / dataset / "vector_config.json"
-    cfg = {"embedding_model": model_name, "embedding_dim": dim}
-    config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
+    svc = get_registry_service()
+    cfg = await _run(
+        svc.set_vector_config,
+        dataset, body.get("embedding_model"), body.get("embedding_dim"),
+    )
     search_service.schedule_vector_sync(dataset)
-
     return {"dataset": dataset, **cfg, "message": "配置已保存，向量索引将在后台重建"}

@@ -211,22 +211,11 @@ class RegistryService:
             # winner finished the init for us.
             if config_file.exists():
                 return
-            # Half-formed legacy directory — reconcile by writing the
-            # missing files. Mirrors the writes in create_dataset but
-            # tolerates the directory already existing.
-            from src.vector.utils.embedding import EMBEDDING_MODELS
-            ds_dir = self._database_dir / dataset
-            (ds_dir / "query").mkdir(parents=True, exist_ok=True)
-            info = EMBEDDING_MODELS.get("all-MiniLM-L6-v2", {})
-            dim = info.get("dim", 384)
-            vc = {"embedding_model": "all-MiniLM-L6-v2", "embedding_dim": dim}
-            config_file.write_text(
-                json.dumps(vc, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            self._get_store(dataset).write_register_config(dict(DEFAULT_FORMAT_CONFIG))
-            with self._lock:
-                self._format_configs[dataset] = dict(DEFAULT_FORMAT_CONFIG)
+            # Half-formed legacy directory — reconcile by completing the
+            # writes through the same store helpers create_dataset uses.
+            (self._database_dir / dataset / "query").mkdir(parents=True, exist_ok=True)
+            self.set_vector_config(dataset)  # default embedding model + dim
+            self.set_register_config(dataset, dict(DEFAULT_FORMAT_CONFIG))
             logger.info("Auto-initialized dataset '%s' (reconciled legacy half-formed dir)", dataset)
 
     def register_generic(self, req: RegisterGenericRequest) -> RegisterResponse:
@@ -1047,6 +1036,48 @@ class RegistryService:
         with self._lock:
             self._format_configs[dataset] = dict(cfg)
         return dict(cfg)
+
+    def get_vector_config(self, dataset: str) -> Dict[str, Any]:
+        """Return ``{embedding_model, embedding_dim}`` for a dataset.
+
+        If ``vector_config.json`` is missing, returns the system default
+        without writing it (callers can use this to render a "current
+        effective" view without forcing a write).
+        """
+        from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS
+        cfg = self._get_store(dataset).load_vector_config()
+        if cfg is not None:
+            return dict(cfg)
+        return {
+            "embedding_model": DEFAULT_EMBEDDING_MODEL,
+            "embedding_dim": EMBEDDING_MODELS[DEFAULT_EMBEDDING_MODEL]["dim"],
+        }
+
+    def set_vector_config(
+        self,
+        dataset: str,
+        embedding_model: Optional[str] = None,
+        embedding_dim: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Persist a new embedding config for a dataset.
+
+        Resolves ``embedding_dim`` from the ``EMBEDDING_MODELS`` table when
+        only ``embedding_model`` is provided; raises ``ValueError`` if the
+        model is unknown and no explicit dim was given.
+
+        The caller is responsible for triggering any vector-index rebuild
+        side effects (e.g. ``SearchService.schedule_vector_sync``).
+        """
+        from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS
+        model_name = embedding_model or DEFAULT_EMBEDDING_MODEL
+        info = EMBEDDING_MODELS.get(model_name)
+        dim = info["dim"] if info else embedding_dim
+        if dim is None:
+            raise ValueError(
+                f"Unknown embedding model '{model_name}'; provide embedding_dim explicitly"
+            )
+        self._get_store(dataset).write_vector_config(model_name, dim)
+        return {"embedding_model": model_name, "embedding_dim": dim}
 
     def set_register_config(self, dataset: str, formats: Dict[str, Any]) -> Dict[str, str]:
         """Persist a new ``formats`` mapping for a dataset.
