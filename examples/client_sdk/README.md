@@ -37,8 +37,12 @@ A2X_BASE_URL=http://127.0.0.1:8000   # 默认值
 Agent Team 流程（团队组队原语）
   register_blank_agent       # teammate 入空闲池
   list_idle_blank_agents     # leader 取空闲队员（默认 n=1）
-  replace_agent_card         # 整张覆盖（含 endpoint auto-fill）
-  restore_to_blank           # 恢复为空白（L1→L2→L3 endpoint 解析）
+  reserve_blank_agents       # leader 预订（30s 默认 TTL）—— 防止 leader 间双重分配
+  release_reservation        # leader 主动释放 lease（bulk 或按 sid）
+  extend_reservation         # leader 续期 lease
+  release_my_lease           # teammate 自释放 lease（任意持有者）
+  replace_agent_card         # 整张覆盖（含 endpoint auto-fill + 自动 release_my_lease 钩子）
+  restore_to_blank           # 恢复为空白（L1→L2→L3 endpoint 解析；同样触发 lease release 钩子）
 ```
 
 ## 文件索引
@@ -91,13 +95,15 @@ Agent Team 流程（团队组队原语）
 | `list_idle_blank_agents` | [list_idle_blank_agents_sync.py](./list_idle_blank_agents_sync.py) | [list_idle_blank_agents_async.py](./list_idle_blank_agents_async.py) |
 | `replace_agent_card` | [replace_agent_card_sync.py](./replace_agent_card_sync.py) | [replace_agent_card_async.py](./replace_agent_card_async.py) |
 | `restore_to_blank` | [restore_to_blank_sync.py](./restore_to_blank_sync.py) | [restore_to_blank_async.py](./restore_to_blank_async.py) |
+| `reserve_blank_agents` | [reserve_blank_agents_sync.py](./reserve_blank_agents_sync.py) | [reserve_blank_agents_async.py](./reserve_blank_agents_async.py) |
 
 覆盖：
 
 - **register_blank_agent**：blank 模板（`description="__BLANK__"`、`status="online"`）/ L1 缓存写入 / 同 endpoint 重注册幂等 / bad endpoint fail-fast
 - **list_idle_blank_agents**：默认 `n=1` / 显式 `n=N` / 后端 filter 严格 idle（`description=__BLANK__` AND `status="online"`）/ 扁平返回形状 / `n=0` 短路无 HTTP / 非法 n 的本地 ValueError
-- **replace_agent_card**：完整覆盖语义 / **endpoint auto-fill**（不传 endpoint 时从 L1 / L2 自动补）/ L1 缓存刷新 / NotOwnedError / 非 dict 的 ValueError / NotFoundError + 自动清理
+- **replace_agent_card**：完整覆盖语义 / **endpoint auto-fill**（不传 endpoint 时从 L1 / L2 自动补）/ L1 缓存刷新 / NotOwnedError / 非 dict 的 ValueError / NotFoundError + 自动清理 / **`release_lease` 自动钩子**（成功 POST 后自动调用 `release_my_lease`，失败仅警告）
 - **restore_to_blank**：L1 命中（0 GET）/ L2 fallback（1 GET）/ L3 ValueError / NotOwnedError / NotFoundError
+- **reserve_blank_agents**：完整六步组队流程 / `Reservation` context manager / 并发 leader 之间的互斥 / 谈判失败时通过 with-block 早释放 / 默认 30s TTL / `extra_filters` 合并语义
 
 ## 期望约定
 

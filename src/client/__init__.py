@@ -30,6 +30,7 @@ from .models import (
     DeregisterResponse,
     PatchResponse,
     RegisterResponse,
+    Reservation,
 )
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "PatchResponse",
     "DeregisterResponse",
     "AgentDetail",
+    "Reservation",
 ]
 
 __version__ = "0.1.0"

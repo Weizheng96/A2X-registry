@@ -4,7 +4,7 @@
 
 `src/client/` 是 A2X Registry 的 Python 客户端 SDK，把对 FastAPI 后端的 HTTP 请求包装成类型清晰、幂等安全的方法。
 
-**首要场景**：**Agent Team 动态组队** —— 每个 Agent 以"空白 agent"身份进入空闲池；另一个 Agent 发现它们、发起 P2P 组队；组队期间各自更新 card 的 `status`（`online` / `busy` / `offline`）；解散后恢复空白。SDK 提供 blank 注册 / 空闲发现 / 整体覆盖 / 恢复空白 4 个团队原语。
+**首要场景**：**Agent Team 动态组队** —— 每个 Agent 以"空白 agent"身份进入空闲池；leader 通过预订（reservation lease，默认 30s 锁定）抢到候选；leader 与 teammate 走 P2P 协议谈判；teammate 接受后自己更新 card 的 `status`（`online` / `busy` / `offline`）并把 lease 还回去；解散后 teammate 恢复空白。SDK 提供 6 个团队原语：blank 注册 / 空闲发现 / **预订 / 释放 / 续期 / 自释放** / 整体覆盖 / 恢复空白。
 
 **同步 + 异步双入口**：
 
@@ -78,29 +78,33 @@ from src.client import A2XClient
 with A2XClient(
     base_url="http://127.0.0.1:8000", ownership_file=False
 ) as client:
-    # ② 默认取 1 个 idle blank agent（n=1；单次 HTTP）
-    idle = client.list_idle_blank_agents("team_pool")
-    if not idle:
-        return                              # 池里暂时没人，稍后重试
-    teammate = idle[0]                      # {id, type, name, description, endpoint, ...} 扁平 dict
-    teammate_endpoint = teammate["endpoint"]
+    # ② 预订 1 个 idle blank agent，加 30s lease 锁定（其他 leader 看不到这个 sid）
+    with client.reserve_blank_agents("team_pool", n=1, ttl_seconds=30) as r:
+        if not r.agents:
+            return                          # 池里暂时没人，稍后重试
+        teammate = r.agents[0]              # {id, type, name, description, endpoint, ...} 扁平 dict
+        teammate_endpoint = teammate["endpoint"]
 
-    # ③ 向 teammate 发起 P2P 组队请求
-    if not p2p_send_team_invitation(teammate_endpoint):
-        return                              # 拒绝了，换人重试
+        # ③ 向 teammate 发起 P2P 组队请求
+        if not p2p_send_team_invitation(teammate_endpoint):
+            return                          # with 退出会自动释放 lease
 
-    # ── 业务层：与 teammate 协作完成任务 ──
-    do_collaborative_work(teammate_endpoint)
+        # ── 业务层：与 teammate 协作完成任务 ──
+        # （teammate 在 ④ 已经调 replace_agent_card，自动钩子顺手把 lease 释放了；
+        #   此时 with 退出再调 release 是 idempotent 的 no-op）
+        do_collaborative_work(teammate_endpoint)
 
-    # ⑤ 任务结束，向 teammate 发起 P2P 解散
-    p2p_send_disband_request(teammate_endpoint)
-    # teammate 自己会调 restore_to_blank 回池
+        # ⑤ 任务结束，向 teammate 发起 P2P 解散
+        p2p_send_disband_request(teammate_endpoint)
+        # teammate 自己会调 restore_to_blank 回池
 ```
 
 **关键边界**：
 
 - ④ 和 ⑥ 必须由 **teammate 自己** 调用 —— SDK 的 ownership 检查只允许"谁注册的谁修改"。leader 没有 ownership，连 `replace_agent_card` 都会本地 fail-fast 抛 `NotOwnedError`。
-- ③ 和 ⑤ 完全不经注册中心 —— 是 teammate 和 leader 之间的 A2A 协议直连。注册中心只负责"发现 + 状态广告"。
+- ③ 和 ⑤ 完全不经注册中心 —— 是 teammate 和 leader 之间的 A2A 协议直连。注册中心只负责"发现 + 状态广告 + lease 锁"。
+- **lease 自动管理**：`with reserve_blank_agents(...) as r` 是首选模式 —— 谈判失败 / 抛异常时自动释放，`replace_agent_card` 成功时通过自动钩子（`release_my_lease`）提前释放，with 退出再调一次也是 no-op。
+- 如果 leader 想换更轻量的"不锁定，纯查询"模式（适合只浏览不预订的场景），仍可用 `client.list_idle_blank_agents("team_pool")` —— 但这有双重分配风险，新代码默认用 `reserve_blank_agents`。
 
 #### 异步版
 
@@ -108,7 +112,7 @@ with A2XClient(
 
 ### 2.2 全部 method 解释
 
-`A2XClient` 共 14 个对外方法（含 `__init__` 与 `close`）。`AsyncA2XClient` **一对一镜像**，仅 `close` → `aclose`、调用形式改为 `await client.method(...)`；方法名、参数、返回类型、异常一致。下文仅列同步版。
+`A2XClient` 共 18 个对外方法（含 `__init__` 与 `close`）。`AsyncA2XClient` **一对一镜像**，仅 `close` → `aclose`、调用形式改为 `await client.method(...)`；方法名、参数、返回类型、异常一致。下文仅列同步版。
 
 **通用异常**（每个方法都可能发生，不重复列出）：
 - `A2XConnectionError` — 网络 / 超时
@@ -333,11 +337,20 @@ for agent in client.list_idle_blank_agents("team_pool", n=3):
 
 ---
 
-#### `replace_agent_card(dataset, service_id, agent_card)`
+#### `replace_agent_card(dataset, service_id, agent_card, release_lease=True)`
 
 **整张覆盖** agent card（POST `/services/a2a` 同 sid → `_do_register` 全量替换 entry）。区别于 `update_agent` 的"只增不减"。
 
 **Endpoint 自动补全**：如果 `agent_card` 缺 `endpoint` 字段（或字段为空 / 非字符串），SDK 自动从**上次的 endpoint** 补上 —— 走和 `restore_to_blank` 同款的三层回退（L1 内存缓存 → L2 `get_agent` → L3 `ValueError`）。意思是：调用方不必每次都把 endpoint 重新塞进去，原 endpoint 默认保留。**显式传 endpoint 则不触发自动补全**，按你给的值覆盖。
+
+**自动 lease 释放钩子（`release_lease=True` 默认）**：成功 POST 后，SDK best-effort 调用 `release_my_lease(dataset, sid)` 释放任何被 leader reservation 锁住的 lease。客户场景下 teammate 在"完成 P2P 谈判 / 拆队"那一刻就该把 lease 还回去，自动钩子让这步无需调用方记忆。
+
+钩子失败处理：
+- HTTP 200（lease 已释放或本来就没有）→ 无事发生
+- `A2XConnectionError` / `ServerError` / `NotFoundError`（旧后端没此路由）→ `warnings.warn(...)`，**不**抛错（主操作 `replace_agent_card` 本身已成功；lease 反正会 TTL 过期）
+- 不会触发 `NotOwnedError`（前面 `_assert_owned` 已通过）
+
+需要纯净的 replace 行为时传 `release_lease=False`。
 
 本地校验顺序：
 1. `service_id` 必须属于本客户端 → 否则 `NotOwnedError`（不发 HTTP）
@@ -350,6 +363,7 @@ for agent in client.list_idle_blank_agents("team_pool", n=3):
 - `dataset: str`
 - `service_id: str`
 - `agent_card: dict` — `endpoint` 字段可省（自动补全）
+- `release_lease: bool = True` — 是否在 POST 成功后自动调用 `release_my_lease`
 
 **返回**：`RegisterResponse(service_id, dataset, status="updated")`
 **错误**：
@@ -379,6 +393,69 @@ for agent in client.list_idle_blank_agents("team_pool", n=3):
 - `NotOwnedError` — 本地未拥有
 - `ValueError` — L3 触发
 - `NotFoundError` — L2 的 GET 或最终 POST 时 404
+
+---
+
+#### `reserve_blank_agents(dataset, n=1, ttl_seconds=30, holder_id=None, extra_filters=None)`
+
+Leader-side 预订：从 idle pool 锁定 `n` 个 blank agents，时长 `ttl_seconds`。锁定期内，其他 leader 通过 `list_idle_blank_agents` / `reserve_blank_agents` 看不到这些 agent，避免双重分配。
+
+默认 filter 是 `description=__BLANK__ AND status=online`，可通过 `extra_filters` 追加任意字段。`holder_id=None` 时 SDK 让后端自动生成 `holder_<uuid>`；跨进程协调可显式传同一 ID。
+
+返回的 `Reservation` 是 **context manager**（同步 `with` / 异步 `async with`），退出时 best-effort 释放 lease —— 谈判失败时不必手动清理：
+
+```python
+with client.reserve_blank_agents("team_pool", n=1) as r:
+    teammate = r.agents[0]
+    if negotiate_p2p(teammate):
+        client.replace_agent_card(...)   # 成功；自动钩子顺手把 lease 释放了
+    # 失败 → with 退出 → release_reservation → leader 立刻让位
+```
+
+**输入**：
+- `dataset: str`
+- `n: int >= 0`（默认 1）
+- `ttl_seconds: int >= 1`（默认 30）
+- `holder_id: str | None`
+- `extra_filters: dict | None`
+
+**返回**：`Reservation(holder_id, dataset, ttl_seconds, expires_at_unix, agents)`
+**错误**：
+- `ValueError` — `n` 或 `ttl_seconds` 非法（本地，无 HTTP）
+- `A2XConnectionError` / `A2XHTTPError` — 网络 / 后端错
+
+---
+
+#### `release_reservation(reservation, service_ids=None)`
+
+Leader-side 释放：
+
+- `service_ids=None` → 释放该 holder 在 dataset 内的**全部** lease（DELETE `/reservations/{holder_id}`）
+- `service_ids=[...]` → 仅释放指定 sid（DELETE `/reservations/{holder_id}/{sid}` 每 sid 一次）
+
+幂等：未持有的 sid 静默跳过。释放后将 `reservation._released = True`，context manager 退出变成 no-op。
+
+返回实际释放的 sid 列表。其他 holder 持有的 sid 触发 `403 → A2XHTTPError`。
+
+---
+
+#### `extend_reservation(reservation, ttl_seconds=30)`
+
+延长该 holder 全部 lease 的 TTL。返回新的 `expires_at_unix`，并更新 `reservation.expires_at_unix` / `reservation.ttl_seconds`。
+
+如果 lease 已过期（已被 sweep）→ `NotFoundError(404)`，明确表示"工作窗口已丢失"——避免悄悄复活已超时的预订。
+
+---
+
+#### `release_my_lease(dataset, service_id)`
+
+Teammate-self 释放：释放任何 holder 在自己 sid 上的 lease（DELETE `/services/{sid}/lease`）。无需知道 holder_id —— 因为 leader 是通过 HTTP 把 lease 注册到 backend，而不是通过 P2P 告诉 teammate。
+
+授权由 SDK 的 `_owned` 检查兜底（必须是本客户端注册的 sid，否则 `NotOwnedError`，不发 HTTP）。
+
+返回 `True` 如果有 lease 被释放，`False` 如果根本没 lease（idempotent）。
+
+`replace_agent_card` 默认会自动调用此方法 —— 一般不需要显式调。
 
 ---
 

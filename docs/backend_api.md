@@ -37,6 +37,11 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `POST` | `/api/datasets/{dataset}/services/a2a` | 注册 A2A Agent |
 | `PUT` | `/api/datasets/{dataset}/services/{service_id}` | 部分字段更新服务 |
 | `DELETE` | `/api/datasets/{dataset}/services/{service_id}` | 注销服务 |
+| `DELETE` | `/api/datasets/{dataset}/services/{service_id}/lease` | teammate-self 释放该 sid 上的 lease |
+| `POST` | `/api/datasets/{dataset}/reservations` | 预订 N 个匹配 filters 的 service（lease） |
+| `DELETE` | `/api/datasets/{dataset}/reservations/{holder_id}` | 释放 holder 的全部 lease（bulk） |
+| `DELETE` | `/api/datasets/{dataset}/reservations/{holder_id}/{service_id}` | 释放单个 lease（per-sid） |
+| `POST` | `/api/datasets/{dataset}/reservations/{holder_id}/extend` | 续期 holder 的全部 lease |
 | `POST` | `/api/datasets/{dataset}/skills` | 上传 Skill（ZIP） |
 | `DELETE` | `/api/datasets/{dataset}/skills/{name}` | 删除 Skill |
 | `GET` | `/api/datasets/{dataset}/skills/{name}/download` | 下载 Skill（ZIP） |
@@ -125,9 +130,10 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `fields` | string | `"detail"` | `brief` \| `detail` |
 | `size` | int | `-1` | 分页大小，`-1` 返回全部 |
 | `page` | int | `1` | 页码（从 1 开始），仅 `size>0` 时生效 |
+| `include_leased` | bool | `false` | 是否包含被 reservation lease 锁住的 entry（默认隐藏，使 `list_idle_blank_agents` 自动 race-safe） |
 | **其他任意 key** | string | — | 非保留参数全部作为筛选条件（AND，字符串等值） |
 
-保留参数：`fields` / `size` / `page`（不参与过滤）。
+保留参数：`fields` / `size` / `page` / `include_leased`（不参与过滤）。
 
 **fields 说明：**
 
@@ -311,6 +317,104 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 |--------|------|
 | 400 | `user_config` 来源的服务（需直接编辑 `user_config.json`）/ `skill_folder` 来源的服务（需使用 `DELETE /skills/{name}` 端点） |
 | 404 | `service_id` 不存在（业务层抛 `RegistryNotFoundError`，路由层映射为 404；不再返回 200 + `status="not_found"`） |
+
+---
+
+## 1.5 预订 / 锁定（Reservation Leases）
+
+> **背景**: 客户场景下多个 teamleader 并发挑选 idle blank agents 时会出现"双重分配"竞态。Lease 机制借鉴 SQS visibility-timeout——内存级、短期（默认 30s）、不持久化、宿主重启即清空。Lease 与 `status` 字段**正交**（lease 是临时锁，status 是长期意图）。
+
+**端点一览：**
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/datasets/{dataset}/reservations` | 预订 N 个匹配 filters 的 service，加锁 ttl_seconds |
+| `DELETE` | `/api/datasets/{dataset}/reservations/{holder_id}` | 释放该 holder 的全部 lease（idempotent） |
+| `DELETE` | `/api/datasets/{dataset}/reservations/{holder_id}/{service_id}` | 释放单个 sid lease（要求 holder 一致；403 if 不一致） |
+| `POST` | `/api/datasets/{dataset}/reservations/{holder_id}/extend` | 续期 holder 的全部 lease；404 if 没有活 lease |
+| `DELETE` | `/api/datasets/{dataset}/services/{service_id}/lease` | teammate-self 释放：任意 holder 的 lease 都释放（idempotent） |
+
+**Lease 与 `GET /services` 的交互**：默认 `include_leased=false`，被 lease 的 entry 自动从结果中过滤掉。这是 `list_idle_blank_agents` 自动 race-safe 的关键。
+
+---
+
+### POST `/api/datasets/{dataset}/reservations`
+
+预订匹配 filters 的最多 N 个 service。filter+claim 在内部 `_lock` 下原子完成（TOCTOU-safe）。如果可用数 < N，返回实际预订数（不报错）。
+
+**请求体：**
+```json
+{
+  "filters": { "description": "__BLANK__", "status": "online" },
+  "n": 1,
+  "ttl_seconds": 30,
+  "holder_id": null
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `filters` | dict | 同 `GET /services` 的 filter 语义（含 default-online 特例） |
+| `n` | int >= 0 | 最多预订数；实际可能小于此 |
+| `ttl_seconds` | int >= 1 | lease 持续时长（秒）；默认 30 |
+| `holder_id` | string \| null | null 时后端自动生成 `holder_<uuid>` |
+
+**响应（200）：**
+```json
+{
+  "holder_id": "holder_abc123",
+  "ttl_seconds": 30,
+  "expires_at_unix": 1729999999.5,
+  "reservations": [
+    { "id": "agent_1", "type": "a2a", "name": "...", "description": "__BLANK__.", "metadata": { ... } }
+  ]
+}
+```
+
+`reservations` 形状与 `GET /services?fields=detail` 单元素相同。
+
+---
+
+### DELETE `/api/datasets/{dataset}/reservations/{holder_id}`
+
+释放该 holder 在此 dataset 的全部 lease。**幂等**：未持有任何 lease 也返回 200。
+
+**响应：** `{ "released": ["sid_1", "sid_2", ...] }`
+
+---
+
+### DELETE `/api/datasets/{dataset}/reservations/{holder_id}/{service_id}`
+
+释放该 holder 持有的单个 sid lease。
+
+**响应：**
+- `{ "released": ["agent_1"] }` — 成功释放
+- `{ "released": [] }` — sid 不在 lease 表中（idempotent）
+- `403` — sid 被另一个 holder 持有（不允许释放他人的 lease）
+
+---
+
+### POST `/api/datasets/{dataset}/reservations/{holder_id}/extend`
+
+延长该 holder 全部 lease 的 TTL。
+
+**请求体：** `{ "ttl_seconds": 60 }`
+
+**响应（200）：** `{ "expires_at_unix": 1729999999.5 }`
+
+**404**：holder 没有任何活 lease（已过期或从未持有）。设计意图：不允许"复活"已过期的 lease——避免悄悄延长丢失了的工作窗口。
+
+---
+
+### DELETE `/api/datasets/{dataset}/services/{service_id}/lease`
+
+**teammate-self** 释放路径：释放任意 holder 在 sid 上的 lease。授权由 SDK 层的 `_owned` 检查兜底（agent 只能释放自己注册的 sid 的 lease）。
+
+**响应（200）：**
+- `{ "released": true,  "prev_holder_id": "holder_abc123" }`
+- `{ "released": false, "prev_holder_id": null }` — sid 没有 lease（idempotent）
+
+**为什么需要这个端点**: leader 把 lease 信息通过 HTTP 注册到 backend，而不是 P2P 告诉 teammate；teammate 不知道 holder_id，所以无法通过 holder-routed 端点释放。`replace_agent_card` 的 SDK 自动钩子调用此端点。
 
 ---
 

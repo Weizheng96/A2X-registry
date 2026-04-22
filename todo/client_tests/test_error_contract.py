@@ -195,7 +195,9 @@ class TestLocalValidationReplaceAgentCard:
         client._owned.add("ds", "sid")
         client._blank_endpoints[("ds", "sid")] = "http://cached"
 
-        client.replace_agent_card("ds", "sid", missing_endpoint_card)
+        # release_lease=False: focus is on endpoint auto-fill, not lease release
+        client.replace_agent_card("ds", "sid", missing_endpoint_card,
+                                  release_lease=False)
         assert captured["body"]["agent_card"]["endpoint"] == "http://cached"
         client.close()
 
@@ -486,7 +488,10 @@ class TestReplaceCardAutoFill:
         client._owned.add("ds", "sid")
         client._blank_endpoints[("ds", "sid")] = "http://cached"
 
-        client.replace_agent_card("ds", "sid", {"name": "x", "description": "d"})
+        # release_lease=False: this test focuses on the endpoint auto-fill path,
+        # not the lease auto-hook (covered separately).
+        client.replace_agent_card("ds", "sid", {"name": "x", "description": "d"},
+                                  release_lease=False)
         assert seen["gets"] == 0
         assert seen["posts"] == 1
         client.close()
@@ -512,7 +517,8 @@ class TestReplaceCardAutoFill:
         client, _ = _mk_client(handler, tmp_path)
         client._owned.add("ds", "sid")
         # No L1 cache — must fall back to L2 GET
-        client.replace_agent_card("ds", "sid", {"name": "x", "description": "d"})
+        client.replace_agent_card("ds", "sid", {"name": "x", "description": "d"},
+                                  release_lease=False)
         assert captured["body"]["agent_card"]["endpoint"] == "http://from-l2"
         # And L1 cache is now populated for next time
         assert client._blank_endpoints[("ds", "sid")] == "http://from-l2"
@@ -564,6 +570,7 @@ class TestReplaceCardAutoFill:
         client.replace_agent_card(
             "ds", "sid",
             {"name": "x", "description": "d", "endpoint": "http://explicit"},
+            release_lease=False,
         )
         assert seen["gets"] == 0
         assert seen["body"]["agent_card"]["endpoint"] == "http://explicit"

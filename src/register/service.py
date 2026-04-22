@@ -8,9 +8,12 @@ import hashlib
 import json
 import logging
 import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .agent_card import build_description, fetch_agent_card
 from .errors import RegistryNotFoundError
@@ -46,6 +49,21 @@ API_CONFIG_FILE  = "api_config.json"
 BUILD_CONFIG_FILE = "build_config.json"
 TAXONOMY_FILE    = "taxonomy.json"
 
+DEFAULT_RESERVATION_TTL = 30  # seconds
+
+
+@dataclass
+class _Lease:
+    """In-memory reservation lease — SQS visibility-timeout style.
+
+    Volatile by design: not persisted, cleared on restart (correct: leases
+    are short — surviving restart isn't useful). Uses time.monotonic() so
+    NTP jumps can't break TTL.
+    """
+    holder_id: str
+    acquired_at: float   # time.monotonic()
+    expires_at: float    # time.monotonic() + ttl_seconds
+
 
 class RegistryService:
     """Multi-dataset registry service.
@@ -74,6 +92,9 @@ class RegistryService:
         # dataset -> {type: min_version}; populated lazily from register_config.json
         self._format_configs: Dict[str, Dict[str, str]] = {}
         self._lock = threading.Lock()
+        # Reservation leases — protected by _lock, lazy-swept on access.
+        # No background daemon, no disk persistence. Restart clears them.
+        self._leases: Dict[Tuple[str, str], _Lease] = {}
         # Optional callback: called with dataset name whenever service.json content changes.
         # Used by SearchService to keep the vector index in sync.
         self._on_service_changed = None
@@ -539,6 +560,193 @@ class RegistryService:
         change. The callback should be non-blocking (e.g. schedule background work).
         """
         self._on_service_changed = callback
+
+    # -----------------------------------------------------------------------
+    # Reservation leases (in-memory, side-table, no disk persistence)
+    # -----------------------------------------------------------------------
+
+    def _sweep_expired_leases_locked(self, now: float) -> None:
+        """Drop expired leases. Caller must hold _lock."""
+        expired = [k for k, lease in self._leases.items() if lease.expires_at <= now]
+        for k in expired:
+            del self._leases[k]
+
+    def is_leased(self, dataset: str, service_id: str) -> bool:
+        """Return True if there's an unexpired lease on (dataset, service_id)."""
+        now = time.monotonic()
+        with self._lock:
+            self._sweep_expired_leases_locked(now)
+            return (dataset, service_id) in self._leases
+
+    def reserve_services(
+        self,
+        dataset: str,
+        filters: Dict[str, str],
+        n: int,
+        ttl_seconds: int,
+        holder_id: Optional[str],
+    ) -> Tuple[str, float, List[dict]]:
+        """Atomically filter-AND-claim up to n unleased matching services.
+
+        Returns (holder_id, expires_at_unix, reservations) where reservations
+        is a list of wrapped service entries (same shape as list_services).
+
+        TOCTOU-safe: filter+claim happens under _lock. ``ttl_seconds`` is
+        clamped to >= 1.
+        """
+        if n < 0:
+            raise ValueError(f"n must be >= 0, got {n}")
+        if ttl_seconds < 1:
+            raise ValueError(f"ttl_seconds must be >= 1, got {ttl_seconds}")
+        if holder_id is None:
+            holder_id = f"holder_{uuid.uuid4().hex}"
+
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        expires_at_mono = now_mono + ttl_seconds
+        expires_at_wall = now_wall + ttl_seconds
+
+        with self._lock:
+            self._sweep_expired_leases_locked(now_mono)
+
+            # Build wrapped lookup once for shape-preservation in the response.
+            wrapped_by_id = {s["id"]: s for s in self._output_cache.get(dataset, [])}
+
+            claimed: List[dict] = []
+            for entry in sorted(
+                self._entries.get(dataset, {}).values(),
+                key=lambda e: e.service_id,
+            ):
+                if (dataset, entry.service_id) in self._leases:
+                    continue
+                if not self._entry_matches_filters(entry, filters):
+                    continue
+                wrapped = wrapped_by_id.get(entry.service_id)
+                if wrapped is None:
+                    continue
+                claimed.append(wrapped)
+                if len(claimed) >= n:
+                    break
+
+            for wrapped in claimed:
+                self._leases[(dataset, wrapped["id"])] = _Lease(
+                    holder_id=holder_id,
+                    acquired_at=now_mono,
+                    expires_at=expires_at_mono,
+                )
+
+        return holder_id, expires_at_wall, claimed
+
+    def _entry_matches_filters(self, entry, filters: Dict[str, str]) -> bool:
+        """Match an entry against filter dict using the same semantics as
+        the GET /services filter endpoint, including the default-online rule.
+        """
+        if entry.type == "a2a" and entry.agent_card:
+            raw = entry.agent_card.model_dump(exclude_none=True)
+        elif entry.type == "generic" and entry.service_data:
+            raw = entry.service_data.model_dump()
+        elif entry.type == "skill" and entry.skill_data:
+            raw = entry.skill_data.model_dump()
+        else:
+            return False
+        for k, v in filters.items():
+            if k == "status" and v == "online" and "status" not in raw:
+                continue
+            if k not in raw or str(raw[k]) != v:
+                return False
+        return True
+
+    def release_reservation(
+        self,
+        dataset: str,
+        holder_id: str,
+        service_ids: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Release leases held by ``holder_id``.
+
+        - service_ids=None: release ALL leases under holder_id (bulk).
+        - service_ids=[...]: release only those sids (per-sid). Sids not held
+          by this holder are silently skipped (idempotent).
+
+        Returns the list of sids actually released.
+
+        Raises PermissionError if a requested sid IS leased but under a
+        different holder (caller is trying to release someone else's lease).
+        """
+        with self._lock:
+            self._sweep_expired_leases_locked(time.monotonic())
+            released: List[str] = []
+            if service_ids is None:
+                for (ds, sid), lease in list(self._leases.items()):
+                    if ds == dataset and lease.holder_id == holder_id:
+                        del self._leases[(ds, sid)]
+                        released.append(sid)
+            else:
+                for sid in service_ids:
+                    key = (dataset, sid)
+                    lease = self._leases.get(key)
+                    if lease is None:
+                        continue  # idempotent: already gone or never held
+                    if lease.holder_id != holder_id:
+                        raise PermissionError(
+                            f"Lease on '{sid}' is held by a different holder"
+                        )
+                    del self._leases[key]
+                    released.append(sid)
+            return released
+
+    def release_lease_by_sid(
+        self,
+        dataset: str,
+        service_id: str,
+    ) -> Tuple[bool, Optional[str]]:
+        """Release ANY lease on (dataset, service_id) regardless of holder.
+
+        Used by the teammate-self path: the agent itself doesn't know who
+        leased it. SDK-level _owned check is the authorization gate.
+
+        Returns (released, prev_holder_id). Idempotent: if no lease exists,
+        returns (False, None).
+        """
+        with self._lock:
+            self._sweep_expired_leases_locked(time.monotonic())
+            key = (dataset, service_id)
+            lease = self._leases.pop(key, None)
+            if lease is None:
+                return False, None
+            return True, lease.holder_id
+
+    def extend_reservation(
+        self,
+        dataset: str,
+        holder_id: str,
+        ttl_seconds: int,
+    ) -> float:
+        """Extend all of holder_id's leases in `dataset` by ttl_seconds.
+
+        Returns the new expires_at_unix (wall-clock, for client display).
+        Raises RegistryNotFoundError if holder_id has no live leases (to
+        force callers to face the lost-work case explicitly).
+        """
+        if ttl_seconds < 1:
+            raise ValueError(f"ttl_seconds must be >= 1, got {ttl_seconds}")
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        new_mono = now_mono + ttl_seconds
+        new_wall = now_wall + ttl_seconds
+        with self._lock:
+            self._sweep_expired_leases_locked(now_mono)
+            owned = [
+                key for key, lease in self._leases.items()
+                if key[0] == dataset and lease.holder_id == holder_id
+            ]
+            if not owned:
+                raise RegistryNotFoundError(
+                    f"No live leases for holder '{holder_id}' in dataset '{dataset}'"
+                )
+            for key in owned:
+                self._leases[key].expires_at = new_mono
+        return new_wall
 
     # -----------------------------------------------------------------------
     # Internal — output generation

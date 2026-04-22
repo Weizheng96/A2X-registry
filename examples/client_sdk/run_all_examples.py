@@ -49,6 +49,8 @@ EXAMPLE_ORDER: list[str] = [
     "replace_agent_card_async.py",
     "restore_to_blank_sync.py",
     "restore_to_blank_async.py",
+    "reserve_blank_agents_sync.py",
+    "reserve_blank_agents_async.py",
 
     "deregister_agent_sync.py",
     "deregister_agent_async.py",

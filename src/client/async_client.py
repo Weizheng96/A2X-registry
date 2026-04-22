@@ -10,11 +10,18 @@ synchronous by design, so its writes are dispatched via
 from __future__ import annotations
 
 import asyncio
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
 from . import _internal as _i
-from .errors import NotFoundError, NotOwnedError, ValidationError
+from .errors import (
+    A2XConnectionError,
+    NotFoundError,
+    NotOwnedError,
+    ServerError,
+    ValidationError,
+)
 from .models import (
     AgentDetail,
     DatasetCreateResponse,
@@ -22,6 +29,7 @@ from .models import (
     DeregisterResponse,
     PatchResponse,
     RegisterResponse,
+    Reservation,
 )
 from .ownership import OwnershipStore
 from .transport import AsyncHTTPTransport
@@ -229,6 +237,7 @@ class AsyncA2XClient:
         dataset: str,
         service_id: str,
         agent_card: dict[str, Any],
+        release_lease: bool = True,
     ) -> RegisterResponse:
         """See ``A2XClient.replace_agent_card``."""
         self._assert_owned(dataset, service_id)
@@ -255,6 +264,20 @@ class AsyncA2XClient:
         result = RegisterResponse.from_dict(resp.json())
         await asyncio.to_thread(self._owned.add, dataset, result.service_id)
         self._blank_endpoints[(dataset, result.service_id)] = endpoint
+
+        if release_lease:
+            try:
+                await self.release_my_lease(dataset, result.service_id)
+            except (A2XConnectionError, ServerError, NotFoundError) as exc:
+                # Best-effort: connection blip, 5xx, or older backend without
+                # the lease route — lease will TTL-expire either way.
+                warnings.warn(
+                    f"replace_agent_card succeeded but release_my_lease failed "
+                    f"for {dataset}/{result.service_id}: {exc}. "
+                    f"Lease will TTL-expire.",
+                    stacklevel=2,
+                )
+
         return result
 
     async def restore_to_blank(
@@ -284,3 +307,87 @@ class AsyncA2XClient:
                 "first to seed the cache."
             )
         return endpoint
+
+    # ── Reservations (leader-side + teammate-self) ───────────────────────────
+
+    async def reserve_blank_agents(
+        self,
+        dataset: str,
+        n: int = 1,
+        ttl_seconds: int = _i.DEFAULT_RESERVATION_TTL,
+        holder_id: str | None = None,
+        extra_filters: dict[str, Any] | None = None,
+    ) -> Reservation:
+        """See ``A2XClient.reserve_blank_agents``."""
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"n must be a non-negative int, got {n!r}")
+        if not isinstance(ttl_seconds, int) or ttl_seconds < 1:
+            raise ValueError(f"ttl_seconds must be >= 1, got {ttl_seconds!r}")
+        filters: dict[str, Any] = {
+            "description": _i.BLANK_DESCRIPTION_SENTINEL,
+            _i.STATUS_FIELD: _i.STATUS_ONLINE,
+        }
+        if extra_filters:
+            filters.update(extra_filters)
+        body: dict[str, Any] = {
+            "filters": filters,
+            "n": n,
+            "ttl_seconds": ttl_seconds,
+        }
+        if holder_id is not None:
+            body["holder_id"] = holder_id
+        resp = await self._transport.request(
+            "POST", _i.reservations_path(dataset), json=body
+        )
+        return Reservation.from_dict(resp.json(), dataset=dataset, client=self)
+
+    async def release_reservation(
+        self,
+        reservation: Reservation,
+        service_ids: list[str] | None = None,
+    ) -> list[str]:
+        """See ``A2XClient.release_reservation``."""
+        released: list[str] = []
+        if service_ids is None:
+            resp = await self._transport.request(
+                "DELETE",
+                _i.reservation_holder_path(reservation.dataset, reservation.holder_id),
+            )
+            released = list(resp.json().get("released") or [])
+        else:
+            for sid in service_ids:
+                resp = await self._transport.request(
+                    "DELETE",
+                    _i.reservation_holder_sid_path(
+                        reservation.dataset, reservation.holder_id, sid,
+                    ),
+                )
+                released.extend(resp.json().get("released") or [])
+        reservation._released = True
+        return released
+
+    async def extend_reservation(
+        self,
+        reservation: Reservation,
+        ttl_seconds: int = _i.DEFAULT_RESERVATION_TTL,
+    ) -> float:
+        """See ``A2XClient.extend_reservation``."""
+        if not isinstance(ttl_seconds, int) or ttl_seconds < 1:
+            raise ValueError(f"ttl_seconds must be >= 1, got {ttl_seconds!r}")
+        resp = await self._transport.request(
+            "POST",
+            _i.reservation_extend_path(reservation.dataset, reservation.holder_id),
+            json={"ttl_seconds": ttl_seconds},
+        )
+        new_expires = float(resp.json()["expires_at_unix"])
+        reservation.expires_at_unix = new_expires
+        reservation.ttl_seconds = ttl_seconds
+        return new_expires
+
+    async def release_my_lease(self, dataset: str, service_id: str) -> bool:
+        """See ``A2XClient.release_my_lease``."""
+        self._assert_owned(dataset, service_id)
+        resp = await self._transport.request(
+            "DELETE", _i.service_lease_path(dataset, service_id),
+        )
+        return bool(resp.json().get("released"))

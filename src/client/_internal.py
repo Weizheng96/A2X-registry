@@ -38,6 +38,10 @@ _VALID_STATUSES: Final[frozenset[str]] = frozenset(
     {STATUS_ONLINE, STATUS_BUSY, STATUS_OFFLINE}
 )
 
+DEFAULT_RESERVATION_TTL: Final[int] = 30
+"""Default lease lifetime for ``reserve_blank_agents`` (seconds). Generous
+enough for typical P2P negotiation including network + LLM round-trips."""
+
 BLANK_AGENT_NAME_PREFIX: Final[str] = "_BlankAgent_"
 """Name prefix used when constructing a blank card. Kept distinct so two
 blank agents with different endpoints get different ``name``s (and thus
@@ -84,6 +88,36 @@ def service_path(dataset: str, service_id: str) -> str:
 
 def a2a_register_path(dataset: str) -> str:
     return f"{DATASETS_ROOT}/{_encode(dataset)}/services/a2a"
+
+
+def reservations_path(dataset: str) -> str:
+    return f"{DATASETS_ROOT}/{_encode(dataset)}/reservations"
+
+
+def reservation_holder_path(dataset: str, holder_id: str) -> str:
+    return f"{DATASETS_ROOT}/{_encode(dataset)}/reservations/{_encode(holder_id)}"
+
+
+def reservation_holder_sid_path(
+    dataset: str, holder_id: str, service_id: str,
+) -> str:
+    return (
+        f"{DATASETS_ROOT}/{_encode(dataset)}/reservations/"
+        f"{_encode(holder_id)}/{_encode(service_id)}"
+    )
+
+
+def reservation_extend_path(dataset: str, holder_id: str) -> str:
+    return (
+        f"{DATASETS_ROOT}/{_encode(dataset)}/reservations/"
+        f"{_encode(holder_id)}/extend"
+    )
+
+
+def service_lease_path(dataset: str, service_id: str) -> str:
+    return (
+        f"{DATASETS_ROOT}/{_encode(dataset)}/services/{_encode(service_id)}/lease"
+    )
 
 
 def normalize_base_url(base_url: str) -> str:

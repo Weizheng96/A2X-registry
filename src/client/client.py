@@ -11,8 +11,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+import warnings
+
 from . import _internal as _i
-from .errors import NotFoundError, NotOwnedError, ValidationError
+from .errors import (
+    A2XConnectionError,
+    NotFoundError,
+    NotOwnedError,
+    ServerError,
+    ValidationError,
+)
 from .models import (
     AgentDetail,
     DatasetCreateResponse,
@@ -20,6 +28,7 @@ from .models import (
     DeregisterResponse,
     PatchResponse,
     RegisterResponse,
+    Reservation,
 )
 from .ownership import OwnershipStore
 from .transport import HTTPTransport
@@ -284,6 +293,7 @@ class A2XClient:
         dataset: str,
         service_id: str,
         agent_card: dict[str, Any],
+        release_lease: bool = True,
     ) -> RegisterResponse:
         """Fully replace an owned a2a agent's card (not a partial merge).
 
@@ -301,6 +311,14 @@ class A2XClient:
 
         After a successful POST, the L1 endpoint cache is refreshed with
         whatever endpoint ended up in the new card.
+
+        **Auto lease release**: when ``release_lease=True`` (default), after
+        a successful POST the SDK best-effort calls ``release_my_lease`` to
+        drop any reservation lease on this sid. The customer's team-agent
+        flow has the teammate explicitly releasing its lease right after
+        committing the team-up — auto-hooking it makes that happen without
+        extra caller bookkeeping. Failure of the lease-release is logged as
+        a warning and does NOT fail the replace.
         """
         self._assert_owned(dataset, service_id)
         if not isinstance(agent_card, dict):
@@ -328,6 +346,20 @@ class A2XClient:
         self._owned.add(dataset, result.service_id)  # idempotent
         # Keep L1 cache in sync with backend state
         self._blank_endpoints[(dataset, result.service_id)] = endpoint
+
+        if release_lease:
+            try:
+                self.release_my_lease(dataset, result.service_id)
+            except (A2XConnectionError, ServerError, NotFoundError) as exc:
+                # Best-effort: connection blip, 5xx, or older backend without
+                # the lease route — lease will TTL-expire either way.
+                warnings.warn(
+                    f"replace_agent_card succeeded but release_my_lease failed "
+                    f"for {dataset}/{result.service_id}: {exc}. "
+                    f"Lease will TTL-expire.",
+                    stacklevel=2,
+                )
+
         return result
 
     def restore_to_blank(
@@ -368,7 +400,6 @@ class A2XClient:
         if cached:
             return cached
         detail = self.get_agent(dataset, service_id)
-        # mode=single returns {id,...,metadata}; endpoint lives inside the card.
         endpoint = _i.extract_endpoint(detail.metadata)
         if endpoint is None:
             raise ValueError(
@@ -378,3 +409,122 @@ class A2XClient:
                 "first to seed the cache."
             )
         return endpoint
+
+    # ── Reservations (leader-side + teammate-self) ───────────────────────────
+
+    def reserve_blank_agents(
+        self,
+        dataset: str,
+        n: int = 1,
+        ttl_seconds: int = _i.DEFAULT_RESERVATION_TTL,
+        holder_id: str | None = None,
+        extra_filters: dict[str, Any] | None = None,
+    ) -> Reservation:
+        """Reserve up to ``n`` idle blank agents, locked for ``ttl_seconds``.
+
+        Filter is ``description=__BLANK__ AND status=online`` plus any
+        additional ``extra_filters`` the caller supplies. ``holder_id`` is
+        auto-generated per call (``holder_<uuid>``) unless provided —
+        leaders coordinating across processes can pass a stable ID.
+
+        The returned ``Reservation`` is a context manager: on exit it best-
+        effort releases the lease so a failed P2P negotiation doesn't leave
+        agents reserved until TTL.
+
+        Raises ``ValueError`` if ``n < 0`` or ``ttl_seconds < 1``.
+        """
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"n must be a non-negative int, got {n!r}")
+        if not isinstance(ttl_seconds, int) or ttl_seconds < 1:
+            raise ValueError(f"ttl_seconds must be >= 1, got {ttl_seconds!r}")
+        filters: dict[str, Any] = {
+            "description": _i.BLANK_DESCRIPTION_SENTINEL,
+            _i.STATUS_FIELD: _i.STATUS_ONLINE,
+        }
+        if extra_filters:
+            filters.update(extra_filters)
+        body: dict[str, Any] = {
+            "filters": filters,
+            "n": n,
+            "ttl_seconds": ttl_seconds,
+        }
+        if holder_id is not None:
+            body["holder_id"] = holder_id
+        resp = self._transport.request(
+            "POST", _i.reservations_path(dataset), json=body
+        )
+        return Reservation.from_dict(resp.json(), dataset=dataset, client=self)
+
+    def release_reservation(
+        self,
+        reservation: Reservation,
+        service_ids: list[str] | None = None,
+    ) -> list[str]:
+        """Release leases held by this Reservation.
+
+        - ``service_ids=None`` → bulk release ALL of holder's leases
+          (DELETE /reservations/{holder_id}).
+        - ``service_ids=[...]`` → release only those sids
+          (DELETE /reservations/{holder_id}/{sid}, one HTTP per sid).
+
+        Idempotent: missing leases are silently skipped. Returns the list
+        of sids actually released. Marks the Reservation as released so
+        context-manager exit becomes a no-op.
+        """
+        released: list[str] = []
+        if service_ids is None:
+            resp = self._transport.request(
+                "DELETE",
+                _i.reservation_holder_path(reservation.dataset, reservation.holder_id),
+            )
+            released = list(resp.json().get("released") or [])
+        else:
+            for sid in service_ids:
+                resp = self._transport.request(
+                    "DELETE",
+                    _i.reservation_holder_sid_path(
+                        reservation.dataset, reservation.holder_id, sid,
+                    ),
+                )
+                released.extend(resp.json().get("released") or [])
+        reservation._released = True
+        return released
+
+    def extend_reservation(
+        self,
+        reservation: Reservation,
+        ttl_seconds: int = _i.DEFAULT_RESERVATION_TTL,
+    ) -> float:
+        """Extend all leases under this Reservation by ``ttl_seconds``.
+
+        Returns the new ``expires_at_unix``. Raises ``NotFoundError`` if
+        the reservation has already expired (no live leases).
+        """
+        if not isinstance(ttl_seconds, int) or ttl_seconds < 1:
+            raise ValueError(f"ttl_seconds must be >= 1, got {ttl_seconds!r}")
+        resp = self._transport.request(
+            "POST",
+            _i.reservation_extend_path(reservation.dataset, reservation.holder_id),
+            json={"ttl_seconds": ttl_seconds},
+        )
+        new_expires = float(resp.json()["expires_at_unix"])
+        reservation.expires_at_unix = new_expires
+        reservation.ttl_seconds = ttl_seconds
+        return new_expires
+
+    def release_my_lease(self, dataset: str, service_id: str) -> bool:
+        """Release ANY lease on ``service_id`` regardless of original holder.
+
+        Teammate-side path: the agent doesn't know who locked it (leaders
+        pass leases via HTTP, not via P2P). The SDK's ``_owned`` check is
+        the authorization gate — you can only release a lease on a sid YOU
+        registered.
+
+        Returns ``True`` if a lease was released, ``False`` if none was held
+        (idempotent — no error).
+        """
+        self._assert_owned(dataset, service_id)
+        resp = self._transport.request(
+            "DELETE", _i.service_lease_path(dataset, service_id),
+        )
+        return bool(resp.json().get("released"))

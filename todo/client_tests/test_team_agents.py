@@ -260,7 +260,8 @@ class TestReplaceAgentCard:
         n_before = len(sent)
         client.replace_agent_card("t", "agent_x",
                                   {"name": "n", "description": "d",
-                                   "endpoint": "http://a"})
+                                   "endpoint": "http://a"},
+                                  release_lease=False)
         # Single POST, no GET (caller-provided endpoint, no auto-fill)
         assert len(sent) - n_before == 1
         assert sent[-1].method == "POST"
@@ -334,10 +335,12 @@ class TestRestoreToBlank:
         # Snapshot call count after register
         calls_before = len(recorded)
         client.restore_to_blank("t", "agent_x")
-        # Only 1 POST (the replace) — no GET
-        assert len(recorded) == calls_before + 1
-        assert recorded[-1].method == "POST"
-        assert "services/a2a" in str(recorded[-1].url)
+        # 1 POST (replace) + 1 DELETE (auto release_my_lease hook) — no GET
+        assert len(recorded) == calls_before + 2
+        post = recorded[-2]
+        delete = recorded[-1]
+        assert post.method == "POST" and "services/a2a" in str(post.url)
+        assert delete.method == "DELETE" and "/lease" in str(delete.url)
         client.close()
 
     def test_L2_GET_single_when_cache_cold(self, tmp_path):
@@ -362,16 +365,19 @@ class TestRestoreToBlank:
                     "description": card_state["description"] + ".",
                     "metadata": card_state,
                 })
+            if req.method == "DELETE" and "/lease" in p:
+                return httpx.Response(200, json={"released": False, "prev_holder_id": None})
             return httpx.Response(404)
 
         client, recorded = self._setup_registered(tmp_path, handler)
         client._blank_endpoints.clear()  # force L2
         calls_before = len(recorded)
         client.restore_to_blank("t", "agent_x")
-        # 1 GET (L2) + 1 POST (replace)
-        assert len(recorded) - calls_before == 2
-        assert recorded[-2].method == "GET"
-        assert recorded[-1].method == "POST"
+        # 1 GET (L2) + 1 POST (replace) + 1 DELETE (auto lease release)
+        assert len(recorded) - calls_before == 3
+        assert recorded[-3].method == "GET"
+        assert recorded[-2].method == "POST"
+        assert recorded[-1].method == "DELETE"
         client.close()
 
     def test_L3_ValueError_when_endpoint_missing_from_card(self, tmp_path):

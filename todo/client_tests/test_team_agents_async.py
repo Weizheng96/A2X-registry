@@ -178,6 +178,8 @@ async def test_async_replace_404_clears_caches(tmp_path):
 
 async def test_async_restore_L1_hit_single_post(tmp_path):
     def handler(req):
+        if req.method == "DELETE" and "/lease" in req.url.path:
+            return httpx.Response(200, json={"released": False, "prev_holder_id": None})
         return httpx.Response(200, json={
             "service_id": "x", "dataset": "t", "status": "registered",
         })
@@ -186,9 +188,10 @@ async def test_async_restore_L1_hit_single_post(tmp_path):
     await client.register_blank_agent("t", endpoint="http://a", service_id="x")
     before = len(recorded)
     await client.restore_to_blank("t", "x")
-    # Exactly 1 POST (no GET for L2)
-    assert len(recorded) - before == 1
-    assert recorded[-1].method == "POST"
+    # 1 POST (replace) + 1 DELETE (auto release_my_lease) — no GET for L2
+    assert len(recorded) - before == 2
+    assert recorded[-2].method == "POST"
+    assert recorded[-1].method == "DELETE"
     await client.aclose()
 
 
@@ -212,6 +215,8 @@ async def test_async_restore_L2_reads_endpoint_from_card(tmp_path):
                 "id": "x", "type": "a2a", "name": card["name"],
                 "description": card["description"] + ".", "metadata": card,
             })
+        if req.method == "DELETE" and "/lease" in p:
+            return httpx.Response(200, json={"released": False, "prev_holder_id": None})
         return httpx.Response(404)
 
     client, recorded = await _make_client(handler, tmp_path)
@@ -219,8 +224,8 @@ async def test_async_restore_L2_reads_endpoint_from_card(tmp_path):
     client._blank_endpoints.clear()  # force L2
     before = len(recorded)
     await client.restore_to_blank("t", "x")
-    # GET (single) + POST (replace) = 2 calls
-    assert len(recorded) - before == 2
+    # GET (single) + POST (replace) + DELETE (auto lease release) = 3 calls
+    assert len(recorded) - before == 3
     await client.aclose()
 
 

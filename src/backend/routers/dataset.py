@@ -50,6 +50,7 @@ async def _run(fn, *args):
     Layered error contract (see docs/client_design.md §3.4):
       RegistryNotFoundError → 404   (business "resource doesn't exist")
       ValueError            → 400   (validation / forbidden source)
+      PermissionError       → 403   (lease held by a different holder)
       FileNotFoundError     → 404   (skill folder missing on disk)
       KeyError              → 404   (legacy fallback for any not-yet-migrated path)
     """
@@ -60,6 +61,8 @@ async def _run(fn, *args):
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
@@ -165,7 +168,7 @@ async def delete_dataset(dataset: str):
 
 # ── Services (register / deregister / list) ───────────────────────────────────
 
-_RESERVED_QUERY_PARAMS = frozenset({"fields", "page", "size"})
+_RESERVED_QUERY_PARAMS = frozenset({"fields", "page", "size", "include_leased"})
 _VALID_FIELDS = frozenset({"brief", "detail"})
 
 
@@ -215,6 +218,7 @@ async def list_services(
     fields: str = Query("detail", description="brief | detail"),
     size: int = Query(-1, ge=-1),
     page: int = Query(1, ge=1),
+    include_leased: bool = Query(False, description="include reserved (leased) entries"),
 ):
     """List services in a dataset, optionally filtered.
 
@@ -223,6 +227,10 @@ async def list_services(
         - brief: [{id, name, description}]                     (lightweight)
         - detail: [{id, type, name, description, metadata, source}]  (full info)
       page, size            pagination (size=-1 means all; default)
+      include_leased        default false — leased entries are filtered out so
+                            list_idle_blank_agents is automatically race-safe.
+                            Set true for admin / debug views that need to see
+                            reserved agents.
       <other key>=<value>   filter terms — AND semantics, string-coerced equality
                             on the type-specific raw dict (a2a → agent_card,
                             generic → service_data, skill → skill_data).
@@ -252,6 +260,8 @@ async def list_services(
     wrapped_by_id = {s["id"]: s for s in svc.list_services(dataset)}
     matched = []
     for entry in sorted(svc.list_entries(dataset), key=lambda e: e.service_id):
+        if not include_leased and svc.is_leased(dataset, entry.service_id):
+            continue
         match_dict = _entry_filter_dict(entry)
         if match_dict is None:
             continue
@@ -359,6 +369,86 @@ async def update_service(dataset: str, service_id: str, updates: dict):
 async def deregister(dataset: str, service_id: str):
     """Deregister a service."""
     return await _run(get_registry_service().deregister, dataset, service_id)
+
+
+# ── Reservations (in-memory leases) ──────────────────────────────────────────
+
+class ReservationRequest(BaseModel):
+    filters: dict = {}
+    n: int = 1
+    ttl_seconds: int = 30
+    holder_id: Optional[str] = None
+
+
+@router.post("/{dataset}/reservations")
+async def create_reservation(dataset: str, req: ReservationRequest):
+    """Reserve up to ``n`` services matching ``filters``, locked for ``ttl_seconds``.
+
+    Returns the lease holder_id (caller-supplied or auto-generated) and the
+    list of wrapped service entries that were claimed. If fewer than ``n``
+    services match (or are unleased), returns whatever was claimed.
+
+    Body: {filters, n, ttl_seconds, holder_id}
+    Resp: {holder_id, ttl_seconds, expires_at_unix, reservations: [...]}
+    """
+    svc = get_registry_service()
+    holder_id, expires_at_unix, claimed = await _run(
+        svc.reserve_services,
+        dataset, req.filters, req.n, req.ttl_seconds, req.holder_id,
+    )
+    return {
+        "holder_id": holder_id,
+        "ttl_seconds": req.ttl_seconds,
+        "expires_at_unix": expires_at_unix,
+        "reservations": claimed,
+    }
+
+
+@router.delete("/{dataset}/reservations/{holder_id}")
+async def release_reservation_bulk(dataset: str, holder_id: str):
+    """Release ALL leases held by ``holder_id`` in this dataset. Idempotent."""
+    svc = get_registry_service()
+    released = await _run(svc.release_reservation, dataset, holder_id, None)
+    return {"released": released}
+
+
+@router.delete("/{dataset}/reservations/{holder_id}/{service_id}")
+async def release_reservation_one(dataset: str, holder_id: str, service_id: str):
+    """Release a single sid lease IF held by ``holder_id``.
+
+    - Lease missing → ``released: []`` (idempotent)
+    - Lease held by a DIFFERENT holder → ``403`` (via _run mapping)
+    """
+    svc = get_registry_service()
+    released = await _run(
+        svc.release_reservation, dataset, holder_id, [service_id],
+    )
+    return {"released": released}
+
+
+@router.post("/{dataset}/reservations/{holder_id}/extend")
+async def extend_reservation(
+    dataset: str, holder_id: str, body: dict,
+):
+    """Extend all of holder's leases by ``ttl_seconds``. 404 if none held."""
+    ttl = int(body.get("ttl_seconds", 30))
+    svc = get_registry_service()
+    new_expires_at = await _run(svc.extend_reservation, dataset, holder_id, ttl)
+    return {"expires_at_unix": new_expires_at}
+
+
+@router.delete("/{dataset}/services/{service_id}/lease")
+async def release_lease_self(dataset: str, service_id: str):
+    """Release ANY lease on (dataset, service_id) regardless of holder.
+
+    Used by the teammate-self path: the agent itself doesn't know who locked
+    it. SDK ``_owned`` check is the authorization gate. Idempotent.
+    """
+    svc = get_registry_service()
+    released, prev_holder_id = await _run(
+        svc.release_lease_by_sid, dataset, service_id,
+    )
+    return {"released": released, "prev_holder_id": prev_holder_id}
 
 
 # ── Skills (register / download / delete) ─────────────────────────────────────

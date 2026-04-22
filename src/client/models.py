@@ -85,3 +85,71 @@ class AgentDetail:
             metadata=data.get("metadata") or {},
             raw=dict(data),
         )
+
+
+@dataclass
+class Reservation:
+    """A successful reservation — leader's handle to a leased agent set.
+
+    Acts as a context manager. On ``__exit__`` / ``__aexit__`` it
+    best-effort releases all leases under ``holder_id`` (idempotent — a
+    later explicit release is a no-op).
+
+    The async variant requires the matching ``AsyncA2XClient``; storing the
+    client reference lets the context-manager release path work even after
+    the calling scope's local variable is gone.
+    """
+
+    holder_id: str
+    dataset: str
+    ttl_seconds: int
+    expires_at_unix: float
+    agents: list[dict[str, Any]]
+    # Reference to the parent client so __exit__ can call release.
+    # Untyped (Any) to avoid a circular import with client.py.
+    _client: Any = None
+    _released: bool = False
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        dataset: str,
+        client: Any,
+    ) -> "Reservation":
+        return cls(
+            holder_id=data["holder_id"],
+            dataset=dataset,
+            ttl_seconds=int(data.get("ttl_seconds", 30)),
+            expires_at_unix=float(data.get("expires_at_unix", 0.0)),
+            agents=list(data.get("reservations") or []),
+            _client=client,
+        )
+
+    # ── sync context manager ─────────────────────────────────────────────
+    def __enter__(self) -> "Reservation":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._released or self._client is None:
+            return
+        try:
+            self._client.release_reservation(self)
+        except Exception:
+            pass  # best-effort; lease will TTL-expire anyway
+        finally:
+            self._released = True
+
+    # ── async context manager ────────────────────────────────────────────
+    async def __aenter__(self) -> "Reservation":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        if self._released or self._client is None:
+            return
+        try:
+            await self._client.release_reservation(self)
+        except Exception:
+            pass
+        finally:
+            self._released = True
