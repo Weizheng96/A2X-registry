@@ -25,15 +25,19 @@
 
 团队组队是 **两个独立进程协作** 的流程：teammate 把自己挂进空闲池，teamleader 发现并发起 P2P 协商，双方完成组队后各自更新自身状态，最后 teammate 退出时自行注销。下面按角色分两份示例展示。
 
-#### 一次性 setup（管理员，只做一次）
+#### 一次性 setup（管理员，可选）
+
+如果想用非默认的 embedding 模型或 formats，由管理员先显式创建：
 
 ```python
 from src.client import A2XClient
 
 admin = A2XClient(base_url="http://127.0.0.1:8000")
-admin.create_dataset("team_pool")
+admin.create_dataset("team_pool", embedding_model="bge-small-zh-v1.5")
 admin.close()
 ```
+
+不需要自定义时这一步可以**跳过** —— teammate 第一次注册时后端会自动用默认配置创建 dataset。事后想换 embedding 模型可调 `POST /api/datasets/{ds}/vector-config`。
 
 #### Teammate 视角（`teammate_node.py`）
 
@@ -48,6 +52,8 @@ client = A2XClient(
 )
 
 # 注册为空白 agent，进入空闲池
+# 如果 team_pool 这个 dataset 不存在，后端会用默认配置自动创建
+# 默认 embedding 模型是 all-MiniLM-L6-v2，三种格式都允许；事后可改
 resp = client.register_blank_agent("team_pool", endpoint="http://teammate_1:8080")
 my_sid = resp.service_id
 

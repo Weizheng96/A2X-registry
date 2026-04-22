@@ -190,6 +190,45 @@ class RegistryService:
     # Register
     # -----------------------------------------------------------------------
 
+    def _ensure_dataset_initialized(self, dataset: str) -> None:
+        """If ``dataset`` has no ``vector_config.json``, fully initialize it
+        with default embedding model + formats. Idempotent and race-safe.
+
+        Lets register_* succeed against a missing namespace without leaving
+        a half-formed dataset behind (no vector_config / no register_config).
+        Embedding model and formats can be changed later via the dedicated
+        ``POST /vector-config`` and ``POST /register-config`` endpoints.
+        """
+        config_file = self._database_dir / dataset / "vector_config.json"
+        if config_file.exists():
+            return
+        try:
+            self.create_dataset(dataset)
+            logger.info("Auto-initialized dataset '%s' with defaults", dataset)
+        except ValueError:
+            # Either another thread won the create race, or a legacy
+            # half-formed directory pre-existed. If config now exists, the
+            # winner finished the init for us.
+            if config_file.exists():
+                return
+            # Half-formed legacy directory — reconcile by writing the
+            # missing files. Mirrors the writes in create_dataset but
+            # tolerates the directory already existing.
+            from src.vector.utils.embedding import EMBEDDING_MODELS
+            ds_dir = self._database_dir / dataset
+            (ds_dir / "query").mkdir(parents=True, exist_ok=True)
+            info = EMBEDDING_MODELS.get("all-MiniLM-L6-v2", {})
+            dim = info.get("dim", 384)
+            vc = {"embedding_model": "all-MiniLM-L6-v2", "embedding_dim": dim}
+            config_file.write_text(
+                json.dumps(vc, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            self._get_store(dataset).write_register_config(dict(DEFAULT_FORMAT_CONFIG))
+            with self._lock:
+                self._format_configs[dataset] = dict(DEFAULT_FORMAT_CONFIG)
+            logger.info("Auto-initialized dataset '%s' (reconciled legacy half-formed dir)", dataset)
+
     def register_generic(self, req: RegisterGenericRequest) -> RegisterResponse:
         """Register a generic service."""
         dataset = req.dataset
@@ -249,7 +288,12 @@ class RegistryService:
         self._mark_taxonomy_stale(dataset)
 
     def register_skill(self, dataset: str, zip_bytes: bytes) -> SkillResponse:
-        """Upload a skill ZIP, extract to skills/{name}/, register entry."""
+        """Upload a skill ZIP, extract to skills/{name}/, register entry.
+
+        Auto-initializes the dataset with defaults if it doesn't exist
+        (same behavior as register_a2a / register_generic).
+        """
+        self._ensure_dataset_initialized(dataset)
         # Enforce skill allow-list before touching disk — avoids saving a ZIP
         # the dataset will never accept.
         self._require_type_allowed(dataset, "skill")
@@ -442,7 +486,13 @@ class RegistryService:
         return entry.model_copy(update={"skill_data": new_data}), changed
 
     def _do_register(self, dataset: str, entry: RegistryEntry, persistent: bool) -> RegisterResponse:
-        """Shared logic for register_generic and register_a2a."""
+        """Shared logic for register_generic and register_a2a.
+
+        Auto-initializes the dataset (defaults: all-MiniLM-L6-v2 + all
+        formats at v0.0) if no ``vector_config.json`` exists yet, so
+        registration to a fresh namespace doesn't leave a half-formed dir.
+        """
+        self._ensure_dataset_initialized(dataset)
         with self._lock:
             ds = self._entries.setdefault(dataset, {})
             status = "updated" if entry.service_id in ds else "registered"

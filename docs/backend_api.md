@@ -194,6 +194,8 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 
 注册一个通用服务到指定数据集。
 
+> **自动初始化 dataset**：如果 `{dataset}` 不存在，后端会用默认 `embedding_model="all-MiniLM-L6-v2"` + 全格式 `v0.0` 自动创建（写 `vector_config.json` + `register_config.json`）。需要自定义 embedding 或 formats 时，调用方应**先**调 `POST /api/datasets` 显式创建。事后改 embedding 走 `POST /api/datasets/{dataset}/vector-config`。`POST /services/a2a` 和 `POST /skills` 同样适用。
+
 **请求体：**
 ```json
 {
