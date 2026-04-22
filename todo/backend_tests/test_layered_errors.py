@@ -85,10 +85,7 @@ class TestUpdateMissing:
 class TestSingleMissing:
     def test_get_missing_service_returns_404_with_detail(self, client):
         _create_dataset(client, "ds")
-        r = client.get(
-            "/api/datasets/ds/services",
-            params={"mode": "single", "service_id": "no_such_sid"},
-        )
+        r = client.get("/api/datasets/ds/services/no_such_sid")
         assert r.status_code == 404
         # Detail now names the sid + dataset (PR-#3 improvement)
         assert "no_such_sid" in r.json()["detail"]

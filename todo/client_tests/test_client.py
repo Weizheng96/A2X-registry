@@ -181,8 +181,8 @@ def test_set_status_rejects_invalid_enum_before_http(tmp_path):
 
 # ── get_agent / list_agents ─────────────────────────────────────────────────
 
-def test_list_agents_no_filters_hits_mode_filter_with_no_params(tmp_path):
-    """list_agents(ds) should send mode=filter alone → backend returns all."""
+def test_list_agents_no_filters_sends_no_query_params(tmp_path):
+    """list_agents(ds) post-consolidation sends NO query params — path alone."""
     captured = {}
 
     def handler(req):
@@ -195,7 +195,8 @@ def test_list_agents_no_filters_hits_mode_filter_with_no_params(tmp_path):
         ])
     client, _ = _make_client(handler, tmp_path)
     agents = client.list_agents("ds")
-    assert captured["params"] == {"mode": "filter"}
+    # Post-consolidation: no mode, no forced params — empty filters → no query string
+    assert captured["params"] == {}
     assert [a["id"] for a in agents] == ["a", "b"]
     # Flat shape: metadata keys surface at top level; a2a raw description
     # overrides build_description (the "A." with trailing period)
@@ -556,7 +557,8 @@ def test_list_agents_with_filter_sends_query_params(tmp_path):
 
     client, _ = _make_client(handler, tmp_path)
     client.list_agents("ds", description="__BLANK__", priority=0)
-    assert captured["params"]["mode"] == "filter"
+    # Post-consolidation: filters travel as plain query params, no mode
+    assert "mode" not in captured["params"]
     assert captured["params"]["description"] == "__BLANK__"
     # Non-string values are coerced to strings (HTTP query params)
     assert captured["params"]["priority"] == "0"
@@ -622,7 +624,7 @@ def test_list_agents_malformed_entries_skipped(tmp_path):
 
 
 def test_list_agents_rejects_reserved_filter_key(tmp_path):
-    """Reserved keys (mode/service_id/size/page) raise locally, no HTTP."""
+    """Reserved keys (fields/page/size) raise locally, no HTTP."""
     sent = []
 
     def handler(req):
@@ -630,7 +632,7 @@ def test_list_agents_rejects_reserved_filter_key(tmp_path):
         return httpx.Response(200, json=[])
 
     client, _ = _make_client(handler, tmp_path)
-    for k in ["mode", "service_id", "size", "page"]:
+    for k in ["fields", "page", "size"]:
         with pytest.raises(ValueError, match=r"collides with a reserved query param"):
             client.list_agents("ds", **{k: "x"})
     assert len(sent) == 0
@@ -653,10 +655,12 @@ def test_list_agents_rejects_none_filter_value(tmp_path):
 
 # ── get_agent — URL and edge cases ───────────────────────────────────────────
 
-def test_get_agent_query_params_correct(tmp_path):
+def test_get_agent_uses_path_url_no_query(tmp_path):
+    """get_agent post-consolidation hits GET /services/{sid} (path-based, no query)."""
     captured = {}
 
     def handler(req):
+        captured["path"] = req.url.path
         captured["query"] = dict(req.url.params.multi_items())
         return httpx.Response(200, json={
             "id": "sid", "type": "a2a", "name": "N", "description": "D", "metadata": {},
@@ -664,8 +668,8 @@ def test_get_agent_query_params_correct(tmp_path):
 
     client, _ = _make_client(handler, tmp_path)
     client.get_agent("ds", "sid")
-    assert captured["query"]["mode"] == "single"
-    assert captured["query"]["service_id"] == "sid"
+    assert captured["path"].endswith("/services/sid")
+    assert captured["query"] == {}
     client.close()
 
 
@@ -718,12 +722,12 @@ def test_dataset_name_url_encoded_on_wire(tmp_path, ds_name, encoded_segment):
     client.close()
 
 
-def test_service_id_with_slash_stays_in_query_string(tmp_path):
-    """get_agent places service_id in query string → slashes can't walk the URL."""
+def test_service_id_with_slash_url_encoded_in_path(tmp_path):
+    """get_agent puts service_id in the path; slashes get URL-encoded in-segment."""
     captured = {}
 
     def handler(req):
-        captured["path"] = req.url.path
+        captured["raw_path"] = req.url.raw_path
         captured["raw_query"] = req.url.query.decode()
         return httpx.Response(200, json={
             "id": "s/../x", "type": "a2a", "name": "N", "description": "D", "metadata": {},
@@ -731,9 +735,9 @@ def test_service_id_with_slash_stays_in_query_string(tmp_path):
 
     client, _ = _make_client(handler, tmp_path)
     client.get_agent("ds", "s/../x")
-    # Path must stop at /services — the slash-laden sid never enters the path.
-    assert captured["path"].endswith("/services")
-    assert "service_id=s%2F..%2Fx" in captured["raw_query"]
+    # raw_path preserves the wire encoding — slashes encoded as %2F, no traversal.
+    assert b"/services/s%2F..%2Fx" in captured["raw_path"]
+    assert captured["raw_query"] == ""
     client.close()
 
 

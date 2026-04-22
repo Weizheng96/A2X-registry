@@ -31,7 +31,8 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 | `GET` | `/api/datasets` | 列出所有数据集 |
 | `POST` | `/api/datasets` | 创建新数据集 |
 | `DELETE` | `/api/datasets/{dataset}` | 删除数据集 |
-| `GET` | `/api/datasets/{dataset}/services` | 列出/查询服务（4 种模式） |
+| `GET` | `/api/datasets/{dataset}/services` | 列出/筛选服务（`fields=brief\|detail`，分页 header） |
+| `GET` | `/api/datasets/{dataset}/services/{service_id}` | 单条精确查询（skill 类型返回 ZIP） |
 | `POST` | `/api/datasets/{dataset}/services/generic` | 注册通用服务 |
 | `POST` | `/api/datasets/{dataset}/services/a2a` | 注册 A2A Agent |
 | `PUT` | `/api/datasets/{dataset}/services/{service_id}` | 部分字段更新服务 |
@@ -113,51 +114,36 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 
 ### GET `/api/datasets/{dataset}/services`
 
-列出数据集中的服务。通过 `mode` 参数控制返回粒度。
+列出数据集中的服务，支持任意字段筛选 + `brief`/`detail` 投影 + 分页。
+
+> **变更说明（v0.x）**：老版本通过 `mode=browse|admin|full|single|filter` 参数切换 5 种返回形状。本次重构**完全移除 `mode` 参数**，合并为 1 个 list 端点 + 1 个 path-based 单条端点（见下文）。所有响应都是统一的扁平数组（不再有 `{servers, metadata}` 包装），分页元数据通过响应 header 返回。这是一次性破坏性变更。
 
 **查询参数：**
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `mode` | string | `"browse"` | `browse` \| `admin` \| `full` \| `single` \| `filter` |
-| `service_id` | string | — | 服务 ID，仅 `single` 模式必填 |
+| `fields` | string | `"detail"` | `brief` \| `detail` |
 | `size` | int | `-1` | 分页大小，`-1` 返回全部 |
-| `page` | int | `1` | 页码（从 1 开始），仅 `full` 模式 + `size>0` 时生效 |
-| **其他任意 key** | string | — | `filter` 模式下非保留参数全部作为筛选条件（AND，字符串等值） |
+| `page` | int | `1` | 页码（从 1 开始），仅 `size>0` 时生效 |
+| **其他任意 key** | string | — | 非保留参数全部作为筛选条件（AND，字符串等值） |
 
-**mode 说明：**
+保留参数：`fields` / `size` / `page`（不参与过滤）。
 
-| 模式 | 返回字段 | 用途 |
+**fields 说明：**
+
+| 投影 | 返回字段 | 用途 |
 |------|----------|------|
-| `browse` | `id, name, description` | 前端服务浏览器（轻量，直接读取 `service.json`） |
-| `admin` | `id, name, description, type, source` | 管理面板条目列表 |
-| `full` | 完整元数据（分页） | 管理面板详细查看 |
-| `single` | 单个服务完整信息（skill 类型返回 ZIP） | 按 ID 精确查询 |
-| `filter` | `[{id, type, name, description, metadata}]` | 按字段等值筛选（AND 语义，字符串化比较）；匹配目标是服务**原始**数据（a2a 用 `agent_card`、generic 用 `service_data`、skill 用 `skill_data`），与 browse/full 展示的 `build_description` 结果**不一致但各自正确** |
+| `brief` | `id, name, description` | 服务浏览器、轻量列表 |
+| `detail` | `id, type, name, description, metadata, source` | 管理面板、SDK `list_agents` |
 
-**响应 — browse 模式：**
+**响应 — `fields=brief`：**
 ```json
 [
   { "id": "flight_booking", "name": "航班预订", "description": "支持国内外航班预订..." }
 ]
 ```
 
-**响应 — admin 模式：**
-```json
-[
-  { "id": "flight_booking", "type": "generic", "name": "航班预订", "description": "...", "source": "user_config" }
-]
-```
-
-**响应 — full 模式：**
-```json
-{
-  "servers": [ { "id": "...", "name": "...", "description": "...", ... } ],
-  "metadata": { "count": 20, "total": 100, "page": 1, "total_pages": 5, "size": 20 }
-}
-```
-
-**响应 — filter 模式：**
+**响应 — `fields=detail`：**
 ```json
 [
   {
@@ -165,18 +151,36 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
     "type": "a2a",
     "name": "_BlankAgent_http://a.example",
     "description": "__BLANK__.",
+    "source": "api_config",
     "metadata": { "name": "...", "description": "__BLANK__", "endpoint": "...", "status": "online" }
   }
 ]
 ```
 
-**filter 模式约束**：
-- **空过滤条件 → 返回全量**（当通用 list 接口用）；否则 AND 语义、`str(raw_value) == query_value`
-- 保留参数：`mode` / `service_id` / `size` / `page`（不参与过滤）
+**分页响应头**（仅 `size>0` 时设置）：
+- `X-Total-Count` — 匹配的总数
+- `X-Page` — 当前页码（从 1 开始）
+- `X-Total-Pages` — 总页数
+- `X-Page-Size` — 当前页大小
+
+**筛选约束**：
+- **空过滤条件 → 返回全量**；否则 AND 语义、`str(raw_value) == query_value`
 - 字段**必须存在**且值相等才命中
 - 匹配的是**原始数据**：对 a2a 是 `entry.agent_card.model_dump(exclude_none=True)`（`description` 是原始未转换值）；对 generic 是 `entry.service_data`；对 skill 是 `entry.skill_data`
-- 注意响应里外层 `description` 是 `build_description(card)` 的输出（a2a 会带句号），但 `metadata.description` 是原始值
-- 请求示例：`GET /api/datasets/team/services?mode=filter`（全量）或 `?mode=filter&description=__BLANK__&status=online`（筛选；`status=online` 对缺字段的 entry 也命中 — default-online 规则）
+- 响应里外层 `description` 是 `build_description(card)` 的输出（a2a 会带句号），但 `metadata.description` 是原始值
+- **`status=online` default-online 特例**：当筛选条件含 `status=online` 时，缺 `status` 字段的 entry 也命中（其他字段 / 其他 status 值仍要求字段存在 + 字符串等值）
+- 请求示例：`GET /api/datasets/team/services`（全量）、`?description=__BLANK__&status=online`（筛选 idle blank agents）、`?fields=brief&size=20&page=2`（轻量分页浏览）
+
+---
+
+### GET `/api/datasets/{dataset}/services/{service_id}`
+
+按 ID 精确查询单个服务（替换老的 `?mode=single&service_id=X`）。
+
+**响应：**
+- a2a / generic：单个 wrapped entry（与 list `fields=detail` 单元素相同形状）
+- skill：返回 ZIP 二进制（`Content-Type: application/zip`，`Content-Disposition: attachment`）
+- 不存在：`404`，`detail` 含数据集名 + service_id
 
 ---
 

@@ -150,19 +150,19 @@ def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
 
 
 def build_filter_params(filters: dict[str, Any]) -> dict[str, Any]:
-    """Build query params for ``GET .../services?mode=filter&...``.
+    """Build query params for ``GET .../services?<filters>``.
 
     Every ``(k, v)`` becomes a query param with AND semantics. Values are
     coerced to strings (HTTP query params are strings; backend also
     string-coerces its comparison). Empty filters → backend returns every
-    service.
+    service. Reserved keys (``fields``, ``page``, ``size``) are off-limits.
     """
     if filters is None:
         filters = {}
     if not isinstance(filters, dict):
         raise ValueError(f"filters must be a dict, got {filters!r}")
-    reserved = {"mode", "service_id", "size", "page"}
-    params: dict[str, Any] = {"mode": "filter"}
+    reserved = {"fields", "page", "size"}
+    params: dict[str, Any] = {}
     for k, v in filters.items():
         if not isinstance(k, str) or not k:
             raise ValueError(f"filter keys must be non-empty strings, got {k!r}")

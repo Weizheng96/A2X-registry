@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
 import type { DatasetInfo } from "../types";
 
-// Matches /api/datasets/{dataset}/services?mode=admin response
+// Matches /api/datasets/{dataset}/services?fields=detail response
 interface ServiceEntry {
   id: string;
   name: string;
@@ -160,16 +160,17 @@ function buildPreview(
     if (queryMode === "single") {
       return [{
         method: "GET",
-        path: `/api/datasets/${ds}/services?mode=single&service_id=${encodeURIComponent(fields.serviceId || "<id>")}`,
+        path: `/api/datasets/${ds}/services/${encodeURIComponent(fields.serviceId || "<id>")}`,
         body: null,
       }];
     }
     const params = new URLSearchParams();
+    params.set("fields", "detail");
     params.set("size", fields.listSize || "-1");
     params.set("page", fields.listPage || "1");
     return [{
       method: "GET",
-      path: `/api/datasets/${ds}/services?mode=full&${params.toString()}`,
+      path: `/api/datasets/${ds}/services?${params.toString()}`,
       body: null,
     }];
   }
@@ -207,6 +208,7 @@ interface ResponseData {
   status: number;
   body: unknown;
   elapsed: number;
+  pagination?: { page: number; total_pages: number; total_count: number; page_size: number };
 }
 
 const BUILD_MODES = [
@@ -466,7 +468,7 @@ export default function AdminPanel() {
 
       // Single query: response may be ZIP (for skill) instead of JSON
       if (op === "query" && queryMode === "single" && fields.serviceId) {
-        const url = `/api/datasets/${encodeURIComponent(activeDataset)}/services?mode=single&service_id=${encodeURIComponent(fields.serviceId)}`;
+        const url = `/api/datasets/${encodeURIComponent(activeDataset)}/services/${encodeURIComponent(fields.serviceId)}`;
         const resp = await fetch(url);
         const contentType = resp.headers.get("Content-Type") || "";
         if (contentType.includes("application/zip")) {
@@ -488,6 +490,7 @@ export default function AdminPanel() {
       // Execute all preview steps sequentially
       let lastBody: unknown = null;
       let lastStatus = 200;
+      let lastPagination: ResponseData["pagination"];
       for (const step of preview) {
         const resp = await fetch(step.path, {
           method: step.method,
@@ -497,9 +500,16 @@ export default function AdminPanel() {
         });
         lastBody = await resp.json();
         lastStatus = resp.status;
+        const total = resp.headers.get("X-Total-Count");
+        const pg = resp.headers.get("X-Page");
+        const tp = resp.headers.get("X-Total-Pages");
+        const ps = resp.headers.get("X-Page-Size");
+        lastPagination = total && pg && tp && ps
+          ? { page: +pg, total_pages: +tp, total_count: +total, page_size: +ps }
+          : undefined;
         if (!resp.ok) break;
       }
-      setResponse({ status: lastStatus, body: lastBody, elapsed: (Date.now() - startRef.current) / 1000 });
+      setResponse({ status: lastStatus, body: lastBody, elapsed: (Date.now() - startRef.current) / 1000, pagination: lastPagination });
       setLoading(false);
 
       if ((op === "register" || op === "deregister") && lastStatus < 400) {
@@ -507,7 +517,7 @@ export default function AdminPanel() {
         if (op === "deregister") {
           setBrowserRefreshKey((k) => k + 1);
           try {
-            const svcResp = await fetch(`/api/datasets/${encodeURIComponent(activeDataset)}/services?mode=browse`);
+            const svcResp = await fetch(`/api/datasets/${encodeURIComponent(activeDataset)}/services?fields=brief`);
             const svcs = await svcResp.json();
             if (Array.isArray(svcs) && svcs.length === 0) {
               await fetch(`/api/datasets/${encodeURIComponent(activeDataset)}`, { method: "DELETE" });
@@ -1175,14 +1185,9 @@ export default function AdminPanel() {
                         </pre>
                       </div>
                     )}
-                    {/* Query list pagination: next page button */}
+                    {/* Query list pagination: next page button (read from headers) */}
                     {op === "query" && queryMode === "list" && (() => {
-                      const meta =
-                        response.body &&
-                        typeof response.body === "object" &&
-                        "metadata" in (response.body as object)
-                          ? (response.body as { metadata: { page: number; total_pages: number } }).metadata
-                          : undefined;
+                      const meta = response.pagination;
                       const hasNext = meta && meta.page < meta.total_pages;
                       return hasNext ? (
                         <div className="shrink-0 px-4 py-2.5 border-t border-zinc-100 bg-zinc-50 flex items-center justify-between">
@@ -1199,15 +1204,23 @@ export default function AdminPanel() {
                               startRef.current = Date.now();
                               try {
                                 const params = new URLSearchParams({
+                                  fields: "detail",
                                   size: fields.listSize || "-1",
                                   page: nextPage,
                                 });
                                 const resp = await fetch(
-                                  `/api/datasets/${encodeURIComponent(activeDataset)}/services?mode=full&${params}`,
+                                  `/api/datasets/${encodeURIComponent(activeDataset)}/services?${params}`,
                                   { method: "GET" },
                                 );
                                 const body = await resp.json();
-                                setResponse({ status: resp.status, body, elapsed: (Date.now() - startRef.current) / 1000 });
+                                const total = resp.headers.get("X-Total-Count");
+                                const pg = resp.headers.get("X-Page");
+                                const tp = resp.headers.get("X-Total-Pages");
+                                const ps = resp.headers.get("X-Page-Size");
+                                const pagination = total && pg && tp && ps
+                                  ? { page: +pg, total_pages: +tp, total_count: +total, page_size: +ps }
+                                  : undefined;
+                                setResponse({ status: resp.status, body, elapsed: (Date.now() - startRef.current) / 1000, pagination });
                               } catch (e) {
                                 setReqError(String(e));
                               } finally {
@@ -1274,7 +1287,7 @@ function PersistentToggle({ value, onChange }: { value: boolean; onChange: (v: b
 
 /**
  * RegistryBrowser — full-panel overlay that lists services registered via the registry API.
- * Calls /api/datasets/{dataset}/services?mode=admin. Clicking a service calls onSelect and closes via onClose.
+ * Calls /api/datasets/{dataset}/services?fields=detail. Clicking a service calls onSelect and closes via onClose.
  */
 function RegistryBrowser({
   dataset,
@@ -1295,7 +1308,7 @@ function RegistryBrowser({
     if (!dataset) return;
     setLoading(true);
     setServices([]);
-    fetch(`/api/datasets/${encodeURIComponent(dataset)}/services?mode=admin`)
+    fetch(`/api/datasets/${encodeURIComponent(dataset)}/services?fields=detail`)
       .then((r) => r.json())
       .then((data: ServiceEntry[]) => { setServices(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(() => setLoading(false));

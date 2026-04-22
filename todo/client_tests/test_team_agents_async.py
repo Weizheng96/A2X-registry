@@ -207,7 +207,7 @@ async def test_async_restore_L2_reads_endpoint_from_card(tmp_path):
             return httpx.Response(200, json={
                 "service_id": "x", "dataset": "t", "status": "registered",
             })
-        if req.method == "GET" and p.endswith("/services") and params.get("mode") == "single":
+        if req.method == "GET" and "/services/" in p:
             return httpx.Response(200, json={
                 "id": "x", "type": "a2a", "name": card["name"],
                 "description": card["description"] + ".", "metadata": card,
@@ -232,7 +232,7 @@ async def test_async_restore_L3_no_endpoint_in_card_raises(tmp_path):
             return httpx.Response(200, json={
                 "service_id": "x", "dataset": "t", "status": "registered",
             })
-        if req.method == "GET" and p.endswith("/services") and params.get("mode") == "single":
+        if req.method == "GET" and "/services/" in p:
             return httpx.Response(200, json={
                 "id": "x", "type": "a2a", "name": "broken",
                 "description": "d.", "metadata": {"name": "broken", "description": "d"},

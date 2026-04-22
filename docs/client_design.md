@@ -223,13 +223,13 @@ A2XError
 
 #### `list_agents(dataset, **filters)`
 
-列出服务，可选按字段等值筛选（`mode=filter`）。**不传 filters** → 返回全部服务；**传 filters** → AND 语义、字符串等值。
+列出服务，可选按字段等值筛选（直接打到 `GET /services?<filters>`）。**不传 filters** → 返回全部服务；**传 filters** → AND 语义、字符串等值。
 
 **匹配目标**：后端对每个服务按类型取"原始 dict" —— a2a → `entry.agent_card`（原始 `description`，无 `build_description` 转换）；generic → `entry.service_data`；skill → `entry.skill_data`。字段**必须存在且值相等**才命中。
 
 **输入**：
 - `dataset: str`
-- `**filters: Any` — 可省；键不能是 `mode` / `service_id` / `size` / `page`；值不能是 `None`；列表/dict 类型不支持（query param 无法表达）
+- `**filters: Any` — 可省；键不能是 `fields` / `page` / `size`（保留参数）；值不能是 `None`；列表/dict 类型不支持（query param 无法表达）
 
 **返回**：`list[dict]` — 每项是扁平化的 `{id, type, name, description, ...card_fields}`。`metadata` 内的字段被合并上来，对 a2a 顶层 `description` 是**原始** card 描述（不是 `build_description` 加工后的那个）。对 generic/skill，wrapper 的 name/description 被保留（metadata 本来就没 name/description）。
 
@@ -256,7 +256,7 @@ free_blanks = client.list_agents("team_pool",
 
 #### `get_agent(dataset, service_id)`
 
-单个服务完整信息（`mode=single`）。
+单个服务完整信息（`GET /services/{service_id}`，path-based）。
 
 **输入**：
 - `dataset: str`
@@ -595,7 +595,7 @@ sequenceDiagram
         alt L1 命中
             Note over Client: 用缓存 endpoint
         else L1 未命中
-            Client->>HTTP: GET ?mode=single
+            Client->>HTTP: GET /services/{sid}
             HTTP-->>Client: AgentDetail
             alt metadata.endpoint 存在
                 Note over Client: 取 metadata.endpoint
@@ -640,7 +640,7 @@ sequenceDiagram
     alt L1 命中
         Client->>Client: 读 _blank_endpoints[(ds,sid)]
     else L1 未命中
-        Client->>HTTP: GET /services?mode=single&sid=...
+        Client->>HTTP: GET /services/{sid}
         API-->>HTTP: 200 {metadata: {endpoint?, ...}}
         HTTP-->>Client: AgentDetail
         alt metadata["endpoint"] 存在
@@ -673,7 +673,7 @@ sequenceDiagram
         Client->>Client: 校验 n ≥ 0；n=0 → []
         Note over Client: filters = {"description": "__BLANK__",<br/>"status": "online"}
     end
-    Client->>HTTP: GET ?mode=filter[&k=v&...]
+    Client->>HTTP: GET /services[?k=v&...]
     HTTP->>API: GET
     Note over API: 空 filters → 全量；<br/>否则对每个 entry 取原始 dict：<br/>a2a → agent_card / generic → service_data / skill → skill_data<br/>AND 匹配：k in raw 且 str(raw[k]) == v
     API-->>HTTP: [{id, type, name, description, metadata}, ...]

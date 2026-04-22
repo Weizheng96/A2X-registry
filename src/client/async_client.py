@@ -168,10 +168,9 @@ class AsyncA2XClient:
         return _i.parse_agent_list(resp)
 
     async def get_agent(self, dataset: str, service_id: str) -> AgentDetail:
+        """See ``A2XClient.get_agent``."""
         resp = await self._transport.request(
-            "GET",
-            _i.services_path(dataset),
-            params={"mode": "single", "service_id": service_id},
+            "GET", _i.service_path(dataset, service_id)
         )
         return _i.parse_agent_detail(resp)
 

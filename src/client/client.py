@@ -196,11 +196,13 @@ class A2XClient:
         return _i.parse_agent_list(resp)
 
     def get_agent(self, dataset: str, service_id: str) -> AgentDetail:
-        resp = self._transport.request(
-            "GET",
-            _i.services_path(dataset),
-            params={"mode": "single", "service_id": service_id},
-        )
+        """Fetch a single service by sid via path-based ``GET /services/{sid}``.
+
+        Returns ``AgentDetail`` for a2a / generic; raises
+        ``UnexpectedServiceTypeError`` if the backend responds with a ZIP
+        (i.e. the service is a skill).
+        """
+        resp = self._transport.request("GET", _i.service_path(dataset, service_id))
         return _i.parse_agent_detail(resp)
 
     def deregister_agent(self, dataset: str, service_id: str) -> DeregisterResponse:

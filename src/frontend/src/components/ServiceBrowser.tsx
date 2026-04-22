@@ -31,7 +31,7 @@ export default function ServiceBrowser({ dataset, onClose, refreshKey = 0 }: Pro
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      fetch(`/api/datasets/${encodeURIComponent(dataset)}/services?mode=browse`).then((r) => r.json()),
+      fetch(`/api/datasets/${encodeURIComponent(dataset)}/services?fields=brief`).then((r) => r.json()),
       fetch(`/api/datasets/${encodeURIComponent(dataset)}/vector-config`).then((r) => r.json()),
     ])
       .then(([svcData, vcData]) => {

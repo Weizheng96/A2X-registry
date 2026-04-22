@@ -1,4 +1,4 @@
-"""End-to-end tests for the ``GET /api/datasets/{ds}/services?mode=filter`` endpoint.
+"""End-to-end tests for ``GET /api/datasets/{ds}/services?<filters>`` endpoint.
 
 Fixtures spin up a fresh RegistryService per test (via ``client`` fixture),
 then register services through the normal POST endpoints so the tests
@@ -42,9 +42,8 @@ def _register_generic(client, dataset: str, name: str, description: str,
     return r.json()["service_id"]
 
 
-def _filter(client, dataset: str, **params) -> list[dict]:
-    r = client.get(f"/api/datasets/{dataset}/services",
-                   params={"mode": "filter", **params})
+def _filter(client, dataset: str, **filters) -> list[dict]:
+    r = client.get(f"/api/datasets/{dataset}/services", params=filters)
     assert r.status_code == 200, r.text
     data = r.json()
     assert isinstance(data, list)
@@ -56,7 +55,7 @@ def _filter(client, dataset: str, **params) -> list[dict]:
 class TestEmptyFilters:
     def test_empty_dataset_returns_empty_list(self, client):
         _create_dataset(client, "empty")
-        r = client.get("/api/datasets/empty/services", params={"mode": "filter"})
+        r = client.get("/api/datasets/empty/services")
         assert r.status_code == 200
         assert r.json() == []
 
@@ -70,11 +69,11 @@ class TestEmptyFilters:
         assert {e["id"] for e in result} == {e["id"] for e in result}  # unique ids
 
     def test_reserved_params_alone_count_as_empty_filters(self, client):
-        """mode/service_id/size/page shouldn't count as filter fields."""
+        """fields/page/size shouldn't count as filter fields."""
         _create_dataset(client, "ds")
         _register_a2a(client, "ds", {"name": "A", "description": "dA"})
         r = client.get("/api/datasets/ds/services",
-                       params={"mode": "filter", "size": "-1", "page": "1"})
+                       params={"fields": "detail", "size": "-1", "page": "1"})
         assert r.status_code == 200
         assert len(r.json()) == 1
 

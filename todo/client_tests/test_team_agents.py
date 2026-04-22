@@ -356,7 +356,7 @@ class TestRestoreToBlank:
                 return httpx.Response(200, json={
                     "service_id": "agent_x", "dataset": "t", "status": "registered",
                 })
-            if req.method == "GET" and p.endswith("/services") and params.get("mode") == "single":
+            if req.method == "GET" and "/services/" in p:
                 return httpx.Response(200, json={
                     "id": "agent_x", "type": "a2a", "name": card_state["name"],
                     "description": card_state["description"] + ".",
@@ -383,7 +383,7 @@ class TestRestoreToBlank:
                 return httpx.Response(200, json={
                     "service_id": "agent_x", "dataset": "t", "status": "registered",
                 })
-            if req.method == "GET" and p.endswith("/services") and params.get("mode") == "single":
+            if req.method == "GET" and "/services/" in p:
                 return httpx.Response(200, json={
                     "id": "agent_x", "type": "a2a", "name": "broken",
                     "description": "d.", "metadata": {"name": "broken", "description": "d"},
@@ -430,30 +430,30 @@ class TestTeamCycle:
                     "status": "updated" if sid in state else "registered",
                 })
             if req.method == "GET" and path.endswith("/services"):
-                if params.get("mode") == "filter":
-                    filters = {k: v for k, v in req.url.params.items()
-                               if k not in ("mode", "service_id", "size", "page")}
-                    out = []
-                    for sid, card in state.items():
-                        if all(k in card and str(card[k]) == v
-                               for k, v in filters.items()):
-                            out.append({
-                                "id": sid, "type": "a2a",
-                                "name": card["name"],
-                                "description": card["description"] + ".",
-                                "metadata": card,
-                            })
-                    return httpx.Response(200, json=out)
-                if params.get("mode") == "single":
-                    sid = params.get("service_id")
-                    card = state.get(sid)
-                    if card:
-                        return httpx.Response(200, json={
+                # Filter mode is now implicit — any non-reserved query param is a filter.
+                filters = {k: v for k, v in req.url.params.items()
+                           if k not in ("fields", "size", "page")}
+                out = []
+                for sid, card in state.items():
+                    if all(k in card and str(card[k]) == v
+                           for k, v in filters.items()):
+                        out.append({
                             "id": sid, "type": "a2a",
                             "name": card["name"],
                             "description": card["description"] + ".",
                             "metadata": card,
                         })
+                return httpx.Response(200, json=out)
+            if req.method == "GET" and "/services/" in path:
+                sid = path.rsplit("/", 1)[-1]
+                card = state.get(sid)
+                if card:
+                    return httpx.Response(200, json={
+                        "id": sid, "type": "a2a",
+                        "name": card["name"],
+                        "description": card["description"] + ".",
+                        "metadata": card,
+                    })
             if req.method == "DELETE" and "/services/" in path:
                 sid = path.rsplit("/", 1)[-1]
                 state.pop(sid, None)

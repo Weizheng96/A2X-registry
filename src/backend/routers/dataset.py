@@ -165,7 +165,8 @@ async def delete_dataset(dataset: str):
 
 # ── Services (register / deregister / list) ───────────────────────────────────
 
-_RESERVED_QUERY_PARAMS = frozenset({"mode", "service_id", "size", "page"})
+_RESERVED_QUERY_PARAMS = frozenset({"fields", "page", "size"})
+_VALID_FIELDS = frozenset({"brief", "detail"})
 
 
 _STATUS_DEFAULT = "online"
@@ -210,122 +211,116 @@ def _entry_filter_dict(entry) -> Optional[dict]:
 async def list_services(
     dataset: str,
     request: Request,
-    mode: str = Query("browse", description="browse | admin | full | single | filter"),
-    service_id: Optional[str] = Query(None, description="Service ID (required for single mode)"),
+    response: Response,
+    fields: str = Query("detail", description="brief | detail"),
     size: int = Query(-1, ge=-1),
     page: int = Query(1, ge=1),
 ):
-    """List services in a dataset.
+    """List services in a dataset, optionally filtered.
 
-    Modes:
-      browse — lightweight: [{id, name, description}]
-      admin  — with type/source: [{id, name, description, type, source}]
-      full   — paginated full metadata (for admin panel list op)
-      single — query one service by ID; returns full entry (ZIP for skill type)
-      filter — every non-reserved query param becomes a filter condition
-               (AND semantics, string-coerced equality). Matches on each
-               entry's type-specific raw dict (see _entry_filter_dict).
-               Returns the standard [{id, type, name, description, metadata}]
-               wrapper; missing fields → not a match. Empty filters → every
-               entry matches (full dataset listing).
+    Query parameters:
+      fields=brief|detail   default: detail
+        - brief: [{id, name, description}]                     (lightweight)
+        - detail: [{id, type, name, description, metadata, source}]  (full info)
+      page, size            pagination (size=-1 means all; default)
+      <other key>=<value>   filter terms — AND semantics, string-coerced equality
+                            on the type-specific raw dict (a2a → agent_card,
+                            generic → service_data, skill → skill_data).
+                            Special carve-out: status=online matches when the
+                            entry has no status field at all (default-online).
+
+    Pagination is via response headers (REST convention):
+      X-Total-Count, X-Page, X-Total-Pages, X-Page-Size
+    Set when size > 0; absent when size = -1 (all returned in one page).
+
+    Always returns a flat JSON array. For single-service fetch use
+    GET /api/datasets/{dataset}/services/{service_id} instead.
     """
-    if mode == "single":
-        if not service_id:
-            raise HTTPException(status_code=400, detail="service_id is required for single mode")
-        svc = get_registry_service()
-        entry = svc.get_entry(dataset, service_id)
-        if not entry:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Service '{service_id}' not found in dataset '{dataset}'",
-            )
-        # Skill type: return ZIP download
-        if entry.type == "skill" and entry.skill_data:
-            try:
-                zip_bytes = svc.get_skill_zip(dataset, entry.skill_data.name)
-            except FileNotFoundError:
-                raise HTTPException(status_code=404, detail=f"Skill folder not found: {entry.skill_data.name}")
-            return Response(
-                content=zip_bytes,
-                media_type="application/zip",
-                headers={"Content-Disposition": f'attachment; filename="{entry.skill_data.name}.zip"'},
-            )
-        # Generic/A2A: return full service.json entry
-        output = [s for s in svc.list_services(dataset) if s["id"] == service_id]
-        return output[0] if output else None
+    if fields not in _VALID_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"fields must be one of {sorted(_VALID_FIELDS)}, got {fields!r}",
+        )
 
-    if mode == "filter":
-        filters = {
-            k: v for k, v in request.query_params.items()
-            if k not in _RESERVED_QUERY_PARAMS
-        }
-        # Empty filters → every entry matches (all(...) over {} is True),
-        # i.e. return the whole dataset in the wrapped shape. This lets
-        # clients use mode=filter as the single "list-or-filter" endpoint.
-        svc = get_registry_service()
-        wrapped_by_id = {s["id"]: s for s in svc.list_services(dataset)}
-        output = []
-        for entry in svc.list_entries(dataset):
-            match = _entry_filter_dict(entry)
-            if match is None:
-                continue
-            if _filter_matches(filters, match):
-                wrapped = wrapped_by_id.get(entry.service_id)
-                if wrapped is not None:
-                    output.append(wrapped)
-        return output
-
-    if mode == "browse":
-        service_file = PROJECT_ROOT / "database" / dataset / "service.json"
-        if not service_file.exists():
-            return []
-        with open(service_file, encoding="utf-8") as f:
-            services = json.load(f)
-        return [{"id": s["id"], "name": s["name"], "description": s.get("description", "")}
-                for s in services]
-
+    filters = {
+        k: v for k, v in request.query_params.items()
+        if k not in _RESERVED_QUERY_PARAMS
+    }
     svc = get_registry_service()
 
-    if mode == "admin":
-        entries = []
-        for e in sorted(svc.list_entries(dataset), key=lambda e: e.service_id):
-            if e.type == "generic" and e.service_data:
-                name, description = e.service_data.name, e.service_data.description
-            elif e.type == "skill" and e.skill_data:
-                name, description = e.skill_data.name, e.skill_data.description
-            elif e.agent_card:
-                name, description = e.agent_card.name, e.agent_card.description
-            else:
-                name, description = e.service_id, ""
-            entries.append({"id": e.service_id, "type": e.type, "name": name,
-                            "description": description, "source": e.source})
-        return entries
+    # Filter+match phase — uniform for both fields=brief and fields=detail
+    wrapped_by_id = {s["id"]: s for s in svc.list_services(dataset)}
+    matched = []
+    for entry in sorted(svc.list_entries(dataset), key=lambda e: e.service_id):
+        match_dict = _entry_filter_dict(entry)
+        if match_dict is None:
+            continue
+        if filters and not _filter_matches(filters, match_dict):
+            continue
+        wrapped = wrapped_by_id.get(entry.service_id)
+        if wrapped is None:
+            continue
+        # Attach source so fields=detail can include it
+        matched.append({**wrapped, "source": entry.source})
 
-    # mode == "full" — paginated
-    all_entries = sorted(svc.list_services(dataset), key=lambda e: e["id"])
-    total = len(all_entries)
+    total = len(matched)
 
+    # Pagination
     if size == -1:
-        page_entries = all_entries
+        page_slice = matched
     else:
         offset = (page - 1) * size
-        page_entries = all_entries[offset: offset + size]
-
-    servers = [e["metadata"] if e.get("type") == "a2a" else e for e in page_entries]
-
-    if size == -1:
-        current_page, total_pages = 1, 1
-    else:
-        current_page = page
+        page_slice = matched[offset: offset + size]
         total_pages = max(1, (total + size - 1) // size)
+        response.headers["X-Total-Count"] = str(total)
+        response.headers["X-Page"] = str(page)
+        response.headers["X-Total-Pages"] = str(total_pages)
+        response.headers["X-Page-Size"] = str(size)
 
-    return {
-        "servers": servers,
-        "metadata": {
-            "count": len(servers), "total": total,
-            "page": current_page, "total_pages": total_pages, "size": size,
-        },
-    }
+    # Field projection
+    if fields == "brief":
+        return [
+            {"id": s["id"], "name": s["name"], "description": s["description"]}
+            for s in page_slice
+        ]
+    return page_slice  # fields == "detail"
+
+
+@router.get("/{dataset}/services/{service_id}")
+async def get_single_service(dataset: str, service_id: str):
+    """Fetch a single service by ID.
+
+    For a2a / generic: returns the full wrapped entry as JSON.
+    For skill: returns the skill folder packaged as a ZIP file
+               (Content-Type: application/zip, Content-Disposition: attachment).
+    Returns 404 if the service doesn't exist.
+
+    Replaces the old ?mode=single&service_id=X query-param style.
+    """
+    svc = get_registry_service()
+    entry = svc.get_entry(dataset, service_id)
+    if not entry:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Service '{service_id}' not found in dataset '{dataset}'",
+        )
+    # Skill type: return ZIP download
+    if entry.type == "skill" and entry.skill_data:
+        try:
+            zip_bytes = svc.get_skill_zip(dataset, entry.skill_data.name)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Skill folder not found: {entry.skill_data.name}",
+            )
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{entry.skill_data.name}.zip"'},
+        )
+    # Generic/A2A: return full service.json entry
+    output = [s for s in svc.list_services(dataset) if s["id"] == service_id]
+    return output[0] if output else None
 
 
 @router.post("/{dataset}/services/generic", response_model=RegisterResponse)

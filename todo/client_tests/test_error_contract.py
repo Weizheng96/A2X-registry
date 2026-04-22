@@ -118,7 +118,7 @@ class TestLocalValidationListIdle:
 class TestLocalValidationListAgents:
     """Filter keys must be non-reserved, non-empty strings; values non-None."""
 
-    @pytest.mark.parametrize("reserved", ["mode", "service_id", "size", "page"])
+    @pytest.mark.parametrize("reserved", ["fields", "page", "size"])
     def test_reserved_filter_key_rejected(self, tmp_path, reserved):
         client, sent = _mk_client(_deny_all, tmp_path)
         with pytest.raises(ValueError, match=r"collides with a reserved"):
@@ -496,8 +496,7 @@ class TestReplaceCardAutoFill:
         captured = {}
 
         def handler(req):
-            params = dict(req.url.params)
-            if req.method == "GET" and params.get("mode") == "single":
+            if req.method == "GET" and "/services/" in req.url.path:
                 return httpx.Response(200, json={
                     "id": "sid", "type": "a2a", "name": "n", "description": "d.",
                     "metadata": {"name": "n", "description": "d", "endpoint": "http://from-l2"},
@@ -524,8 +523,7 @@ class TestReplaceCardAutoFill:
         sent_post = {"called": False}
 
         def handler(req):
-            params = dict(req.url.params)
-            if req.method == "GET" and params.get("mode") == "single":
+            if req.method == "GET" and "/services/" in req.url.path:
                 # current card has no endpoint
                 return httpx.Response(200, json={
                     "id": "sid", "type": "a2a", "name": "n", "description": "d.",
@@ -629,7 +627,8 @@ class TestListIdleBlankAgentsNewContract:
 
         client, _ = _mk_client(handler, tmp_path)
         client.list_idle_blank_agents("ds", n=5)
-        assert captured["params"]["mode"] == "filter"
+        # Filter mode is now implicit — `mode` query param is gone.
+        assert "mode" not in captured["params"]
         assert captured["params"]["description"] == "__BLANK__"
         assert captured["params"]["status"] == "online"
         client.close()
