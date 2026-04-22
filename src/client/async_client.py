@@ -209,7 +209,7 @@ class AsyncA2XClient:
     async def list_idle_blank_agents(
         self,
         dataset: str,
-        n: int,
+        n: int = 1,
     ) -> list[dict[str, Any]]:
         """See ``A2XClient.list_idle_blank_agents``. One HTTP call."""
         if not isinstance(n, int) or isinstance(n, bool) or n < 0:
@@ -218,7 +218,9 @@ class AsyncA2XClient:
             return []
 
         agents = await self.list_agents(
-            dataset, description=_i.BLANK_DESCRIPTION_SENTINEL
+            dataset,
+            description=_i.BLANK_DESCRIPTION_SENTINEL,
+            **{_i.TEAM_COUNT_FIELD: 0},
         )
         agents.sort(key=_i.extract_team_count)
         return agents[:n]
@@ -230,8 +232,18 @@ class AsyncA2XClient:
         agent_card: dict[str, Any],
     ) -> RegisterResponse:
         """See ``A2XClient.replace_agent_card``."""
-        _i.assert_card_has_endpoint(agent_card)
         self._assert_owned(dataset, service_id)
+        if not isinstance(agent_card, dict):
+            raise ValueError(
+                f"agent_card must be a dict, got {type(agent_card).__name__}: "
+                f"{agent_card!r}"
+            )
+
+        endpoint = _i.extract_endpoint(agent_card)
+        if endpoint is None:
+            endpoint = await self._resolve_endpoint(dataset, service_id)
+            agent_card = {**agent_card, _i.ENDPOINT_FIELD: endpoint}
+
         body = _i.build_register_agent_body(agent_card, service_id, persistent=True)
         try:
             resp = await self._transport.request(
@@ -243,6 +255,7 @@ class AsyncA2XClient:
             raise
         result = RegisterResponse.from_dict(resp.json())
         await asyncio.to_thread(self._owned.add, dataset, result.service_id)
+        self._blank_endpoints[(dataset, result.service_id)] = endpoint
         return result
 
     async def restore_to_blank(
@@ -252,13 +265,13 @@ class AsyncA2XClient:
     ) -> RegisterResponse:
         """See ``A2XClient.restore_to_blank``."""
         self._assert_owned(dataset, service_id)
-        endpoint = await self._resolve_blank_endpoint(dataset, service_id)
+        endpoint = await self._resolve_endpoint(dataset, service_id)
         card = _i.build_blank_agent_card(endpoint)
-        result = await self.replace_agent_card(dataset, service_id, card)
-        self._blank_endpoints[(dataset, service_id)] = endpoint
-        return result
+        # replace_agent_card refreshes the L1 cache on success
+        return await self.replace_agent_card(dataset, service_id, card)
 
-    async def _resolve_blank_endpoint(self, dataset: str, service_id: str) -> str:
+    async def _resolve_endpoint(self, dataset: str, service_id: str) -> str:
+        """See ``A2XClient._resolve_endpoint``."""
         cached = self._blank_endpoints.get((dataset, service_id))
         if cached:
             return cached
@@ -266,9 +279,9 @@ class AsyncA2XClient:
         endpoint = _i.extract_endpoint(detail.metadata)
         if endpoint is None:
             raise ValueError(
-                f"Cannot restore {service_id!r} to blank: 'endpoint' missing "
-                "from the current Agent Card. Either preserve the 'endpoint' "
-                "field when calling replace_agent_card, or call "
-                "register_blank_agent again with the desired endpoint."
+                f"No 'endpoint' available for service {service_id!r} in dataset "
+                f"{dataset!r}: not in local L1 cache and not in current Agent Card. "
+                "Provide 'endpoint' explicitly, or call register_blank_agent "
+                "first to seed the cache."
             )
         return endpoint

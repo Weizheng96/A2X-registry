@@ -35,17 +35,16 @@ client.create_dataset("team_pool")    # 初始化（只做一次）
 resp = client.register_blank_agent("team_pool", endpoint="http://a.example:8080")
 sid_a = resp.service_id
 
-# ② Agent B 取最空闲的 blank agent（单次 mode=filter 调用）
-idle: list[dict] = client.list_idle_blank_agents("team_pool", n=3)
-# 每项是 {id, type, name, description, endpoint, agentTeamCount, ...} 扁平 dict
+# ② Agent B 默认取 1 个 idle blank agent（n=1, agentTeamCount=0；单次 HTTP）
+[idle] = client.list_idle_blank_agents("team_pool")
+# idle 是 {id, type, name, description, endpoint, agentTeamCount, ...} 扁平 dict
 
 # ③ P2P 协商过程略（不经注册中心）
 
-# ④ 组队：A 覆盖 card + 置 team count（endpoint 字段必须保留）
+# ④ 组队：A 覆盖 card + 置 team count（endpoint 不传则自动从上次保留）
 client.replace_agent_card("team_pool", sid_a, {
     "name": "Task Planner (team-1)",
     "description": "负责拆解任务",
-    "endpoint": "http://a.example:8080",
     "agentTeamCount": 1,
     "skills": [{"name": "plan", "description": "子任务拆解"}],
 })
@@ -72,16 +71,15 @@ async def main():
         )
         sid_a = resp.service_id
 
-        # ② Agent B 取最空闲的 blank agent（单次 mode=filter 调用）
-        idle = await client.list_idle_blank_agents("team_pool", n=3)
+        # ② Agent B 默认取 1 个 idle blank agent（n=1, agentTeamCount=0）
+        [idle] = await client.list_idle_blank_agents("team_pool")
 
         # ③ P2P 协商过程略（不经注册中心）
 
-        # ④ 组队：A 覆盖 card + 置 team count
+        # ④ 组队：A 覆盖 card + 置 team count（endpoint 自动保留）
         await client.replace_agent_card("team_pool", sid_a, {
             "name": "Task Planner (team-1)",
             "description": "负责拆解任务",
-            "endpoint": "http://a.example:8080",
             "agentTeamCount": 1,
         })
 
@@ -290,24 +288,28 @@ free_blanks = client.list_agents("team_pool",
 
 ---
 
-#### `list_idle_blank_agents(dataset, n)`
+#### `list_idle_blank_agents(dataset, n=1)`
 
-返回最空闲的 N 个 blank agent，按 `agentTeamCount` 升序。薄壳于 `list_agents(dataset, description="__BLANK__")`（SDK 内部用 sentinel，调用方无需感知），本地按 `agentTeamCount`（缺省 0）升序排、取前 N。
+返回 N 个**真正空闲**的 blank agent。后端按 `description="__BLANK__"` **AND** `agentTeamCount=0` 双条件过滤；SDK 默认 `n=1`（典型场景"取一个空闲队员"），可显式传入更大的 N。
 
 **调用方读法**（返回形状与 `list_agents` 一致）：
 
 ```python
+# 默认取 1 个
+agent = client.list_idle_blank_agents("team_pool")[0]
+endpoint = agent["endpoint"]
+sid      = agent["id"]
+
+# 也可批量
 for agent in client.list_idle_blank_agents("team_pool", n=3):
-    sid      = agent["id"]
-    endpoint = agent["endpoint"]
-    count    = agent.get("agentTeamCount", 0)
+    ...
 ```
 
 **输入**：
 - `dataset: str`
-- `n: int ≥ 0`
+- `n: int ≥ 0` — 默认 `1`
 
-**返回**：`list[dict]` — 形状同 `list_agents`（扁平化的 `{id, type, name, description, ...card_fields}`）
+**返回**：`list[dict]` — 形状同 `list_agents`（扁平化的 `{id, type, name, description, ...card_fields}`）；**所有项 `agentTeamCount` 一定为 0**
 **错误**：`ValueError` — n 非法（本地）
 
 ---
@@ -316,20 +318,25 @@ for agent in client.list_idle_blank_agents("team_pool", n=3):
 
 **整张覆盖** agent card（POST `/services/a2a` 同 sid → `_do_register` 全量替换 entry）。区别于 `update_agent` 的"只增不减"。
 
-本地校验顺序（都 fail-fast，**不发 HTTP**）：
-1. `agent_card["endpoint"]` 必须非空字符串 —— 保证 `restore_to_blank` 的 L2 回退可用
-2. `service_id` 必须属于本客户端
+**Endpoint 自动补全**：如果 `agent_card` 缺 `endpoint` 字段（或字段为空 / 非字符串），SDK 自动从**上次的 endpoint** 补上 —— 走和 `restore_to_blank` 同款的三层回退（L1 内存缓存 → L2 `get_agent` → L3 `ValueError`）。意思是：调用方不必每次都把 endpoint 重新塞进去，原 endpoint 默认保留。**显式传 endpoint 则不触发自动补全**，按你给的值覆盖。
+
+本地校验顺序：
+1. `service_id` 必须属于本客户端 → 否则 `NotOwnedError`（不发 HTTP）
+2. `agent_card` 必须是 `dict` → 否则 `ValueError`（不发 HTTP）
+3. 如果 endpoint 缺 → 自动补全（可能发 1 次 GET）→ 仍解析不出则 `ValueError`
+
+成功后 L1 endpoint 缓存被刷新为最终用上的 endpoint。
 
 **输入**：
 - `dataset: str`
 - `service_id: str`
-- `agent_card: dict` — 必含非空 `endpoint`
+- `agent_card: dict` — `endpoint` 字段可省（自动补全）
 
 **返回**：`RegisterResponse(service_id, dataset, status="updated")`
 **错误**：
-- `ValueError` — card 无 `endpoint`（本地，先于 ownership 校验）
-- `NotOwnedError` — sid 不属于本客户端（本地）
-- `NotFoundError` — 后端 404；自动清本地后重抛
+- `NotOwnedError` — sid 不属于本客户端（本地，最先触发）
+- `ValueError` — `agent_card` 非 dict，或 endpoint 自动补全失败
+- `NotFoundError` — 后端 404（auto-fill 的 GET 或最终 POST）；自动清 `_owned` + L1 缓存后重抛
 - `ValidationError` — 后端 card 格式校验失败
 
 ---
@@ -418,7 +425,7 @@ src/client/
 
 **自动同步本地与远端**：mutation 命中后端 404 → 自动 `_owned.remove(sid)` 再重抛 `NotFoundError`；`delete_dataset` 命中 400 同理。避免"永远 404 + 本地永远脏"。
 
-**L1 endpoint 缓存**（独立于 `_owned`）：`_blank_endpoints: {(ds, sid): endpoint}`，仅内存、不持久化，由 `register_blank_agent` / `restore_to_blank` 写入，由 `restore_to_blank` 读。`deregister_agent` / `replace_agent_card` 404 时一并清理。
+**L1 endpoint 缓存**（独立于 `_owned`）：`_blank_endpoints: {(ds, sid): endpoint}`，仅内存、不持久化。**写入方**：`register_blank_agent`、`replace_agent_card`（成功后刷新为新 card 的 endpoint）；**读取方**：`replace_agent_card`（auto-fill 缺失 endpoint）、`restore_to_blank`（构建 blank 模板）。`deregister_agent` / `replace_agent_card` 404 时一并清理。
 
 ---
 
@@ -512,7 +519,7 @@ sequenceDiagram
 
 ### 4.4 `replace_agent_card`
 
-整张覆盖 + `endpoint` 字段本地校验（**先于** ownership）。404 时额外清 L1 缓存。
+整张覆盖 + endpoint 自动补全。Ownership 最先检查；缺 endpoint 时走 L1→L2 回退；404 自动清 L1 缓存。
 
 ```mermaid
 sequenceDiagram
@@ -523,25 +530,39 @@ sequenceDiagram
     participant API
 
     Dev->>Client: replace_agent_card(ds, sid, card)
-    Client->>Client: assert_card_has_endpoint(card)
-    alt endpoint 缺失 / 空串 / 非字符串
-        Client--xDev: ValueError（不发 HTTP）
-    end
     Client->>Own: contains(ds, sid)?
     alt 不拥有
         Client--xDev: NotOwnedError（不发 HTTP）
-    else 拥有
-        Client->>HTTP: POST /services/a2a (body.service_id=sid)
-        alt 后端 404
-            HTTP--xClient: NotFoundError
-            Client->>Own: remove(ds, sid)
-            Client->>Client: _blank_endpoints.pop((ds,sid))
-            Client--xDev: 重抛 NotFoundError
-        else 后端 200
-            HTTP-->>Client: RegisterResponse (status="updated")
-            Client->>Own: add(ds, sid)（幂等）
-            Client-->>Dev: RegisterResponse
+    end
+    alt card 非 dict
+        Client--xDev: ValueError（不发 HTTP）
+    end
+    alt card 缺 endpoint
+        Client->>Client: _resolve_endpoint(ds, sid)
+        alt L1 命中
+            Note over Client: 用缓存 endpoint
+        else L1 未命中
+            Client->>HTTP: GET ?mode=single
+            HTTP-->>Client: AgentDetail
+            alt metadata.endpoint 存在
+                Note over Client: 取 metadata.endpoint
+            else 仍解析不出
+                Client--xDev: ValueError（L3）
+            end
         end
+        Client->>Client: card = {**card, endpoint: <resolved>}
+    end
+    Client->>HTTP: POST /services/a2a (body.service_id=sid)
+    alt 后端 404
+        HTTP--xClient: NotFoundError
+        Client->>Own: remove(ds, sid)
+        Client->>Client: _blank_endpoints.pop((ds,sid))
+        Client--xDev: 重抛 NotFoundError
+    else 后端 200
+        HTTP-->>Client: RegisterResponse (status="updated")
+        Client->>Own: add(ds, sid)（幂等）
+        Client->>Client: _blank_endpoints[(ds,sid)] = endpoint （刷新缓存）
+        Client-->>Dev: RegisterResponse
     end
 ```
 
@@ -562,7 +583,7 @@ sequenceDiagram
     alt 不拥有
         Client--xDev: NotOwnedError
     end
-    Client->>Client: _resolve_blank_endpoint(ds, sid)
+    Client->>Client: _resolve_endpoint(ds, sid)
     alt L1 命中
         Client->>Client: 读 _blank_endpoints[(ds,sid)]
     else L1 未命中
@@ -576,9 +597,8 @@ sequenceDiagram
         end
     end
     Client->>Client: build_blank_agent_card(endpoint)
-    Note over Client: 复用 4.4 流程<br/>（endpoint 已就位，assert 必过）
+    Note over Client: 复用 4.4 流程；blank card 自带 endpoint，<br/>不会触发 auto-fill；replace 内部会刷新 L1 缓存
     Client->>Client: replace_agent_card(ds, sid, blank_card)
-    Client->>Client: 更新 _blank_endpoints 缓存
     Client-->>Dev: RegisterResponse
 ```
 
@@ -595,10 +615,10 @@ sequenceDiagram
 
     alt list_agents(ds, **filters)
         Dev->>Client: list_agents(ds, **filters)
-    else list_idle_blank_agents(ds, n)
-        Dev->>Client: list_idle_blank_agents(ds, n)
+    else list_idle_blank_agents(ds, n=1)
+        Dev->>Client: list_idle_blank_agents(ds, n=1)
         Client->>Client: 校验 n ≥ 0；n=0 → []
-        Note over Client: filters = {"description": "__BLANK__"}
+        Note over Client: filters = {"description": "__BLANK__",<br/>"agentTeamCount": "0"}
     end
     Client->>HTTP: GET ?mode=filter[&k=v&...]
     HTTP->>API: GET

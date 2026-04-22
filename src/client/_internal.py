@@ -183,23 +183,6 @@ def extract_endpoint(card: Any) -> str | None:
     return None
 
 
-def assert_card_has_endpoint(agent_card: Any) -> None:
-    """Fail-fast guard for ``replace_agent_card``.
-
-    The ``endpoint`` field is load-bearing: ``restore_to_blank``'s L2 fallback
-    reads it back from the current card across process restarts. A
-    ``replace_agent_card`` call that drops it would silently block future
-    restores. Raising locally (no HTTP) gives callers a clear signal before
-    the registry is mutated.
-    """
-    if extract_endpoint(agent_card) is None:
-        raise ValueError(
-            "agent_card must include a non-empty 'endpoint' field; it is "
-            "required so restore_to_blank can recover the endpoint later. "
-            f"Got card: {agent_card!r}"
-        )
-
-
 # ── Ownership-file resolution ────────────────────────────────────────────────
 
 def resolve_ownership_file(raw: Any) -> Path | None:

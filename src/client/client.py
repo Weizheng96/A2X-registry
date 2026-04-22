@@ -244,12 +244,16 @@ class A2XClient:
     def list_idle_blank_agents(
         self,
         dataset: str,
-        n: int,
+        n: int = 1,
     ) -> list[dict[str, Any]]:
-        """Return up to ``n`` idle-pool agents, ascending by ``agentTeamCount``.
+        """Return up to ``n`` idle-and-blank agents (default ``n=1``).
 
-        Thin wrapper over ``list_agents(dataset, description=__BLANK__)`` that
-        sorts by ``agentTeamCount`` (missing → 0, most-idle) and caps at ``n``.
+        Thin wrapper over ``list_agents`` filtering by **both** the blank
+        sentinel (``description=__BLANK__``) **and** the strict idle gate
+        (``agentTeamCount=0``). Backend does the filtering; SDK additionally
+        sorts ascending by ``agentTeamCount`` as a defensive no-op (every
+        match is already 0) and caps at ``n``.
+
         Return shape is identical to ``list_agents``: flat dicts with ``id`` +
         raw card fields (``endpoint``, ``agentTeamCount``, ...).
         """
@@ -259,7 +263,9 @@ class A2XClient:
             return []
 
         agents = self.list_agents(
-            dataset, description=_i.BLANK_DESCRIPTION_SENTINEL
+            dataset,
+            description=_i.BLANK_DESCRIPTION_SENTINEL,
+            **{_i.TEAM_COUNT_FIELD: 0},
         )
         agents.sort(key=_i.extract_team_count)
         return agents[:n]
@@ -277,12 +283,29 @@ class A2XClient:
         (see ``src/register/service.py``), so omitted fields are dropped —
         the opposite of ``update_agent`` (PUT upsert).
 
-        Enforces that ``agent_card`` contains a non-empty ``endpoint`` field
-        (raises ``ValueError`` locally, no HTTP): ``restore_to_blank`` relies
-        on this field for its L2 fallback across process restarts.
+        **Endpoint auto-fill**: if ``agent_card`` does not carry a non-empty
+        ``endpoint`` field, the SDK auto-fills it from the last-known
+        endpoint for this sid (L1 cache → L2 ``get_agent`` → L3 ``ValueError``).
+        This means callers don't have to remember to thread the endpoint
+        through every replace; the original card's endpoint is preserved
+        unless explicitly overridden.
+
+        After a successful POST, the L1 endpoint cache is refreshed with
+        whatever endpoint ended up in the new card.
         """
-        _i.assert_card_has_endpoint(agent_card)
         self._assert_owned(dataset, service_id)
+        if not isinstance(agent_card, dict):
+            raise ValueError(
+                f"agent_card must be a dict, got {type(agent_card).__name__}: "
+                f"{agent_card!r}"
+            )
+
+        endpoint = _i.extract_endpoint(agent_card)
+        if endpoint is None:
+            # Auto-fill — may issue an L2 GET and/or raise ValueError (L3)
+            endpoint = self._resolve_endpoint(dataset, service_id)
+            agent_card = {**agent_card, _i.ENDPOINT_FIELD: endpoint}
+
         body = _i.build_register_agent_body(agent_card, service_id, persistent=True)
         try:
             resp = self._transport.request(
@@ -294,6 +317,8 @@ class A2XClient:
             raise
         result = RegisterResponse.from_dict(resp.json())
         self._owned.add(dataset, result.service_id)  # idempotent
+        # Keep L1 cache in sync with backend state
+        self._blank_endpoints[(dataset, result.service_id)] = endpoint
         return result
 
     def restore_to_blank(
@@ -313,13 +338,23 @@ class A2XClient:
           - **L3**: ``ValueError`` if neither path yields an endpoint.
         """
         self._assert_owned(dataset, service_id)
-        endpoint = self._resolve_blank_endpoint(dataset, service_id)
+        endpoint = self._resolve_endpoint(dataset, service_id)
         card = _i.build_blank_agent_card(endpoint)
-        result = self.replace_agent_card(dataset, service_id, card)
-        self._blank_endpoints[(dataset, service_id)] = endpoint
-        return result
+        # replace_agent_card refreshes the L1 cache on success, so no manual
+        # update needed here.
+        return self.replace_agent_card(dataset, service_id, card)
 
-    def _resolve_blank_endpoint(self, dataset: str, service_id: str) -> str:
+    def _resolve_endpoint(self, dataset: str, service_id: str) -> str:
+        """Look up the last-known endpoint for an owned service.
+
+        L1 (in-memory cache, populated by ``register_blank_agent`` /
+        ``replace_agent_card`` / ``restore_to_blank``) → L2 (``get_agent``
+        reads endpoint from the current card's metadata) → L3 ``ValueError``.
+
+        Used by:
+          - ``restore_to_blank`` to construct the blank card
+          - ``replace_agent_card`` to auto-fill ``endpoint`` when caller omits it
+        """
         cached = self._blank_endpoints.get((dataset, service_id))
         if cached:
             return cached
@@ -328,9 +363,9 @@ class A2XClient:
         endpoint = _i.extract_endpoint(detail.metadata)
         if endpoint is None:
             raise ValueError(
-                f"Cannot restore {service_id!r} to blank: 'endpoint' missing "
-                "from the current Agent Card. Either preserve the 'endpoint' "
-                "field when calling replace_agent_card, or call "
-                "register_blank_agent again with the desired endpoint."
+                f"No 'endpoint' available for service {service_id!r} in dataset "
+                f"{dataset!r}: not in local L1 cache and not in current Agent Card. "
+                "Provide 'endpoint' explicitly, or call register_blank_agent "
+                "first to seed the cache."
             )
         return endpoint

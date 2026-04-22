@@ -246,8 +246,8 @@ class TestListIdleBlankAgents:
 # ── replace_agent_card ───────────────────────────────────────────────────────
 
 class TestReplaceAgentCard:
-    def test_endpoint_validation_before_ownership_check(self, tmp_path):
-        """ValueError fires on card validation, even if sid is foreign."""
+    def test_foreign_sid_raises_NotOwnedError_first(self, tmp_path):
+        """Ownership precedes everything (card validation, auto-fill)."""
         sent = []
 
         def handler(req):
@@ -255,27 +255,32 @@ class TestReplaceAgentCard:
             return httpx.Response(200)
 
         client, _ = _make_client(handler, tmp_path)
-        # foreign sid AND no endpoint — endpoint check wins, fail-fast
-        with pytest.raises(ValueError, match=r"endpoint"):
+        # Foreign sid + card without endpoint → NotOwnedError (not ValueError)
+        with pytest.raises(NotOwnedError):
             client.replace_agent_card("t", "foreign_sid",
                                       {"name": "n", "description": "d"})
         assert len(sent) == 0
         client.close()
 
-    def test_ownership_check_after_endpoint_validation(self, tmp_path):
-        """With valid endpoint but foreign sid → NotOwnedError, no HTTP."""
+    def test_owned_with_endpoint_succeeds(self, tmp_path):
+        """Owned sid + endpoint provided → POST sent, no auto-fill."""
         sent = []
 
         def handler(req):
             sent.append(req)
-            return httpx.Response(200)
+            return httpx.Response(200, json={
+                "service_id": "agent_x", "dataset": "t", "status": "updated",
+            })
 
         client, _ = _make_client(handler, tmp_path)
-        with pytest.raises(NotOwnedError):
-            client.replace_agent_card("t", "foreign_sid",
-                                      {"name": "n", "description": "d",
-                                       "endpoint": "http://e"})
-        assert len(sent) == 0
+        client.register_blank_agent("t", endpoint="http://a", service_id="agent_x")
+        n_before = len(sent)
+        client.replace_agent_card("t", "agent_x",
+                                  {"name": "n", "description": "d",
+                                   "endpoint": "http://a"})
+        # Single POST, no GET (caller-provided endpoint, no auto-fill)
+        assert len(sent) - n_before == 1
+        assert sent[-1].method == "POST"
         client.close()
 
     def test_owned_replace_succeeds_and_posts_full_card(self, tmp_path):
@@ -404,7 +409,7 @@ class TestRestoreToBlank:
 
         client, _ = self._setup_registered(tmp_path, handler)
         client._blank_endpoints.clear()
-        with pytest.raises(ValueError, match=r"endpoint.*missing"):
+        with pytest.raises(ValueError, match=r"No 'endpoint' available"):
             client.restore_to_blank("t", "agent_x")
         client.close()
 

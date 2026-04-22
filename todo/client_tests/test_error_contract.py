@@ -140,14 +140,30 @@ class TestLocalValidationListAgents:
 
 
 class TestLocalValidationReplaceAgentCard:
-    """assert_card_has_endpoint rejects cards missing/invalid endpoint."""
+    """Replace-card validation: ownership first, then dict type, then auto-fill."""
 
-    @pytest.mark.parametrize("bad_card", [
-        None,                                  # not a dict
-        [],                                    # not a dict
-        "card",                                # not a dict
-        42,                                    # not a dict
-        {},                                    # dict but no endpoint key
+    @pytest.mark.parametrize("bad_card", [None, [], "card", 42, ("a", "b")])
+    def test_non_dict_card_raises_ValueError_after_ownership(self, tmp_path, bad_card):
+        """Ownership passes (sid is owned), then the dict type check fires."""
+        client, sent = _mk_client(_deny_all, tmp_path)
+        client._owned.add("ds", "sid")
+        with pytest.raises(ValueError, match=r"agent_card must be a dict"):
+            client.replace_agent_card("ds", "sid", bad_card)  # type: ignore[arg-type]
+        assert len(sent) == 0
+        client.close()
+
+    def test_foreign_sid_raises_NotOwnedError_first(self, tmp_path):
+        """Ownership precedes both type and endpoint checks (no HTTP)."""
+        client, sent = _mk_client(_deny_all, tmp_path)
+        # Even a card without endpoint can't trigger ValueError because
+        # ownership fails first.
+        with pytest.raises(NotOwnedError):
+            client.replace_agent_card("ds", "foreign", {"name": "x"})
+        assert len(sent) == 0
+        client.close()
+
+    @pytest.mark.parametrize("missing_endpoint_card", [
+        {},                                    # empty dict
         {"name": "x", "description": "y"},     # no endpoint key
         {"endpoint": None},                    # None value
         {"endpoint": ""},                      # empty string
@@ -157,32 +173,28 @@ class TestLocalValidationReplaceAgentCard:
         {"endpoint": ["a"]},                   # non-string
         {"endpoint": {"url": "x"}},            # non-string
     ])
-    def test_bad_card_raises_ValueError(self, tmp_path, bad_card):
-        client, sent = _mk_client(_deny_all, tmp_path)
-        # Pre-register so the sid is owned — endpoint check should still win
+    def test_missing_endpoint_triggers_autofill_from_L1(
+        self, tmp_path, missing_endpoint_card
+    ):
+        """Owned sid + dict card without endpoint + L1 cache hit → auto-fill,
+        no GET, POST proceeds. The card sent to backend has endpoint filled in."""
+        captured = {}
+
+        def handler(req):
+            if req.method == "POST" and "/services/a2a" in req.url.path:
+                import json as _json
+                captured["body"] = _json.loads(req.content)
+                return httpx.Response(200, json={
+                    "service_id": "sid", "dataset": "ds", "status": "updated",
+                })
+            raise AssertionError(f"unexpected: {req.method} {req.url}")
+
+        client, _ = _mk_client(handler, tmp_path)
         client._owned.add("ds", "sid")
-        with pytest.raises(ValueError, match=r"endpoint"):
-            client.replace_agent_card("ds", "sid", bad_card)  # type: ignore[arg-type]
-        assert len(sent) == 0
-        client.close()
+        client._blank_endpoints[("ds", "sid")] = "http://cached"
 
-    def test_endpoint_check_precedes_ownership(self, tmp_path):
-        """Card validation fires before ownership — even for foreign sid."""
-        client, sent = _mk_client(_deny_all, tmp_path)
-        with pytest.raises(ValueError):
-            client.replace_agent_card("ds", "foreign", {"name": "x"})
-        assert len(sent) == 0
-        client.close()
-
-    def test_valid_card_foreign_sid_raises_NotOwnedError(self, tmp_path):
-        """With endpoint present, ownership check becomes the failing one."""
-        client, sent = _mk_client(_deny_all, tmp_path)
-        with pytest.raises(NotOwnedError):
-            client.replace_agent_card(
-                "ds", "foreign",
-                {"name": "x", "description": "y", "endpoint": "http://e"},
-            )
-        assert len(sent) == 0
+        client.replace_agent_card("ds", "sid", missing_endpoint_card)
+        assert captured["body"]["agent_card"]["endpoint"] == "http://cached"
         client.close()
 
 
@@ -407,12 +419,22 @@ class TestConstructor:
 class TestValidationOrdering:
     """Document the precedence when several validation checks could fire."""
 
-    def test_replace_card_endpoint_check_precedes_ownership(self, tmp_path):
-        """Endpoint validation runs before ownership — card without endpoint
-        + foreign sid → ValueError (not NotOwnedError)."""
+    def test_replace_card_ownership_precedes_card_validation(self, tmp_path):
+        """Ownership fires first: foreign sid → NotOwnedError, even with
+        a non-dict card (which would otherwise be a ValueError)."""
         client, sent = _mk_client(_deny_all, tmp_path)
-        with pytest.raises(ValueError):
-            client.replace_agent_card("ds", "foreign", {"name": "x"})
+        with pytest.raises(NotOwnedError):
+            client.replace_agent_card("ds", "foreign", None)  # type: ignore[arg-type]
+        assert len(sent) == 0
+        client.close()
+
+    def test_replace_card_dict_check_precedes_endpoint_autofill(self, tmp_path):
+        """Owned sid + non-dict card → ValueError (no HTTP, no auto-fill)."""
+        client, sent = _mk_client(_deny_all, tmp_path)
+        client._owned.add("ds", "sid")
+        client._blank_endpoints[("ds", "sid")] = "http://cached"
+        with pytest.raises(ValueError, match=r"agent_card must be a dict"):
+            client.replace_agent_card("ds", "sid", None)  # type: ignore[arg-type]
         assert len(sent) == 0
         client.close()
 
@@ -437,6 +459,193 @@ class TestValidationOrdering:
 # ════════════════════════════════════════════════════════════════════════════
 # PART 6: Confirm NotOwnedError carries context (for logging / alerting)
 # ════════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════════
+# PART 7: Endpoint auto-fill in replace_agent_card
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestReplaceCardAutoFill:
+    """When agent_card lacks a non-empty endpoint, SDK fills it from L1/L2."""
+
+    def test_L1_hit_no_extra_http(self, tmp_path):
+        """Endpoint cached → auto-fill uses cache, only POST sent (no GET)."""
+        seen = {"posts": 0, "gets": 0}
+
+        def handler(req):
+            if req.method == "GET":
+                seen["gets"] += 1
+                return httpx.Response(200, json={})
+            seen["posts"] += 1
+            return httpx.Response(200, json={
+                "service_id": "sid", "dataset": "ds", "status": "updated",
+            })
+
+        client, _ = _mk_client(handler, tmp_path)
+        client._owned.add("ds", "sid")
+        client._blank_endpoints[("ds", "sid")] = "http://cached"
+
+        client.replace_agent_card("ds", "sid", {"name": "x", "description": "d"})
+        assert seen["gets"] == 0
+        assert seen["posts"] == 1
+        client.close()
+
+    def test_L2_hit_via_get_agent(self, tmp_path):
+        """L1 cold, L2 GET reads endpoint from current card → auto-fill."""
+        captured = {}
+
+        def handler(req):
+            params = dict(req.url.params)
+            if req.method == "GET" and params.get("mode") == "single":
+                return httpx.Response(200, json={
+                    "id": "sid", "type": "a2a", "name": "n", "description": "d.",
+                    "metadata": {"name": "n", "description": "d", "endpoint": "http://from-l2"},
+                })
+            if req.method == "POST" and "/services/a2a" in req.url.path:
+                import json as _json
+                captured["body"] = _json.loads(req.content)
+                return httpx.Response(200, json={
+                    "service_id": "sid", "dataset": "ds", "status": "updated",
+                })
+            return httpx.Response(404)
+
+        client, _ = _mk_client(handler, tmp_path)
+        client._owned.add("ds", "sid")
+        # No L1 cache — must fall back to L2 GET
+        client.replace_agent_card("ds", "sid", {"name": "x", "description": "d"})
+        assert captured["body"]["agent_card"]["endpoint"] == "http://from-l2"
+        # And L1 cache is now populated for next time
+        assert client._blank_endpoints[("ds", "sid")] == "http://from-l2"
+        client.close()
+
+    def test_L3_raises_ValueError_when_no_endpoint_anywhere(self, tmp_path):
+        """L1 empty + L2 GET returns card without endpoint → ValueError."""
+        sent_post = {"called": False}
+
+        def handler(req):
+            params = dict(req.url.params)
+            if req.method == "GET" and params.get("mode") == "single":
+                # current card has no endpoint
+                return httpx.Response(200, json={
+                    "id": "sid", "type": "a2a", "name": "n", "description": "d.",
+                    "metadata": {"name": "n", "description": "d"},
+                })
+            if req.method == "POST":
+                sent_post["called"] = True
+                return httpx.Response(200, json={})
+            return httpx.Response(404)
+
+        client, _ = _mk_client(handler, tmp_path)
+        client._owned.add("ds", "sid")
+        with pytest.raises(ValueError, match=r"No 'endpoint' available"):
+            client.replace_agent_card("ds", "sid", {"name": "x", "description": "d"})
+        # POST should not have been attempted
+        assert sent_post["called"] is False
+        client.close()
+
+    def test_caller_provided_endpoint_is_preserved(self, tmp_path):
+        """Card has its own endpoint → no auto-fill, no GET."""
+        seen = {"gets": 0, "posts": 0, "body": None}
+
+        def handler(req):
+            if req.method == "GET":
+                seen["gets"] += 1
+                return httpx.Response(200, json={})
+            import json as _json
+            seen["posts"] += 1
+            seen["body"] = _json.loads(req.content)
+            return httpx.Response(200, json={
+                "service_id": "sid", "dataset": "ds", "status": "updated",
+            })
+
+        client, _ = _mk_client(handler, tmp_path)
+        client._owned.add("ds", "sid")
+        client._blank_endpoints[("ds", "sid")] = "http://cached"
+
+        client.replace_agent_card(
+            "ds", "sid",
+            {"name": "x", "description": "d", "endpoint": "http://explicit"},
+        )
+        assert seen["gets"] == 0
+        assert seen["body"]["agent_card"]["endpoint"] == "http://explicit"
+        # L1 cache updated to the explicit endpoint
+        assert client._blank_endpoints[("ds", "sid")] == "http://explicit"
+        client.close()
+
+    def test_autofill_does_not_mutate_caller_dict(self, tmp_path):
+        """Auto-fill must build a NEW dict, not mutate the input."""
+        def handler(req):
+            return httpx.Response(200, json={
+                "service_id": "sid", "dataset": "ds", "status": "updated",
+            })
+
+        client, _ = _mk_client(handler, tmp_path)
+        client._owned.add("ds", "sid")
+        client._blank_endpoints[("ds", "sid")] = "http://cached"
+
+        original = {"name": "x", "description": "d"}
+        original_snapshot = dict(original)
+        client.replace_agent_card("ds", "sid", original)
+        # Caller's dict untouched
+        assert original == original_snapshot
+        assert "endpoint" not in original
+        client.close()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# PART 8: list_idle_blank_agents new defaults / contract
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestListIdleBlankAgentsNewContract:
+    """Default n=1; backend filtered by description=__BLANK__ AND agentTeamCount=0."""
+
+    def test_default_n_is_one(self, tmp_path):
+        """Calling without n returns at most 1 agent."""
+        captured = {}
+
+        def handler(req):
+            captured["params"] = dict(req.url.params.multi_items())
+            return httpx.Response(200, json=[
+                {"id": f"a{i}", "type": "a2a", "name": f"n{i}",
+                 "description": "__BLANK__.", "metadata": {
+                     "name": f"n{i}", "description": "__BLANK__",
+                     "endpoint": f"http://{i}", "agentTeamCount": 0,
+                 }} for i in range(3)
+            ])
+
+        client, _ = _mk_client(handler, tmp_path)
+        result = client.list_idle_blank_agents("ds")  # no n given
+        assert len(result) == 1
+        client.close()
+
+    def test_filter_includes_both_description_and_team_count_zero(self, tmp_path):
+        """Verifies SDK sends BOTH the description sentinel and agentTeamCount=0."""
+        captured = {}
+
+        def handler(req):
+            captured["params"] = dict(req.url.params.multi_items())
+            return httpx.Response(200, json=[])
+
+        client, _ = _mk_client(handler, tmp_path)
+        client.list_idle_blank_agents("ds", n=5)
+        assert captured["params"]["mode"] == "filter"
+        assert captured["params"]["description"] == "__BLANK__"
+        assert captured["params"]["agentTeamCount"] == "0"
+        client.close()
+
+    def test_explicit_n_still_works(self, tmp_path):
+        def handler(req):
+            return httpx.Response(200, json=[
+                {"id": f"a{i}", "type": "a2a", "name": f"n{i}",
+                 "description": "__BLANK__.", "metadata": {
+                     "name": f"n{i}", "description": "__BLANK__",
+                     "endpoint": f"http://{i}", "agentTeamCount": 0,
+                 }} for i in range(5)
+            ])
+
+        client, _ = _mk_client(handler, tmp_path)
+        assert len(client.list_idle_blank_agents("ds", n=3)) == 3
+        client.close()
+
 
 class TestNotOwnedErrorContext:
     def test_error_exposes_dataset_and_sid(self, tmp_path):

@@ -119,7 +119,8 @@ async def test_async_list_idle_n_zero_no_http(tmp_path):
 
 # ── replace_agent_card / restore_to_blank ────────────────────────────────────
 
-async def test_async_replace_endpoint_missing_fails_no_http(tmp_path):
+async def test_async_replace_foreign_sid_raises_NotOwnedError_first(tmp_path):
+    """Ownership now precedes card validation — even card without endpoint."""
     sent = []
 
     def handler(req):
@@ -127,7 +128,7 @@ async def test_async_replace_endpoint_missing_fails_no_http(tmp_path):
         return httpx.Response(200)
 
     client, _ = await _make_client(handler, tmp_path)
-    with pytest.raises(ValueError, match=r"endpoint"):
+    with pytest.raises(NotOwnedError):
         await client.replace_agent_card(
             "t", "foreign", {"name": "n", "description": "d"}
         )
@@ -240,6 +241,6 @@ async def test_async_restore_L3_no_endpoint_in_card_raises(tmp_path):
     client, _ = await _make_client(handler, tmp_path)
     await client.register_blank_agent("t", endpoint="http://a", service_id="x")
     client._blank_endpoints.clear()
-    with pytest.raises(ValueError, match=r"endpoint.*missing"):
+    with pytest.raises(ValueError, match=r"No 'endpoint' available"):
         await client.restore_to_blank("t", "x")
     await client.aclose()
