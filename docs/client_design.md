@@ -23,71 +23,88 @@
 
 ### 2.1 经典流程代码
 
-Agent A 入池 → Agent B 发现并发起 P2P 组队 → A 更新 card → 解散后 A 恢复空白：
+团队组队是 **两个独立进程协作** 的流程：teammate 把自己挂进空闲池，teamleader 发现并发起 P2P 协商，双方完成组队后各自更新自身状态。下面按角色分两份示例展示。
+
+#### 一次性 setup（管理员，只做一次）
+
+```python
+from src.client import A2XClient
+with A2XClient(base_url="http://127.0.0.1:8000") as admin:
+    admin.create_dataset("team_pool")
+```
+
+#### Teammate 视角（`teammate_node.py`）
+
+```python
+from pathlib import Path
+from src.client import A2XClient
+
+# 每个 teammate 进程用独立的 ownership 文件，避免互相干扰
+with A2XClient(
+    base_url="http://127.0.0.1:8000",
+    ownership_file=Path("/var/run/a2x_teammate1.json"),
+) as client:
+    # ① 注册为空白 agent，进入空闲池
+    resp = client.register_blank_agent(
+        "team_pool", endpoint="http://teammate_1:8080"
+    )
+    my_sid = resp.service_id
+
+    # ── 业务层：开 HTTP server / A2A endpoint，等待 teamleader 的 P2P 组队请求 ──
+    p2p_wait_for_team_invitation()   # 业务代码，不经注册中心
+
+    # ④ 协商接受后：覆盖自己的 agent card 反映新身份
+    #    （endpoint 不传则 SDK 自动从 L1 cache 保留上次的值）
+    client.replace_agent_card("team_pool", my_sid, {
+        "name": "Task Planner (team-1)",
+        "description": "负责拆解任务",
+        "agentTeamCount": 1,
+        "skills": [{"name": "plan", "description": "子任务拆解"}],
+    })
+
+    # ── 业务层：执行团队任务，等待 teamleader 的 P2P 解散请求 ──
+    p2p_wait_for_disband()
+
+    # ⑥ 解散后：恢复成空白 agent，重新进入空闲池
+    client.restore_to_blank("team_pool", my_sid)
+```
+
+#### Teamleader 视角（`teamleader_node.py`）
 
 ```python
 from src.client import A2XClient
 
-client = A2XClient(base_url="http://127.0.0.1:8000")
-client.create_dataset("team_pool")    # 初始化（只做一次）
+# leader 不注册任何 agent，纯发现+协调；ownership_file=False 跳过持久化
+with A2XClient(
+    base_url="http://127.0.0.1:8000", ownership_file=False
+) as client:
+    # ② 默认取 1 个 idle blank agent（n=1；单次 HTTP）
+    idle = client.list_idle_blank_agents("team_pool")
+    if not idle:
+        return                              # 池里暂时没人，稍后重试
+    teammate = idle[0]                      # {id, type, name, description, endpoint, ...} 扁平 dict
+    teammate_endpoint = teammate["endpoint"]
 
-# ① Agent A 入池
-resp = client.register_blank_agent("team_pool", endpoint="http://a.example:8080")
-sid_a = resp.service_id
+    # ③ 向 teammate 发起 P2P 组队请求
+    if not p2p_send_team_invitation(teammate_endpoint):
+        return                              # 拒绝了，换人重试
 
-# ② Agent B 默认取 1 个 idle blank agent（n=1, agentTeamCount=0；单次 HTTP）
-[idle] = client.list_idle_blank_agents("team_pool")
-# idle 是 {id, type, name, description, endpoint, agentTeamCount, ...} 扁平 dict
+    # ── 业务层：与 teammate 协作完成任务 ──
+    do_collaborative_work(teammate_endpoint)
 
-# ③ P2P 协商过程略（不经注册中心）
-
-# ④ 组队：A 覆盖 card + 置 team count（endpoint 不传则自动从上次保留）
-client.replace_agent_card("team_pool", sid_a, {
-    "name": "Task Planner (team-1)",
-    "description": "负责拆解任务",
-    "agentTeamCount": 1,
-    "skills": [{"name": "plan", "description": "子任务拆解"}],
-})
-
-# ⑤ P2P 解散协商略
-
-# ⑥ 解散：A 恢复空白（L1 缓存命中，无额外 HTTP）
-client.restore_to_blank("team_pool", sid_a)
-
-client.close()
+    # ⑤ 任务结束，向 teammate 发起 P2P 解散
+    p2p_send_disband_request(teammate_endpoint)
+    # teammate 自己会调 restore_to_blank 回池
 ```
 
-**异步版简化示例**（`AsyncA2XClient`）：方法名/参数/返回类型与同步版一致，仅每次调用加 `await`；关闭方法为 `aclose()`，或用 `async with` 自动关闭。适合在 FastAPI / aiohttp / 已有 asyncio 事件循环中嵌入。
+**关键边界**：
 
-```python
-import asyncio
-from src.client import AsyncA2XClient
+- ④ 和 ⑥ 必须由 **teammate 自己** 调用 —— SDK 的 ownership 检查只允许"谁注册的谁修改"。leader 没有 ownership，连 `replace_agent_card` 都会本地 fail-fast 抛 `NotOwnedError`。
+- ③ 和 ⑤ 完全不经注册中心 —— 是 teammate 和 leader 之间的 A2A 协议直连。注册中心只负责"发现 + 状态广告"。
 
-async def main():
-    async with AsyncA2XClient(base_url="http://127.0.0.1:8000") as client:
-        # ① Agent A 入池
-        resp = await client.register_blank_agent(
-            "team_pool", endpoint="http://a.example:8080"
-        )
-        sid_a = resp.service_id
+#### 异步版
 
-        # ② Agent B 默认取 1 个 idle blank agent（n=1, agentTeamCount=0）
-        [idle] = await client.list_idle_blank_agents("team_pool")
-
-        # ③ P2P 协商过程略（不经注册中心）
-
-        # ④ 组队：A 覆盖 card + 置 team count（endpoint 自动保留）
-        await client.replace_agent_card("team_pool", sid_a, {
-            "name": "Task Planner (team-1)",
-            "description": "负责拆解任务",
-            "agentTeamCount": 1,
-        })
-
-        # ⑥ 解散：A 恢复空白（L1 缓存命中，无额外 HTTP）
-        await client.restore_to_blank("team_pool", sid_a)
-
-asyncio.run(main())
-```
+`AsyncA2XClient` 一对一镜像 `A2XClient`，方法名/参数/返回类型完全一致；只需把 `with` 换成 `async with`，每个方法调用前加 `await`。其他逻辑无变化。
 
 ### 2.2 全部 method 解释
 
