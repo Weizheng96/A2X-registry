@@ -64,15 +64,13 @@ class TestAutoInitA2A:
         sid = _register_a2a(client, "fresh_pool")
         assert sid
 
-    def test_dataset_appears_in_registry_after_auto_init(self, client):
-        """Internal RegistryService.list_datasets sees the new dataset.
-
-        (GET /api/datasets reads project_root/database directly — not the
-        injected RegistryService — so we check the service-level listing.)
-        """
+    def test_dataset_appears_in_GET_datasets_after_auto_init(self, client):
+        """GET /api/datasets now goes through RegistryService, so the
+        test fixture's tmp_path is respected."""
         _register_a2a(client, "fresh_pool")
-        from src.backend.routers import dataset as dr
-        names = dr.get_registry_service().list_datasets()
+        r = client.get("/api/datasets")
+        assert r.status_code == 200
+        names = [d["name"] for d in r.json()]
         assert "fresh_pool" in names
 
     def test_vector_config_written_with_defaults(self, client):

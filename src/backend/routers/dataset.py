@@ -77,21 +77,8 @@ async def _run(fn, *args):
 @router.get("", response_model=list[DatasetInfo])
 async def list_datasets():
     """List available datasets with their service and query counts."""
-    db_dir = PROJECT_ROOT / "database"
-    datasets = []
-    for d in sorted(db_dir.iterdir()):
-        service_file = d / "service.json"
-        if not d.is_dir() or not service_file.exists():
-            continue
-        with open(service_file, encoding="utf-8") as f:
-            svc_count = len(json.load(f))
-        query_file = d / "query" / "query.json"
-        q_count = 0
-        if query_file.exists():
-            with open(query_file, encoding="utf-8") as f:
-                q_count = len(json.load(f))
-        datasets.append(DatasetInfo(name=d.name, service_count=svc_count, query_count=q_count))
-    return datasets
+    items = get_registry_service().list_datasets_with_counts()
+    return [DatasetInfo(**item) for item in items]
 
 
 class CreateDatasetRequest(BaseModel):

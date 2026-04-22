@@ -603,6 +603,45 @@ class RegistryService:
         with self._lock:
             return list(self._entries.keys())
 
+    def list_datasets_with_counts(self) -> List[Dict[str, Any]]:
+        """List all datasets on disk with their service + query counts.
+
+        Walks ``self._database_dir`` and returns one dict per dataset
+        directory that has a ``service.json`` (i.e., has been registered
+        to at least once). Each dict has keys:
+
+          - ``name``: dataset name (directory name)
+          - ``service_count``: number of entries in ``service.json``
+          - ``query_count``: number of entries in ``query/query.json``
+            (0 if the file is missing or malformed)
+        """
+        if not self._database_dir.exists():
+            return []
+        out: List[Dict[str, Any]] = []
+        for d in sorted(self._database_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            service_file = d / "service.json"
+            if not service_file.exists():
+                continue
+            try:
+                svc_count = len(json.loads(service_file.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                svc_count = 0
+            query_file = d / "query" / "query.json"
+            q_count = 0
+            if query_file.exists():
+                try:
+                    q_count = len(json.loads(query_file.read_text(encoding="utf-8")))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            out.append({
+                "name": d.name,
+                "service_count": svc_count,
+                "query_count": q_count,
+            })
+        return out
+
     def set_on_service_changed(self, callback) -> None:
         """Register a callback(dataset: str) invoked when service.json content changes.
 
