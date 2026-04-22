@@ -130,26 +130,8 @@ async def set_register_config(dataset: str, req: RegisterConfigRequest):
 @router.delete("/{dataset}")
 async def delete_dataset(dataset: str):
     """Delete a dataset directory and all associated data."""
-    svc = get_registry_service()
-    # Clean ChromaDB collection
-    try:
-        from src.vector.utils.chroma_store import ChromaStore
-        collection = dataset.lower().replace("-", "_")
-        chroma_dir = str(PROJECT_ROOT / "database" / "chroma")
-        store = ChromaStore(collection, chroma_dir)
-        store.clear()
-        logger.info("Cleared ChromaDB collection: %s", collection)
-    except Exception as e:
-        logger.warning("Failed to clear ChromaDB for %s: %s", dataset, e)
-    # Invalidate cached search instances
-    with search_service._lock:
-        search_service._vector_instances.pop(dataset, None)
-        for key in list(search_service._a2x_instances):
-            if key.startswith(f"{dataset}_"):
-                search_service._a2x_instances.pop(key, None)
-        search_service._traditional_instances.pop(dataset, None)
-    # Delete dataset directory
-    await _run(svc.delete_dataset, dataset)
+    search_service.purge_dataset(dataset)
+    await _run(get_registry_service().delete_dataset, dataset)
     return {"dataset": dataset, "status": "deleted"}
 
 

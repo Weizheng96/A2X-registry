@@ -173,6 +173,32 @@ class SearchService:
             self._a2x_instances.clear()
             self._llm_client = None
 
+    def purge_dataset(self, dataset: str) -> None:
+        """Drop all search-side state for a dataset (cached instances + Chroma).
+
+        Called from the dataset-delete endpoint so the router doesn't have
+        to know about ChromaDB internals or the cache dict layout.
+        Best-effort: ChromaDB clear failures are logged but not raised
+        (the caller is mid-delete and shouldn't be blocked by side state).
+        """
+        # Clear ChromaDB collection (idempotent — collection may not exist)
+        try:
+            from src.vector.utils.chroma_store import ChromaStore
+            collection = dataset.lower().replace("-", "_")
+            chroma_dir = str(PROJECT_ROOT / "database" / "chroma")
+            ChromaStore(collection, chroma_dir).clear()
+            logger.info("Cleared ChromaDB collection: %s", collection)
+        except Exception as e:
+            logger.warning("Failed to clear ChromaDB for %s: %s", dataset, e)
+
+        # Drop cached search instances (vector / a2x variants / traditional)
+        with self._lock:
+            self._vector_instances.pop(dataset, None)
+            for key in list(self._a2x_instances):
+                if key.startswith(f"{dataset}_"):
+                    self._a2x_instances.pop(key, None)
+            self._traditional_instances.pop(dataset, None)
+
     # ── Vector sync ──────────────────────────────────────────────────────────
 
     def sync_vector(self, dataset: str) -> None:
