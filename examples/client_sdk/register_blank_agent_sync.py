@@ -2,7 +2,7 @@
 
 This file demonstrates:
 
-1. registering a blank agent (description='__BLANK__', agentTeamCount=0)
+1. registering a blank agent (description='__BLANK__', status="online")
 2. idempotency: re-registering same endpoint returns status='updated'
 3. L1 endpoint cache populated for restore_to_blank reuse
 4. local fail-fast on bad endpoint (None / empty / non-string)
@@ -55,7 +55,7 @@ def main() -> None:
         detail = client.get_agent(ds, resp.service_id)
         print(f"  backend description: {detail.metadata.get('description')!r}")
         print(f"  backend endpoint:    {detail.metadata.get('endpoint')!r}")
-        print(f"  backend teamCount:   {detail.metadata.get('agentTeamCount')}")
+        print(f"  backend status:      {detail.metadata.get('status')!r}")
 
         # 3) Idempotent re-register (same endpoint → same name → same sid)
         print("\n[re-register same endpoint → status='updated']")

@@ -41,7 +41,7 @@ async def main() -> None:
             client.register_agent(
                 ds,
                 {"protocolVersion": "0.0", "name": "TeamLead", "description": "已组队",
-                 "endpoint": "http://lead:8080", "agentTeamCount": 2},
+                 "endpoint": "http://lead:8080", "status": "busy"},
                 service_id="agent_lead",
             ),
         )

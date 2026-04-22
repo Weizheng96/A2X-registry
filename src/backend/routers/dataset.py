@@ -168,11 +168,30 @@ async def delete_dataset(dataset: str):
 _RESERVED_QUERY_PARAMS = frozenset({"mode", "service_id", "size", "page"})
 
 
+_STATUS_DEFAULT = "online"
+
+
+def _filter_matches(filters: dict, raw: dict) -> bool:
+    """Filter-mode AND match with one carve-out: ``status=online`` matches
+    when the entry has no ``status`` field at all (default-online rule).
+
+    Every other filter term still requires the field be present in ``raw``
+    AND ``str(raw[k]) == v``. The carve-out lets pre-existing services
+    registered without a ``status`` field still be discoverable as online.
+    """
+    for k, v in filters.items():
+        if k == "status" and v == _STATUS_DEFAULT and "status" not in raw:
+            continue
+        if k not in raw or str(raw[k]) != v:
+            return False
+    return True
+
+
 def _entry_filter_dict(entry) -> Optional[dict]:
     """Type-specific 'raw' dict used for ``mode=filter`` matching.
 
     Returns the untransformed per-type data model — AgentCard for a2a
-    (with ``extra=allow`` custom fields like ``endpoint``/``agentTeamCount``
+    (with ``extra=allow`` custom fields like ``endpoint``/``status``
     preserved), GenericServiceData for generic, SkillData for skill. This
     intentionally differs from the ``build_description``-transformed
     ``description`` exposed by ``list_services`` / browse / full, giving
@@ -250,7 +269,7 @@ async def list_services(
             match = _entry_filter_dict(entry)
             if match is None:
                 continue
-            if all(k in match and str(match[k]) == v for k, v in filters.items()):
+            if _filter_matches(filters, match):
                 wrapped = wrapped_by_id.get(entry.service_id)
                 if wrapped is not None:
                     output.append(wrapped)

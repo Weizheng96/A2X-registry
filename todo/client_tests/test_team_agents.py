@@ -4,7 +4,7 @@ Covers:
   - register_blank_agent: uses ``__BLANK__`` description sentinel + prefix name
   - list_agents(**filters): flat return shape, filter validation, flat
     merge of metadata, handling of malformed backend responses
-  - list_idle_blank_agents: ordering by agentTeamCount, n cap, returns
+  - list_idle_blank_agents: status=online filter, n cap, returns
     same flat shape as list_agents
   - replace_agent_card: endpoint-field enforcement, ownership fail-fast
   - restore_to_blank: L1 → L2 → L3 endpoint fallback chain
@@ -28,7 +28,8 @@ from src.client._internal import (
     BLANK_AGENT_NAME_PREFIX,
     BLANK_DESCRIPTION_SENTINEL,
     ENDPOINT_FIELD,
-    TEAM_COUNT_FIELD,
+    STATUS_FIELD,
+    STATUS_ONLINE,
     build_blank_agent_card,
 )
 
@@ -77,7 +78,7 @@ class TestBlankCardConstruction:
         assert card["name"] == f"{BLANK_AGENT_NAME_PREFIX}http://a.com:8080"
         assert card["description"] == BLANK_DESCRIPTION_SENTINEL
         assert card[ENDPOINT_FIELD] == "http://a.com:8080"
-        assert card[TEAM_COUNT_FIELD] == 0
+        assert card[STATUS_FIELD] == STATUS_ONLINE
 
     def test_description_sentinel_is_BLANK(self):
         """The sentinel must be the exact string '__BLANK__' — it's a
@@ -110,7 +111,8 @@ class TestRegisterBlankAgent:
         card = captured["body"]["agent_card"]
         assert card["description"] == "__BLANK__"
         assert card["endpoint"] == "http://a.com"
-        assert card["agentTeamCount"] == 0
+        assert card["status"] == "online"
+        assert "agentTeamCount" not in card
         # L1 cache populated for later restore_to_blank
         assert client._blank_endpoints[("t", "agent_x")] == "http://a.com"
         # Ownership recorded
@@ -152,45 +154,26 @@ class TestRegisterBlankAgent:
 # ── list_idle_blank_agents ────────────────────────────────────────────────────
 
 class TestListIdleBlankAgents:
-    def test_filters_by_sentinel_and_sorts_ascending(self, tmp_path):
+    def test_filter_sends_description_and_status_online(self, tmp_path):
         captured = {}
 
         def handler(req):
             captured["params"] = dict(req.url.params.multi_items())
             return httpx.Response(200, json=[
                 _mk_wrapped("a", {"name": "nA", "description": "__BLANK__",
-                                  "endpoint": "http://a", "agentTeamCount": 2}),
+                                  "endpoint": "http://a", "status": "online"}),
                 _mk_wrapped("b", {"name": "nB", "description": "__BLANK__",
-                                  "endpoint": "http://b", "agentTeamCount": 0}),
-                _mk_wrapped("c", {"name": "nC", "description": "__BLANK__",
-                                  "endpoint": "http://c", "agentTeamCount": 1}),
+                                  "endpoint": "http://b", "status": "online"}),
             ])
 
         client, _ = _make_client(handler, tmp_path)
         idle = client.list_idle_blank_agents("t", n=5)
-        # Must send the sentinel filter to backend
+        # Both filter terms forwarded
         assert captured["params"]["description"] == "__BLANK__"
-        # Ascending by agentTeamCount
-        assert [a["id"] for a in idle] == ["b", "c", "a"]
+        assert captured["params"]["status"] == "online"
         # Flat shape — id + card fields at top level
-        assert idle[0]["endpoint"] == "http://b"
-        assert idle[0]["agentTeamCount"] == 0
-        client.close()
-
-    def test_missing_team_count_treated_as_zero(self, tmp_path):
-        """An entry without agentTeamCount should sort alongside count=0."""
-        def handler(req):
-            return httpx.Response(200, json=[
-                _mk_wrapped("a", {"name": "nA", "description": "__BLANK__",
-                                  "endpoint": "http://a", "agentTeamCount": 5}),
-                _mk_wrapped("b", {"name": "nB", "description": "__BLANK__",
-                                  "endpoint": "http://b"}),  # no count
-            ])
-
-        client, _ = _make_client(handler, tmp_path)
-        idle = client.list_idle_blank_agents("t", n=2)
-        # The one without count sorts first (treated as 0)
-        assert idle[0]["id"] == "b"
+        assert idle[0]["endpoint"] == "http://a"
+        assert idle[0]["status"] == "online"
         client.close()
 
     def test_n_cap(self, tmp_path):
@@ -198,7 +181,7 @@ class TestListIdleBlankAgents:
             return httpx.Response(200, json=[
                 _mk_wrapped(f"s{i}",
                             {"name": f"n{i}", "description": "__BLANK__",
-                             "endpoint": f"http://{i}", "agentTeamCount": i})
+                             "endpoint": f"http://{i}", "status": "online"})
                 for i in range(5)
             ])
 
@@ -297,7 +280,7 @@ class TestReplaceAgentCard:
         # Register first so we own it
         client.register_blank_agent("t", endpoint="http://a", service_id="agent_x")
         new_card = {"name": "Team", "description": "working",
-                    "endpoint": "http://a", "agentTeamCount": 1,
+                    "endpoint": "http://a", "status": "busy",
                     "skills": [{"name": "plan"}]}
         resp = client.replace_agent_card("t", "agent_x", new_card)
         assert resp.status == "updated"
@@ -363,7 +346,7 @@ class TestRestoreToBlank:
             "name": "_BlankAgent_http://a.com",
             "description": "__BLANK__",
             "endpoint": "http://a.com",
-            "agentTeamCount": 0,
+            "status": "online",
         }
 
         def handler(req):
@@ -490,14 +473,14 @@ class TestTeamCycle:
         assert len(idle) == 1
         assert idle[0]["id"] == sid
         assert idle[0]["endpoint"] == "http://a"
-        assert idle[0]["agentTeamCount"] == 0
+        assert idle[0]["status"] == "online"
 
         # 3) Replace with team card (endpoint preserved)
         client.replace_agent_card("t", sid, {
             "name": "Task Planner",
             "description": "working",
             "endpoint": "http://a",
-            "agentTeamCount": 1,
+            "status": "busy",
             "skills": [{"name": "plan"}],
         })
 
@@ -541,8 +524,8 @@ class TestListAgentsEdgeCases:
             return httpx.Response(200, json=[])
 
         client, _ = _make_client(handler, tmp_path)
-        client.list_agents("t", agentTeamCount=0, active=True)
-        assert captured["params"]["agentTeamCount"] == "0"
+        client.list_agents("t", priority=0, active=True)
+        assert captured["params"]["priority"] == "0"
         # str(True) == "True"
         assert captured["params"]["active"] == "True"
         client.close()

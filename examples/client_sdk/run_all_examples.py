@@ -33,8 +33,8 @@ EXAMPLE_ORDER: list[str] = [
     "register_agent_async.py",
     "update_agent_sync.py",
     "update_agent_async.py",
-    "set_team_count_sync.py",
-    "set_team_count_async.py",
+    "set_status_sync.py",
+    "set_status_async.py",
 
     "list_agents_sync.py",
     "list_agents_async.py",

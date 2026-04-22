@@ -4,7 +4,7 @@
 
 `src/client/` 是 A2X Registry 的 Python 客户端 SDK，把对 FastAPI 后端的 HTTP 请求包装成类型清晰、幂等安全的方法。
 
-**首要场景**：**Agent Team 动态组队** —— 每个 Agent 以"空白 agent"身份进入空闲池；另一个 Agent 发现它们、发起 P2P 组队；组队期间各自更新 card 的 `agentTeamCount`；解散后恢复空白。SDK 提供 blank 注册 / 空闲发现 / 整体覆盖 / 恢复空白 4 个团队原语。
+**首要场景**：**Agent Team 动态组队** —— 每个 Agent 以"空白 agent"身份进入空闲池；另一个 Agent 发现它们、发起 P2P 组队；组队期间各自更新 card 的 `status`（`online` / `busy` / `offline`）；解散后恢复空白。SDK 提供 blank 注册 / 空闲发现 / 整体覆盖 / 恢复空白 4 个团队原语。
 
 **同步 + 异步双入口**：
 
@@ -53,12 +53,12 @@ with A2XClient(
     # ── 业务层：开 HTTP server / A2A endpoint，等待 teamleader 的 P2P 组队请求 ──
     p2p_wait_for_team_invitation()   # 业务代码，不经注册中心
 
-    # ④ 协商接受后：覆盖自己的 agent card 反映新身份
+    # ④ 协商接受后：覆盖自己的 agent card 反映新身份 + 状态翻成 busy
     #    （endpoint 不传则 SDK 自动从 L1 cache 保留上次的值）
     client.replace_agent_card("team_pool", my_sid, {
         "name": "Task Planner (team-1)",
         "description": "负责拆解任务",
-        "agentTeamCount": 1,
+        "status": "busy",
         "skills": [{"name": "plan", "description": "子任务拆解"}],
     })
 
@@ -203,19 +203,21 @@ A2XError
 
 ---
 
-#### `set_team_count(dataset, service_id, count)`
+#### `set_status(dataset, service_id, status)`
 
-把 `agentTeamCount` 置为指定非负整数。
+把 agent card 的 `status` 字段置为指定枚举值。Eureka 风格的可用性意图。
 
 **输入**：
 - `dataset: str`
 - `service_id: str`
-- `count: int ≥ 0`
+- `status: str` — 必须是 `"online"` / `"busy"` / `"offline"` 之一（本地 enum 校验）
 
-**返回**：`PatchResponse`，`changed_fields=["agentTeamCount"]`，`taxonomy_affected=False`
+**返回**：`PatchResponse`，`changed_fields=["status"]`，`taxonomy_affected=False`
 **错误**：
-- `ValueError` — count 非法（本地）
+- `ValueError` — status 非合法 enum 值（本地，先于 ownership 校验）
 - `NotOwnedError` / `NotFoundError` — 同 `update_agent`
+
+> **注**：替代了原 `set_team_count` —— `status` 比 `agentTeamCount` 更通用（既能表达忙闲，也能表达短暂掉线 / 维护下线等未来状态）。
 
 ---
 
@@ -247,7 +249,7 @@ blanks = client.list_agents("team_pool", description="__BLANK__")
 
 # 复合条件
 free_blanks = client.list_agents("team_pool",
-                                 description="__BLANK__", agentTeamCount=0)
+                                 description="__BLANK__", status="online")
 ```
 
 ---
@@ -287,7 +289,7 @@ free_blanks = client.list_agents("team_pool",
 薄壳于 `register_agent`，构造 blank 模板：
 
 ```json
-{"name": "_BlankAgent_<endpoint>", "description": "_", "endpoint": "<endpoint>", "agentTeamCount": 0}
+{"name": "_BlankAgent_<endpoint>", "description": "__BLANK__", "endpoint": "<endpoint>", "status": "online"}
 ```
 
 成功后把 `(dataset, sid) → endpoint` 写入 L1 内存缓存，供 `restore_to_blank` 使用。同 endpoint 重复注册幂等（sid 基于 name 的 SHA256）。
@@ -307,7 +309,7 @@ free_blanks = client.list_agents("team_pool",
 
 #### `list_idle_blank_agents(dataset, n=1)`
 
-返回 N 个**真正空闲**的 blank agent。后端按 `description="__BLANK__"` **AND** `agentTeamCount=0` 双条件过滤；SDK 默认 `n=1`（典型场景"取一个空闲队员"），可显式传入更大的 N。
+返回 N 个**真正空闲**的 blank agent。后端按 `description="__BLANK__"` **AND** `status="online"` 双条件过滤；SDK 默认 `n=1`（典型场景"取一个空闲队员"），可显式传入更大的 N。后端对 `status="online"` 应用 **default-online 规则**：缺 `status` 字段也算 online，所以升级前注册的、没 `status` 字段的 blank 仍能命中。
 
 **调用方读法**（返回形状与 `list_agents` 一致）：
 
@@ -326,7 +328,7 @@ for agent in client.list_idle_blank_agents("team_pool", n=3):
 - `dataset: str`
 - `n: int ≥ 0` — 默认 `1`
 
-**返回**：`list[dict]` — 形状同 `list_agents`（扁平化的 `{id, type, name, description, ...card_fields}`）；**所有项 `agentTeamCount` 一定为 0**
+**返回**：`list[dict]` — 形状同 `list_agents`（扁平化的 `{id, type, name, description, ...card_fields}`）；**所有项 `status == "online"`**（或字段缺失，按默认值视作 online）
 **错误**：`ValueError` — n 非法（本地）
 
 ---
@@ -434,7 +436,7 @@ src/client/
 |------|:-:|:-:|
 | `register_agent(persistent=True)` / `register_blank_agent(persistent=True)` | ✅ | — |
 | `register_agent(persistent=False)` / `register_blank_agent(persistent=False)` | — | — |
-| `update_agent` / `set_team_count` | — | ✅ `NotOwnedError` |
+| `update_agent` / `set_status` | — | ✅ `NotOwnedError` |
 | `replace_agent_card` / `restore_to_blank` | ✅（幂等） | ✅ 同上 |
 | `deregister_agent` | 成功后移除 | ✅ 同上 |
 | `delete_dataset` | 成功/400 均清整段 | — |
@@ -446,7 +448,7 @@ src/client/
 
 ### 3.4 NotFound 分层错误约定
 
-`update_agent` / `set_team_count` / `deregister_agent` 等 mutation 在"目标 service 不存在"时遵循三层契约：
+`update_agent` / `set_status` / `deregister_agent` 等 mutation 在"目标 service 不存在"时遵循三层契约：
 
 ```mermaid
 flowchart LR
@@ -486,7 +488,7 @@ flowchart LR
 
 **异步版差异**：`Client → HTTP` 所有调用前加 `await`；`Own` 的写操作通过 `await asyncio.to_thread(...)` 调度；只读 `contains` 仍同步。
 
-仅画 6 个关键流程。未画方法的流程与其底层方法一致：`register_blank_agent` ≈ 4.2；`set_team_count` ≈ 4.3；`get_agent` 是直连 GET；`delete_dataset` / `deregister_agent` 与 4.3 的 404 自清模式相同。
+仅画 6 个关键流程。未画方法的流程与其底层方法一致：`register_blank_agent` ≈ 4.2；`set_status` ≈ 4.3；`get_agent` 是直连 GET；`delete_dataset` / `deregister_agent` 与 4.3 的 404 自清模式相同。
 
 ### 4.1 `__init__`
 
@@ -539,7 +541,7 @@ sequenceDiagram
 
 ### 4.3 `update_agent`
 
-带 ownership fail-fast 和 404 自清。`set_team_count` 完全同构，仅 body 固定为 `{"agentTeamCount": count}`。
+带 ownership fail-fast 和 404 自清。`set_status` 完全同构，仅 body 固定为 `{"status": <enum>}`。
 
 ```mermaid
 sequenceDiagram
@@ -669,7 +671,7 @@ sequenceDiagram
     else list_idle_blank_agents(ds, n=1)
         Dev->>Client: list_idle_blank_agents(ds, n=1)
         Client->>Client: 校验 n ≥ 0；n=0 → []
-        Note over Client: filters = {"description": "__BLANK__",<br/>"agentTeamCount": "0"}
+        Note over Client: filters = {"description": "__BLANK__",<br/>"status": "online"}
     end
     Client->>HTTP: GET ?mode=filter[&k=v&...]
     HTTP->>API: GET
@@ -679,7 +681,7 @@ sequenceDiagram
     alt list_agents
         Client-->>Dev: list[dict]
     else list_idle_blank_agents
-        Client->>Client: 按 agentTeamCount 升序（缺省 0）<br/>取前 n
+        Client->>Client: 取前 n（status=online + 缺字段默认在线）
         Client-->>Dev: list[dict]（前 n 个）
     end
 ```

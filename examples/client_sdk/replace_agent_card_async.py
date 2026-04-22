@@ -49,13 +49,13 @@ async def main() -> None:
         print("\n[explicit endpoint]")
         await client.replace_agent_card(ds, sid, {
             "name": "Worker", "description": "team",
-            "endpoint": "http://teammate:8080", "agentTeamCount": 1,
+            "endpoint": "http://teammate:8080", "status": "busy",
         })
         print("  ok")
 
         print("\n[endpoint omitted → auto-fill]")
         await client.replace_agent_card(ds, sid, {
-            "name": "Worker v2", "description": "更新", "agentTeamCount": 2,
+            "name": "Worker v2", "description": "更新", "status": "busy",
         })
         detail = await client.get_agent(ds, sid)
         print(f"  endpoint preserved: {detail.metadata['endpoint']}")

@@ -165,7 +165,7 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
     "type": "a2a",
     "name": "_BlankAgent_http://a.example",
     "description": "__BLANK__.",
-    "metadata": { "name": "...", "description": "__BLANK__", "endpoint": "...", "agentTeamCount": 0 }
+    "metadata": { "name": "...", "description": "__BLANK__", "endpoint": "...", "status": "online" }
   }
 ]
 ```
@@ -176,7 +176,7 @@ API 由 4 个路由模块 + 1 个应用级端点组成：
 - 字段**必须存在**且值相等才命中
 - 匹配的是**原始数据**：对 a2a 是 `entry.agent_card.model_dump(exclude_none=True)`（`description` 是原始未转换值）；对 generic 是 `entry.service_data`；对 skill 是 `entry.skill_data`
 - 注意响应里外层 `description` 是 `build_description(card)` 的输出（a2a 会带句号），但 `metadata.description` 是原始值
-- 请求示例：`GET /api/datasets/team/services?mode=filter`（全量）或 `?mode=filter&description=__BLANK__&agentTeamCount=0`（筛选）
+- 请求示例：`GET /api/datasets/team/services?mode=filter`（全量）或 `?mode=filter&description=__BLANK__&status=online`（筛选；`status=online` 对缺字段的 entry 也命中 — default-online 规则）
 
 ---
 

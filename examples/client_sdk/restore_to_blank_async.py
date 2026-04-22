@@ -47,7 +47,7 @@ async def main() -> None:
         sid = reg.service_id
         await client.replace_agent_card(ds, sid, {
             "name": "Worker", "description": "组队中",
-            "endpoint": "http://teammate:8080", "agentTeamCount": 1,
+            "endpoint": "http://teammate:8080", "status": "busy",
         })
 
         print("\n[L1 cache hit — no extra GET]")
@@ -58,7 +58,7 @@ async def main() -> None:
         print("\n[L2 fallback — clear cache, restore reads endpoint]")
         await client.replace_agent_card(ds, sid, {
             "name": "Worker", "description": "again",
-            "endpoint": "http://teammate:8080", "agentTeamCount": 1,
+            "endpoint": "http://teammate:8080", "status": "busy",
         })
         client._blank_endpoints.clear()
         await client.restore_to_blank(ds, sid)

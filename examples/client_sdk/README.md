@@ -31,7 +31,7 @@ A2X_BASE_URL=http://127.0.0.1:8000   # 默认值
 ```
 基础（dataset / 通用 agent CRUD）
   create_dataset / delete_dataset
-  register_agent / update_agent / set_team_count
+  register_agent / update_agent / set_status
   list_agents / get_agent / deregister_agent
 
 Agent Team 流程（团队组队原语）
@@ -58,7 +58,7 @@ Agent Team 流程（团队组队原语）
 |------|------|------|
 | `register_agent` | [register_agent_sync.py](./register_agent_sync.py) | [register_agent_async.py](./register_agent_async.py) |
 | `update_agent` | [update_agent_sync.py](./update_agent_sync.py) | [update_agent_async.py](./update_agent_async.py) |
-| `set_team_count` | [set_team_count_sync.py](./set_team_count_sync.py) | [set_team_count_async.py](./set_team_count_async.py) |
+| `set_status` | [set_status_sync.py](./set_status_sync.py) | [set_status_async.py](./set_status_async.py) |
 | `deregister_agent` | [deregister_agent_sync.py](./deregister_agent_sync.py) | [deregister_agent_async.py](./deregister_agent_async.py) |
 
 覆盖：persistent=True/False 的 ownership 差异 / 同 sid 重注册 → status="updated" / 校验失败 / `NotOwnedError` 本地 fail-fast / `NotFoundError` 后端 404 + 自动 ownership 清理 / `UserConfigServiceImmutableError` / 网络失败。
@@ -94,8 +94,8 @@ Agent Team 流程（团队组队原语）
 
 覆盖：
 
-- **register_blank_agent**：blank 模板（`description="__BLANK__"`、`agentTeamCount=0`）/ L1 缓存写入 / 同 endpoint 重注册幂等 / bad endpoint fail-fast
-- **list_idle_blank_agents**：默认 `n=1` / 显式 `n=N` / 后端 filter 严格 idle（`description=__BLANK__` AND `agentTeamCount=0`）/ 扁平返回形状 / `n=0` 短路无 HTTP / 非法 n 的本地 ValueError
+- **register_blank_agent**：blank 模板（`description="__BLANK__"`、`status="online"`）/ L1 缓存写入 / 同 endpoint 重注册幂等 / bad endpoint fail-fast
+- **list_idle_blank_agents**：默认 `n=1` / 显式 `n=N` / 后端 filter 严格 idle（`description=__BLANK__` AND `status="online"`）/ 扁平返回形状 / `n=0` 短路无 HTTP / 非法 n 的本地 ValueError
 - **replace_agent_card**：完整覆盖语义 / **endpoint auto-fill**（不传 endpoint 时从 L1 / L2 自动补）/ L1 缓存刷新 / NotOwnedError / 非 dict 的 ValueError / NotFoundError + 自动清理
 - **restore_to_blank**：L1 命中（0 GET）/ L2 fallback（1 GET）/ L3 ValueError / NotOwnedError / NotFoundError
 

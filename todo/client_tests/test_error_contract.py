@@ -67,24 +67,26 @@ def _raise_transport_exc(exc):
 # PART 1: Local fail-fast validation (no HTTP)
 # ════════════════════════════════════════════════════════════════════════════
 
-class TestLocalValidationSetTeamCount:
-    """build_team_count_body rejects bad counts before HTTP."""
+class TestLocalValidationSetStatus:
+    """build_status_body rejects invalid enum values before HTTP."""
 
-    @pytest.mark.parametrize("bad", [-1, True, False, 1.5, "3", None, [], {}])
-    def test_bad_count_raises_ValueError(self, tmp_path, bad):
+    @pytest.mark.parametrize("bad", [
+        "ONLINE", "available", "", None, 0, 1, True, [], {}, "online ", " offline"
+    ])
+    def test_bad_status_raises_ValueError(self, tmp_path, bad):
         client, sent = _mk_client(_deny_all, tmp_path)
-        client._owned.add("ds", "sid")  # even owned, count check fires first
-        with pytest.raises(ValueError, match=r"non-negative int"):
-            client.set_team_count("ds", "sid", bad)
+        client._owned.add("ds", "sid")  # even owned, status check fires first
+        with pytest.raises(ValueError, match=r"status must be one of"):
+            client.set_status("ds", "sid", bad)
         assert len(sent) == 0
         client.close()
 
-    def test_bad_count_precedes_ownership_check(self, tmp_path):
-        """Count validated BEFORE _assert_owned — regardless of ownership."""
+    def test_bad_status_precedes_ownership_check(self, tmp_path):
+        """Status validated BEFORE _assert_owned — regardless of ownership."""
         client, sent = _mk_client(_deny_all, tmp_path)
-        # Foreign sid + bad count → ValueError wins (not NotOwnedError)
+        # Foreign sid + bad status → ValueError wins (not NotOwnedError)
         with pytest.raises(ValueError):
-            client.set_team_count("ds", "foreign", -1)
+            client.set_status("ds", "foreign", "invalid_value")
         assert len(sent) == 0
         client.close()
 
@@ -199,11 +201,11 @@ class TestLocalValidationReplaceAgentCard:
 
 
 class TestLocalValidationOwnership:
-    """update/set_team_count/deregister/restore_to_blank all require ownership."""
+    """update/set_status/deregister/restore_to_blank all require ownership."""
 
     @pytest.mark.parametrize("method_call", [
         lambda c: c.update_agent("ds", "foreign", {"description": "x"}),
-        lambda c: c.set_team_count("ds", "foreign", 0),
+        lambda c: c.set_status("ds", "foreign", "online"),
         lambda c: c.deregister_agent("ds", "foreign"),
         lambda c: c.restore_to_blank("ds", "foreign"),
     ])
@@ -365,12 +367,12 @@ class TestSpecialPaths:
         assert not client._owned.contains("ds", "sid")
         client.close()
 
-    def test_set_team_count_404_clears_local(self, tmp_path):
+    def test_set_status_404_clears_local(self, tmp_path):
         handler = _static_response(404, {"detail": "not found"})
         client, _ = _mk_client(handler, tmp_path)
         client._owned.add("ds", "sid")
         with pytest.raises(NotFoundError):
-            client.set_team_count("ds", "sid", 0)
+            client.set_status("ds", "sid", "online")
         assert not client._owned.contains("ds", "sid")
         client.close()
 
@@ -438,11 +440,11 @@ class TestValidationOrdering:
         assert len(sent) == 0
         client.close()
 
-    def test_set_team_count_count_check_precedes_ownership(self, tmp_path):
+    def test_set_status_validation_precedes_ownership(self, tmp_path):
         client, sent = _mk_client(_deny_all, tmp_path)
-        # Foreign sid + bad count → ValueError from count validation, not NotOwnedError
+        # Foreign sid + bad status → ValueError from status validation, not NotOwnedError
         with pytest.raises(ValueError):
-            client.set_team_count("ds", "foreign", -1)
+            client.set_status("ds", "foreign", "invalid")
         assert len(sent) == 0
         client.close()
 
@@ -596,7 +598,7 @@ class TestReplaceCardAutoFill:
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestListIdleBlankAgentsNewContract:
-    """Default n=1; backend filtered by description=__BLANK__ AND agentTeamCount=0."""
+    """Default n=1; backend filtered by description=__BLANK__ AND status=online."""
 
     def test_default_n_is_one(self, tmp_path):
         """Calling without n returns at most 1 agent."""
@@ -608,7 +610,7 @@ class TestListIdleBlankAgentsNewContract:
                 {"id": f"a{i}", "type": "a2a", "name": f"n{i}",
                  "description": "__BLANK__.", "metadata": {
                      "name": f"n{i}", "description": "__BLANK__",
-                     "endpoint": f"http://{i}", "agentTeamCount": 0,
+                     "endpoint": f"http://{i}", "status": "online",
                  }} for i in range(3)
             ])
 
@@ -617,8 +619,8 @@ class TestListIdleBlankAgentsNewContract:
         assert len(result) == 1
         client.close()
 
-    def test_filter_includes_both_description_and_team_count_zero(self, tmp_path):
-        """Verifies SDK sends BOTH the description sentinel and agentTeamCount=0."""
+    def test_filter_includes_both_description_and_status_online(self, tmp_path):
+        """Verifies SDK sends BOTH the description sentinel and status=online."""
         captured = {}
 
         def handler(req):
@@ -629,7 +631,7 @@ class TestListIdleBlankAgentsNewContract:
         client.list_idle_blank_agents("ds", n=5)
         assert captured["params"]["mode"] == "filter"
         assert captured["params"]["description"] == "__BLANK__"
-        assert captured["params"]["agentTeamCount"] == "0"
+        assert captured["params"]["status"] == "online"
         client.close()
 
     def test_explicit_n_still_works(self, tmp_path):
@@ -638,7 +640,7 @@ class TestListIdleBlankAgentsNewContract:
                 {"id": f"a{i}", "type": "a2a", "name": f"n{i}",
                  "description": "__BLANK__.", "metadata": {
                      "name": f"n{i}", "description": "__BLANK__",
-                     "endpoint": f"http://{i}", "agentTeamCount": 0,
+                     "endpoint": f"http://{i}", "status": "online",
                  }} for i in range(5)
             ])
 

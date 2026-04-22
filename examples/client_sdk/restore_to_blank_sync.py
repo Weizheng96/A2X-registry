@@ -58,7 +58,7 @@ def main() -> None:
         # Take it out of the idle pool
         client.replace_agent_card(ds, sid, {
             "name": "Worker", "description": "已组队",
-            "endpoint": "http://teammate:8080", "agentTeamCount": 1,
+            "endpoint": "http://teammate:8080", "status": "busy",
         })
         idle_when_busy = client.list_idle_blank_agents(ds, n=10)
         print(f"  idle pool while teamed: {len(idle_when_busy)}")
@@ -71,14 +71,14 @@ def main() -> None:
         # Verify card is blank
         d = client.get_agent(ds, sid)
         print(f"  description: {d.metadata['description']!r}")
-        print(f"  agentTeamCount: {d.metadata['agentTeamCount']}")
+        print(f"  status: {d.metadata['status']}")
 
         # 2) L2 fallback: clear L1 cache, restore reads endpoint via get_agent
         print("\n[L2 fallback — clear L1, restore reads endpoint via GET]")
         # First, set up a non-blank state again
         client.replace_agent_card(ds, sid, {
             "name": "Worker", "description": "组队中",
-            "endpoint": "http://teammate:8080", "agentTeamCount": 3,
+            "endpoint": "http://teammate:8080", "status": "busy",
         })
         client._blank_endpoints.clear()  # simulate process restart
         client.restore_to_blank(ds, sid)

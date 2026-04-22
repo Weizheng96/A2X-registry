@@ -31,7 +31,7 @@ with A2XClient(base_url="http://127.0.0.1:8000") as client:
         "description": "拆解复杂任务为可执行子任务",
     })
 
-    client.set_team_count("research_team", planner.service_id, 0)
+    client.set_status("research_team", planner.service_id, "online")
     client.update_agent("research_team", planner.service_id,
                         {"description": "updated desc"})
 
@@ -62,7 +62,7 @@ asyncio.run(main())
 ## Ownership model
 
 The SDK tracks which services **this client** registered. Mutating calls
-(`update_agent`, `set_team_count`, `deregister_agent`) require the
+(`update_agent`, `set_status`, `deregister_agent`) require the
 `service_id` to be in that tracker, otherwise `NotOwnedError` is raised
 **before** any HTTP request is sent.
 

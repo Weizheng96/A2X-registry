@@ -78,7 +78,7 @@ async def test_async_list_agents_flat_shape(tmp_path):
     def handler(req):
         return httpx.Response(200, json=[
             _mk_wrapped("a", {"name": "nA", "description": "__BLANK__",
-                              "endpoint": "http://a", "agentTeamCount": 0}),
+                              "endpoint": "http://a", "status": "online"}),
         ])
 
     client, _ = await _make_client(handler, tmp_path)
@@ -89,18 +89,19 @@ async def test_async_list_agents_flat_shape(tmp_path):
     await client.aclose()
 
 
-async def test_async_list_idle_sorted_ascending(tmp_path):
+async def test_async_list_idle_returns_only_online(tmp_path):
+    """Backend should filter by status=online; mock returns only matches."""
     def handler(req):
         return httpx.Response(200, json=[
             _mk_wrapped("a", {"name": "nA", "description": "__BLANK__",
-                              "endpoint": "http://a", "agentTeamCount": 3}),
+                              "endpoint": "http://a", "status": "online"}),
             _mk_wrapped("b", {"name": "nB", "description": "__BLANK__",
-                              "endpoint": "http://b", "agentTeamCount": 0}),
+                              "endpoint": "http://b", "status": "online"}),
         ])
 
     client, _ = await _make_client(handler, tmp_path)
     idle = await client.list_idle_blank_agents("t", n=5)
-    assert [a["id"] for a in idle] == ["b", "a"]
+    assert [a["id"] for a in idle] == ["a", "b"]
     await client.aclose()
 
 
@@ -196,7 +197,7 @@ async def test_async_restore_L2_reads_endpoint_from_card(tmp_path):
         "name": "_BlankAgent_http://a",
         "description": "__BLANK__",
         "endpoint": "http://a",
-        "agentTeamCount": 0,
+        "status": "online",
     }
 
     def handler(req):

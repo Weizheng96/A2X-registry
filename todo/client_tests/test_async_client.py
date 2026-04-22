@@ -92,7 +92,7 @@ class TestSyncAsyncSymmetry:
         from src.client import A2XClient
 
         business = {"create_dataset", "delete_dataset", "register_agent",
-                    "update_agent", "set_team_count", "list_agents",
+                    "update_agent", "set_status", "list_agents",
                     "get_agent", "deregister_agent"}
         sync_names = {m for m, _ in inspect.getmembers(A2XClient, inspect.isfunction)}
         async_names = {m for m, _ in inspect.getmembers(AsyncA2XClient, inspect.isfunction)}
@@ -101,7 +101,7 @@ class TestSyncAsyncSymmetry:
 
     @pytest.mark.parametrize("method_name", [
         "create_dataset", "delete_dataset", "register_agent",
-        "update_agent", "set_team_count", "list_agents",
+        "update_agent", "set_status", "list_agents",
         "get_agent", "deregister_agent",
     ])
     def test_method_signatures_match(self, method_name):
@@ -113,7 +113,7 @@ class TestSyncAsyncSymmetry:
 
     @pytest.mark.parametrize("method_name", [
         "create_dataset", "delete_dataset", "register_agent",
-        "update_agent", "set_team_count", "list_agents",
+        "update_agent", "set_status", "list_agents",
         "get_agent", "deregister_agent",
     ])
     def test_async_methods_are_coroutine_functions(self, method_name):

@@ -4,7 +4,7 @@ This file demonstrates:
 
 1. listing all services (no filters → mode=filter with empty params)
 2. filtering by a single field (description)
-3. composite AND filters (description + agentTeamCount)
+3. composite AND filters (description + status)
 4. flat return shape: list[dict] with id + raw card fields merged
 5. local fail-fast on reserved filter keys / None values
 6. empty/nonexistent dataset returns []
@@ -53,19 +53,19 @@ def main() -> None:
         # Seed: 1 a2a (idle), 1 a2a (working), 1 generic
         client.register_agent(
             ds,
-            make_card("planner", "拆解任务", endpoint="http://a", agentTeamCount=0),
+            make_card("planner", "拆解任务", endpoint="http://a", status="online"),
             service_id="agent_planner",
         )
         client.register_agent(
             ds,
-            make_card("worker", "执行子任务", endpoint="http://b", agentTeamCount=2),
+            make_card("worker", "执行子任务", endpoint="http://b", status="busy"),
             service_id="agent_worker",
         )
         # Note: register a generic via the same endpoint; for example purposes
         # we just register another a2a with a distinctive description.
         client.register_agent(
             ds,
-            make_card("scribe", "记录笔记", endpoint="http://c", agentTeamCount=0),
+            make_card("scribe", "记录笔记", endpoint="http://c", status="online"),
             service_id="agent_scribe",
         )
 
@@ -75,16 +75,16 @@ def main() -> None:
         print(f"  count: {len(all_agents)}")
         for a in all_agents:
             print(f"    id={a['id']} name={a['name']!r} "
-                  f"endpoint={a.get('endpoint')!r} count={a.get('agentTeamCount', 0)}")
+                  f"endpoint={a.get('endpoint')!r} status={a.get('status', 'online')}")
 
-        # 2) Single filter: agentTeamCount=0 (only idle)
-        print("\n[filter: agentTeamCount=0]")
-        idle = client.list_agents(ds, agentTeamCount=0)
+        # 2) Single filter: status='online' (only idle)
+        print("\n[filter: status=online]")
+        idle = client.list_agents(ds, status="online")
         print(f"  count: {len(idle)}, ids: {[a['id'] for a in idle]}")
 
         # 3) Composite AND filter
-        print("\n[composite filter: name='planner' AND agentTeamCount=0]")
-        focused = client.list_agents(ds, name="planner", agentTeamCount=0)
+        print("\n[composite filter: name='planner' AND status=online]")
+        focused = client.list_agents(ds, name="planner", status="online")
         print(f"  count: {len(focused)}, ids: {[a['id'] for a in focused]}")
 
         # 4) Filter that matches nothing

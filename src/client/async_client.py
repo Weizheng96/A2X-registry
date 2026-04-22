@@ -137,13 +137,14 @@ class AsyncA2XClient:
             raise
         return PatchResponse.from_dict(resp.json())
 
-    async def set_team_count(
+    async def set_status(
         self,
         dataset: str,
         service_id: str,
-        count: int,
+        status: str,
     ) -> PatchResponse:
-        body = _i.build_team_count_body(count)
+        """See ``A2XClient.set_status``."""
+        body = _i.build_status_body(status)
         self._assert_owned(dataset, service_id)
         try:
             resp = await self._transport.request(
@@ -220,9 +221,8 @@ class AsyncA2XClient:
         agents = await self.list_agents(
             dataset,
             description=_i.BLANK_DESCRIPTION_SENTINEL,
-            **{_i.TEAM_COUNT_FIELD: 0},
+            **{_i.STATUS_FIELD: _i.STATUS_ONLINE},
         )
-        agents.sort(key=_i.extract_team_count)
         return agents[:n]
 
     async def replace_agent_card(

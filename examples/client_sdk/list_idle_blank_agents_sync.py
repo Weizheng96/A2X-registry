@@ -4,7 +4,7 @@ This file demonstrates:
 
 1. default n=1 returns at most 1 blank agent
 2. explicit n returns up to N
-3. backend filter is description='__BLANK__' AND agentTeamCount=0 (strict idle)
+3. backend filter is description='__BLANK__' AND status="online" (strict idle)
 4. flat return shape: id + raw card fields
 5. n=0 short-circuits with no HTTP
 6. invalid n (-1, 1.5, "3", None) → ValueError, no HTTP
@@ -53,7 +53,7 @@ def main() -> None:
             ds,
             {"protocolVersion": "0.0", "name": "TeamLead",
              "description": "已组队的负责人",
-             "endpoint": "http://lead:8080", "agentTeamCount": 2},
+             "endpoint": "http://lead:8080", "status": "busy"},
             service_id="agent_lead",
         )
 
@@ -69,7 +69,7 @@ def main() -> None:
         idle_all = client.list_idle_blank_agents(ds, n=5)
         print(f"  count: {len(idle_all)}")
         for a in idle_all:
-            print(f"    id={a['id']} endpoint={a['endpoint']} count={a['agentTeamCount']}")
+            print(f"    id={a['id']} endpoint={a['endpoint']} status={a['status']!r}")
 
         # 3) Verify the non-blank lead is excluded
         all_agents = client.list_agents(ds)
@@ -95,7 +95,7 @@ def main() -> None:
         for a in idle_all:
             client.replace_agent_card(ds, a["id"], {
                 "name": "Working", "description": "busy now",
-                "endpoint": a["endpoint"], "agentTeamCount": 1,
+                "endpoint": a["endpoint"], "status": "busy",
             })
         empty = client.list_idle_blank_agents(ds, n=10)
         print(f"  count after all teamed up: {len(empty)}")

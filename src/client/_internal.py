@@ -25,7 +25,18 @@ DEFAULT_FORMATS: Final[dict[str, str]] = {"a2a": "v0.0"}
 
 DEFAULT_OWNERSHIP_FILE: Final[Path] = Path.home() / ".a2x_client" / "owned.json"
 
-TEAM_COUNT_FIELD: Final[str] = "agentTeamCount"
+STATUS_FIELD: Final[str] = "status"
+"""Service-state field on the AgentCard. Eureka-style intent — values
+``online`` / ``busy`` / ``offline``. Default is ``online``: any service
+registered without an explicit ``status`` field is treated as online by
+filter matching (see ``status=online`` carve-out in backend's match logic)."""
+
+STATUS_ONLINE: Final[str] = "online"
+STATUS_BUSY: Final[str] = "busy"
+STATUS_OFFLINE: Final[str] = "offline"
+_VALID_STATUSES: Final[frozenset[str]] = frozenset(
+    {STATUS_ONLINE, STATUS_BUSY, STATUS_OFFLINE}
+)
 
 BLANK_AGENT_NAME_PREFIX: Final[str] = "_BlankAgent_"
 """Name prefix used when constructing a blank card. Kept distinct so two
@@ -106,10 +117,13 @@ def build_register_agent_body(
     return body
 
 
-def build_team_count_body(count: int) -> dict[str, Any]:
-    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-        raise ValueError(f"count must be a non-negative int, got {count!r}")
-    return {TEAM_COUNT_FIELD: count}
+def build_status_body(status: str) -> dict[str, Any]:
+    """Body for the ``set_status`` SDK convenience method (validates enum locally)."""
+    if not isinstance(status, str) or status not in _VALID_STATUSES:
+        raise ValueError(
+            f"status must be one of {sorted(_VALID_STATUSES)}, got {status!r}"
+        )
+    return {STATUS_FIELD: status}
 
 
 def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
@@ -121,6 +135,9 @@ def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
 
     ``description`` carries the ``BLANK_DESCRIPTION_SENTINEL`` — this is
     what ``mode=filter`` matches to discover idle-pool agents.
+
+    ``status`` is set to ``online`` so the agent is immediately visible
+    to ``status=online`` filters.
     """
     if not isinstance(endpoint, str) or not endpoint.strip():
         raise ValueError(f"endpoint must be a non-empty string, got {endpoint!r}")
@@ -128,7 +145,7 @@ def build_blank_agent_card(endpoint: str) -> dict[str, Any]:
         "name": f"{BLANK_AGENT_NAME_PREFIX}{endpoint}",
         "description": BLANK_DESCRIPTION_SENTINEL,
         ENDPOINT_FIELD: endpoint,
-        TEAM_COUNT_FIELD: 0,
+        STATUS_FIELD: STATUS_ONLINE,
     }
 
 
@@ -158,20 +175,6 @@ def build_filter_params(filters: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"filter value for {k!r} must not be None")
         params[k] = str(v)
     return params
-
-
-def extract_team_count(card: Any) -> int:
-    """Read ``agentTeamCount`` from an AgentCard dict.
-
-    Defaults to 0 (most-idle) for missing/invalid values, matching the
-    blank-agent invariant that idle agents always have count=0.
-    """
-    if not isinstance(card, dict):
-        return 0
-    count = card.get(TEAM_COUNT_FIELD, 0)
-    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-        return 0
-    return count
 
 
 def extract_endpoint(card: Any) -> str | None:

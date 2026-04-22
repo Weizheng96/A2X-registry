@@ -143,13 +143,20 @@ class A2XClient:
             raise
         return PatchResponse.from_dict(resp.json())
 
-    def set_team_count(
+    def set_status(
         self,
         dataset: str,
         service_id: str,
-        count: int,
+        status: str,
     ) -> PatchResponse:
-        body = _i.build_team_count_body(count)
+        """Update the agent's ``status`` field — Eureka-style intent
+        (``online`` / ``busy`` / ``offline``).
+
+        Validates the value locally before HTTP. Replaces the previous
+        ``set_team_count`` removed in this version (which only ever expressed "0=idle, >0=busy" —
+        now expressed directly as ``status``).
+        """
+        body = _i.build_status_body(status)
         self._assert_owned(dataset, service_id)
         try:
             resp = self._transport.request(
@@ -179,7 +186,7 @@ class A2XClient:
 
         **Return shape** — flat ``list[dict]``, one dict per service:
         ``{id, type, name, description, ...card_fields}``. For a2a, card
-        fields include ``endpoint``, ``agentTeamCount``, ``skills``, etc.
+        fields include ``endpoint``, ``status``, ``skills``, etc.
         Metadata fields take precedence on key conflict — e.g. for a2a the
         top-level ``description`` is the raw card value (not the taxonomy-
         facing ``build_description`` output).
@@ -225,14 +232,14 @@ class A2XClient:
             {"name": "_BlankAgent_<endpoint>",
              "description": "__BLANK__",             # BLANK_DESCRIPTION_SENTINEL
              "endpoint": endpoint,
-             "agentTeamCount": 0}
+             "status": "online"}                     # STATUS_ONLINE
 
-        The ``description`` sentinel is the discovery contract —
-        ``list_idle_blank_agents`` finds blanks via ``mode=filter``
-        matching this exact value. The ``name`` prefix is only there to
-        make the deterministic ``generate_service_id("agent", name)`` yield
-        a distinct sid per endpoint (re-registering the same endpoint is
-        idempotent; the same sid → backend ``status="updated"``).
+        The ``description`` sentinel is the discovery contract; ``status``
+        is the availability gate. ``list_idle_blank_agents`` matches **both**.
+        The ``name`` prefix is only there to make the deterministic
+        ``generate_service_id("agent", name)`` yield a distinct sid per
+        endpoint (re-registering the same endpoint is idempotent; the same
+        sid → backend ``status="updated"`` response).
         """
         card = _i.build_blank_agent_card(endpoint)
         result = self.register_agent(
@@ -249,13 +256,14 @@ class A2XClient:
         """Return up to ``n`` idle-and-blank agents (default ``n=1``).
 
         Thin wrapper over ``list_agents`` filtering by **both** the blank
-        sentinel (``description=__BLANK__``) **and** the strict idle gate
-        (``agentTeamCount=0``). Backend does the filtering; SDK additionally
-        sorts ascending by ``agentTeamCount`` as a defensive no-op (every
-        match is already 0) and caps at ``n``.
+        sentinel (``description=__BLANK__``) **and** the availability gate
+        (``status=online``). Backend treats absent ``status`` field as
+        ``online`` (default-online rule), so pre-upgrade blanks without an
+        explicit status field still match. Backend does the filtering; SDK
+        just caps at ``n``.
 
         Return shape is identical to ``list_agents``: flat dicts with ``id`` +
-        raw card fields (``endpoint``, ``agentTeamCount``, ...).
+        raw card fields (``endpoint``, ``status``, ...).
         """
         if not isinstance(n, int) or isinstance(n, bool) or n < 0:
             raise ValueError(f"n must be a non-negative int, got {n!r}")
@@ -265,9 +273,8 @@ class A2XClient:
         agents = self.list_agents(
             dataset,
             description=_i.BLANK_DESCRIPTION_SENTINEL,
-            **{_i.TEAM_COUNT_FIELD: 0},
+            **{_i.STATUS_FIELD: _i.STATUS_ONLINE},
         )
-        agents.sort(key=_i.extract_team_count)
         return agents[:n]
 
     def replace_agent_card(

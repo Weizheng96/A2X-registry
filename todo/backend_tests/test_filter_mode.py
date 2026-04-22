@@ -150,20 +150,20 @@ class TestCompositeFilter:
     def test_all_conditions_must_match(self, client):
         _create_dataset(client, "ds")
         _register_a2a(client, "ds", {"name": "A", "description": "__BLANK__",
-                                     "endpoint": "http://a", "agentTeamCount": 0})
+                                     "endpoint": "http://a", "teamCount": 0})
         _register_a2a(client, "ds", {"name": "B", "description": "__BLANK__",
-                                     "endpoint": "http://b", "agentTeamCount": 2})
-        r = _filter(client, "ds", description="__BLANK__", agentTeamCount="0")
+                                     "endpoint": "http://b", "teamCount": 2})
+        r = _filter(client, "ds", description="__BLANK__", teamCount="0")
         assert len(r) == 1
         assert r[0]["metadata"]["endpoint"] == "http://a"
 
     def test_partial_match_excluded(self, client):
         _create_dataset(client, "ds")
         _register_a2a(client, "ds", {"name": "A", "description": "__BLANK__",
-                                     "agentTeamCount": 5})
+                                     "teamCount": 5})
         # description matches, but count doesn't → no result
         assert _filter(client, "ds", description="__BLANK__",
-                       agentTeamCount="0") == []
+                       teamCount="0") == []
 
 
 # ── String coercion on both sides ────────────────────────────────────────────
@@ -173,15 +173,15 @@ class TestStringCoercion:
         """Query '0' should match stored integer 0 via str() coercion."""
         _create_dataset(client, "ds")
         _register_a2a(client, "ds", {"name": "A", "description": "d",
-                                     "agentTeamCount": 0})
-        r = _filter(client, "ds", agentTeamCount="0")
+                                     "teamCount": 0})
+        r = _filter(client, "ds", teamCount="0")
         assert len(r) == 1
 
     def test_mismatched_int_excluded(self, client):
         _create_dataset(client, "ds")
         _register_a2a(client, "ds", {"name": "A", "description": "d",
-                                     "agentTeamCount": 5})
-        assert _filter(client, "ds", agentTeamCount="0") == []
+                                     "teamCount": 5})
+        assert _filter(client, "ds", teamCount="0") == []
 
     def test_float_stringification_cross_check(self, client):
         """str(5) == '5' but str(5.0) != '5' — document the coercion edge."""

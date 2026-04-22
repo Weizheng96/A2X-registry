@@ -48,17 +48,17 @@ async def main() -> None:
         await asyncio.gather(
             client.register_agent(
                 ds,
-                make_card("planner", "拆解任务", endpoint="http://a", agentTeamCount=0),
+                make_card("planner", "拆解任务", endpoint="http://a", status="online"),
                 service_id="agent_planner",
             ),
             client.register_agent(
                 ds,
-                make_card("worker", "执行子任务", endpoint="http://b", agentTeamCount=2),
+                make_card("worker", "执行子任务", endpoint="http://b", status="busy"),
                 service_id="agent_worker",
             ),
             client.register_agent(
                 ds,
-                make_card("scribe", "记录笔记", endpoint="http://c", agentTeamCount=0),
+                make_card("scribe", "记录笔记", endpoint="http://c", status="online"),
                 service_id="agent_scribe",
             ),
         )
@@ -66,14 +66,14 @@ async def main() -> None:
         print("\n[no filters → all services]")
         all_agents = await client.list_agents(ds)
         for a in all_agents:
-            print(f"    id={a['id']} name={a['name']!r} count={a.get('agentTeamCount', 0)}")
+            print(f"    id={a['id']} name={a['name']!r} status={a.get('status', 'online')}")
 
-        print("\n[filter: agentTeamCount=0]")
-        idle = await client.list_agents(ds, agentTeamCount=0)
+        print("\n[filter: status=online]")
+        idle = await client.list_agents(ds, status="online")
         print(f"  ids: {[a['id'] for a in idle]}")
 
-        print("\n[composite: name='planner' AND agentTeamCount=0]")
-        focused = await client.list_agents(ds, name="planner", agentTeamCount=0)
+        print("\n[composite: name='planner' AND status=online]")
+        focused = await client.list_agents(ds, name="planner", status="online")
         print(f"  ids: {[a['id'] for a in focused]}")
 
         print("\n[reserved filter key → ValueError (no HTTP)]")

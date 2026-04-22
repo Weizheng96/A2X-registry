@@ -3,7 +3,7 @@
 Each class wraps a specific backend response shape. ``from_dict`` factories
 tolerate unknown fields for forward compatibility; ``AgentDetail.raw`` keeps
 the complete untouched response so callers can read fields the SDK has not
-yet declared (e.g. ``agentTeamCount``).
+yet declared (e.g. ``status``, ``endpoint``).
 """
 
 from __future__ import annotations

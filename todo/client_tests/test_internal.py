@@ -34,14 +34,26 @@ class TestBodyBuilders:
         assert body["service_id"] == "sid"
         assert body["persistent"] is False
 
-    @pytest.mark.parametrize("count", [0, 1, 100])
-    def test_team_count_accepts_non_negative_int(self, count):
-        assert _i.build_team_count_body(count) == {"agentTeamCount": count}
+    @pytest.mark.parametrize("status", ["online", "busy", "offline"])
+    def test_status_body_accepts_valid_enum(self, status):
+        assert _i.build_status_body(status) == {"status": status}
 
-    @pytest.mark.parametrize("bad", [-1, True, False, 1.5, "3", None, []])
-    def test_team_count_rejects_non_int(self, bad):
-        with pytest.raises(ValueError):
-            _i.build_team_count_body(bad)
+    @pytest.mark.parametrize("bad", [
+        "ONLINE", "available", "", None, 0, 1, True, [], {}, "online ", " offline"
+    ])
+    def test_status_body_rejects_invalid(self, bad):
+        with pytest.raises(ValueError, match=r"status must be one of"):
+            _i.build_status_body(bad)
+
+
+class TestBlankAgentCard:
+    def test_blank_card_carries_status_online(self):
+        """Blank card must include status='online' (and not agentTeamCount)."""
+        card = _i.build_blank_agent_card("http://teammate:8080")
+        assert card["status"] == "online"
+        assert "agentTeamCount" not in card
+        assert card["description"] == _i.BLANK_DESCRIPTION_SENTINEL
+        assert card["endpoint"] == "http://teammate:8080"
 
 
 class TestUrlHelpers:

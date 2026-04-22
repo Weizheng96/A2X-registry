@@ -105,7 +105,7 @@ def test_update_without_ownership_fails_without_http(tmp_path):
     client.close()
 
 
-@pytest.mark.parametrize("op", ["update", "set_count", "deregister"])
+@pytest.mark.parametrize("op", ["update", "set_status", "deregister"])
 def test_404_clears_ownership(tmp_path, op):
     """D3 regression: 404 on any mutation auto-cleans local _owned."""
     def handler(req):
@@ -116,8 +116,8 @@ def test_404_clears_ownership(tmp_path, op):
     with pytest.raises(NotFoundError):
         if op == "update":
             client.update_agent("ds", "sid", {"description": "x"})
-        elif op == "set_count":
-            client.set_team_count("ds", "sid", 0)
+        elif op == "set_status":
+            client.set_status("ds", "sid", "online")
         else:
             client.deregister_agent("ds", "sid")
     assert not client._owned.contains("ds", "sid")
@@ -150,31 +150,31 @@ def test_delete_dataset_400_still_clears_ownership(tmp_path):
     client.close()
 
 
-# ── set_team_count ──────────────────────────────────────────────────────────
+# ── set_status ──────────────────────────────────────────────────────────────
 
-def test_set_team_count_sends_correct_field(tmp_path):
+def test_set_status_sends_correct_field(tmp_path):
     def handler(req):
         import json as _json
-        assert _json.loads(req.content) == {"agentTeamCount": 7}
+        assert _json.loads(req.content) == {"status": "busy"}
         return httpx.Response(200, json={
             "service_id": "sid", "dataset": "ds", "status": "updated",
-            "changed_fields": ["agentTeamCount"], "taxonomy_affected": False,
+            "changed_fields": ["status"], "taxonomy_affected": False,
         })
     client, _ = _make_client(handler, tmp_path)
     client._owned.add("ds", "sid")
-    client.set_team_count("ds", "sid", 7)
+    client.set_status("ds", "sid", "busy")
     client.close()
 
 
-def test_set_team_count_rejects_negative_before_http(tmp_path):
-    """D10: ValueError fires locally, no HTTP call issued."""
+def test_set_status_rejects_invalid_enum_before_http(tmp_path):
+    """D10: ValueError fires locally for invalid status, no HTTP call issued."""
     def handler(req):
         pytest.fail("HTTP should not be called")
         raise AssertionError
     client, reqs = _make_client(handler, tmp_path)
     client._owned.add("ds", "sid")
-    with pytest.raises(ValueError):
-        client.set_team_count("ds", "sid", -1)
+    with pytest.raises(ValueError, match=r"status must be one of"):
+        client.set_status("ds", "sid", "invalid_status")
     assert reqs == []
     client.close()
 
@@ -208,12 +208,12 @@ def test_get_agent_parses_metadata_and_raw(tmp_path):
     def handler(req):
         return httpx.Response(200, json={
             "id": "sid", "type": "a2a", "name": "N", "description": "D",
-            "metadata": {"protocolVersion": "0.0", "name": "N", "agentTeamCount": 3},
+            "metadata": {"protocolVersion": "0.0", "name": "N", "status": "busy"},
         })
     client, _ = _make_client(handler, tmp_path)
     detail = client.get_agent("ds", "sid")
     assert detail.id == "sid"
-    assert detail.metadata["agentTeamCount"] == 3
+    assert detail.metadata["status"] == "busy"
     # raw preserves entire response for fields not in the dataclass
     assert detail.raw["type"] == "a2a"
     client.close()
@@ -348,7 +348,7 @@ def test_register_agent_full_card_passes_through_unchanged(tmp_path):
         "provider": {"organization": "O", "url": "U"},
         "capabilities": {"streaming": True},
         "defaultInputModes": ["text/plain"],
-        "agentTeamCount": 0,
+        "status": "online",
         "custom_x": 42,
     }
     captured = {}
@@ -473,36 +473,37 @@ def test_update_agent_400_does_not_clear_ownership(tmp_path):
     client.close()
 
 
-# ── set_team_count edge cases ────────────────────────────────────────────────
+# ── set_status edge cases ────────────────────────────────────────────────────
 
-def test_set_team_count_zero_is_valid(tmp_path):
-    """count=0 must not be treated as falsy / dropped."""
+@pytest.mark.parametrize("status", ["online", "busy", "offline"])
+def test_set_status_each_valid_value(tmp_path, status):
+    """Each valid enum value passes through to the backend."""
     def handler(req):
         import json as _json
-        assert _json.loads(req.content) == {"agentTeamCount": 0}
+        assert _json.loads(req.content) == {"status": status}
         return httpx.Response(200, json={
             "service_id": "sid", "dataset": "ds", "status": "updated",
-            "changed_fields": ["agentTeamCount"], "taxonomy_affected": False,
+            "changed_fields": ["status"], "taxonomy_affected": False,
         })
     client, _ = _make_client(handler, tmp_path)
     client._owned.add("ds", "sid")
-    client.set_team_count("ds", "sid", 0)
+    client.set_status("ds", "sid", status)
     client.close()
 
 
-@pytest.mark.parametrize("bad", [1.5, "3", None, True, False])
-def test_set_team_count_rejects_non_int(tmp_path, bad):
+@pytest.mark.parametrize("bad", ["ONLINE", "available", "", None, 0, True, " online "])
+def test_set_status_rejects_invalid(tmp_path, bad):
     def handler(req):
-        pytest.fail("HTTP should not be called on invalid count")
+        pytest.fail("HTTP should not be called on invalid status")
     client, reqs = _make_client(handler, tmp_path)
     client._owned.add("ds", "sid")
     with pytest.raises(ValueError):
-        client.set_team_count("ds", "sid", bad)
+        client.set_status("ds", "sid", bad)
     assert reqs == []
     client.close()
 
 
-def test_set_team_count_field_name_fixed(tmp_path):
+def test_set_status_field_name_fixed(tmp_path):
     """Field name is SDK-owned, callers cannot influence it."""
     captured = {}
 
@@ -516,9 +517,9 @@ def test_set_team_count_field_name_fixed(tmp_path):
 
     client, _ = _make_client(handler, tmp_path)
     client._owned.add("ds", "sid")
-    client.set_team_count("ds", "sid", 5)
+    client.set_status("ds", "sid", "busy")
     # exactly one top-level key; name fixed
-    assert list(captured["body"].keys()) == ["agentTeamCount"]
+    assert list(captured["body"].keys()) == ["status"]
     client.close()
 
 
@@ -554,11 +555,11 @@ def test_list_agents_with_filter_sends_query_params(tmp_path):
         return httpx.Response(200, json=[])
 
     client, _ = _make_client(handler, tmp_path)
-    client.list_agents("ds", description="__BLANK__", agentTeamCount=0)
+    client.list_agents("ds", description="__BLANK__", priority=0)
     assert captured["params"]["mode"] == "filter"
     assert captured["params"]["description"] == "__BLANK__"
     # Non-string values are coerced to strings (HTTP query params)
-    assert captured["params"]["agentTeamCount"] == "0"
+    assert captured["params"]["priority"] == "0"
     client.close()
 
 
@@ -568,7 +569,7 @@ def test_list_agents_flat_shape_merges_metadata(tmp_path):
         return httpx.Response(200, json=[
             {"id": "sid", "type": "a2a", "name": "N", "description": "build_desc.",
              "metadata": {"name": "N", "description": "raw_desc",
-                          "endpoint": "http://e", "agentTeamCount": 3}},
+                          "endpoint": "http://e", "status": "busy"}},
         ])
     client, _ = _make_client(handler, tmp_path)
     agents = client.list_agents("ds")
@@ -580,7 +581,7 @@ def test_list_agents_flat_shape_merges_metadata(tmp_path):
     assert a["description"] == "raw_desc"
     # card fields surfaced at top level
     assert a["endpoint"] == "http://e"
-    assert a["agentTeamCount"] == 3
+    assert a["status"] == "busy"
     # no nested metadata
     assert "metadata" not in a
     client.close()

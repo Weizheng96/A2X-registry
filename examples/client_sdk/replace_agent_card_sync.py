@@ -61,7 +61,7 @@ def main() -> None:
         team_card = {
             "name": "Worker", "description": "已加入团队",
             "endpoint": "http://teammate:8080",
-            "agentTeamCount": 1,
+            "status": "busy",
             "skills": [{"name": "exec", "description": "执行子任务"}],
         }
         resp = client.replace_agent_card(ds, sid, team_card)
@@ -71,7 +71,7 @@ def main() -> None:
         print("\n[endpoint omitted → auto-fill from L1 cache, no extra GET]")
         resp = client.replace_agent_card(ds, sid, {
             "name": "Worker v2", "description": "更新版",
-            "agentTeamCount": 2,  # no endpoint key here
+            "status": "busy",  # no endpoint key here
         })
         print(f"  status: {resp.status}")
         # Verify backend stored endpoint correctly

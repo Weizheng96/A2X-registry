@@ -92,12 +92,12 @@ class TestAgentDetail:
             "id": "s", "type": "a2a", "name": "N", "description": "D",
             "metadata": {
                 "protocolVersion": "0.0", "name": "N", "description": "D",
-                "agentTeamCount": 3,
+                "status": "busy",
                 "provider": {"organization": "O"},
             },
         }
         d = AgentDetail.from_dict(data)
-        assert d.metadata["agentTeamCount"] == 3
+        assert d.metadata["status"] == "busy"
         assert d.metadata["provider"]["organization"] == "O"
 
     def test_raw_preserves_complete_original(self):
