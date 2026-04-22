@@ -23,14 +23,16 @@
 
 ### 2.1 经典流程代码
 
-团队组队是 **两个独立进程协作** 的流程：teammate 把自己挂进空闲池，teamleader 发现并发起 P2P 协商，双方完成组队后各自更新自身状态。下面按角色分两份示例展示。
+团队组队是 **两个独立进程协作** 的流程：teammate 把自己挂进空闲池，teamleader 发现并发起 P2P 协商，双方完成组队后各自更新自身状态，最后 teammate 退出时自行注销。下面按角色分两份示例展示。
 
 #### 一次性 setup（管理员，只做一次）
 
 ```python
 from src.client import A2XClient
-with A2XClient(base_url="http://127.0.0.1:8000") as admin:
-    admin.create_dataset("team_pool")
+
+admin = A2XClient(base_url="http://127.0.0.1:8000")
+admin.create_dataset("team_pool")
+admin.close()
 ```
 
 #### Teammate 视角（`teammate_node.py`）
@@ -40,33 +42,36 @@ from pathlib import Path
 from src.client import A2XClient
 
 # 每个 teammate 进程用独立的 ownership 文件，避免互相干扰
-with A2XClient(
+client = A2XClient(
     base_url="http://127.0.0.1:8000",
     ownership_file=Path("/var/run/a2x_teammate1.json"),
-) as client:
-    # ① 注册为空白 agent，进入空闲池
-    resp = client.register_blank_agent(
-        "team_pool", endpoint="http://teammate_1:8080"
-    )
-    my_sid = resp.service_id
+)
 
-    # ── 业务层：开 HTTP server / A2A endpoint，等待 teamleader 的 P2P 组队请求 ──
-    p2p_wait_for_team_invitation()   # 业务代码，不经注册中心
+# 注册为空白 agent，进入空闲池
+resp = client.register_blank_agent("team_pool", endpoint="http://teammate_1:8080")
+my_sid = resp.service_id
 
-    # ④ 协商接受后：覆盖自己的 agent card 反映新身份 + 状态翻成 busy
-    #    （endpoint 不传则 SDK 自动从 L1 cache 保留上次的值）
-    client.replace_agent_card("team_pool", my_sid, {
-        "name": "Task Planner (team-1)",
-        "description": "负责拆解任务",
-        "status": "busy",
-        "skills": [{"name": "plan", "description": "子任务拆解"}],
-    })
+# 等待 teamleader 通过 P2P 协议发来组队邀请，业务层代码，不经注册中心
+p2p_wait_for_team_invitation()
 
-    # ── 业务层：执行团队任务，等待 teamleader 的 P2P 解散请求 ──
-    p2p_wait_for_disband()
+# 接受邀请后，把自己的 card 覆盖成团队角色，状态改为 busy
+# endpoint 不传时 SDK 会从本地缓存自动补上
+client.replace_agent_card("team_pool", my_sid, {
+    "name": "Task Planner (team-1)",
+    "description": "负责拆解任务",
+    "status": "busy",
+    "skills": [{"name": "plan", "description": "子任务拆解"}],
+})
 
-    # ⑥ 解散后：恢复成空白 agent，重新进入空闲池
-    client.restore_to_blank("team_pool", my_sid)
+# 执行团队任务，等待 teamleader 通知解散，业务层代码，不经注册中心
+p2p_wait_for_disband()
+
+# 解散后恢复为空白 agent，重新进入空闲池
+client.restore_to_blank("team_pool", my_sid)
+
+# 进程退出前注销自己，把 sid 从注册中心移除
+client.deregister_agent("team_pool", my_sid)
+client.close()
 ```
 
 #### Teamleader 视角（`teamleader_node.py`）
@@ -74,41 +79,43 @@ with A2XClient(
 ```python
 from src.client import A2XClient
 
-# leader 不注册任何 agent，纯发现+协调；ownership_file=False 跳过持久化
-with A2XClient(
-    base_url="http://127.0.0.1:8000", ownership_file=False
-) as client:
-    # ② 预订 1 个 idle blank agent，加 30s lease 锁定（其他 leader 看不到这个 sid）
-    with client.reserve_blank_agents("team_pool", n=1, ttl_seconds=30) as r:
-        if not r.agents:
-            return                          # 池里暂时没人，稍后重试
-        teammate = r.agents[0]              # {id, type, name, description, endpoint, ...} 扁平 dict
-        teammate_endpoint = teammate["endpoint"]
+# leader 不注册任何 agent，纯发现 + 协调，ownership_file=False 跳过持久化
+client = A2XClient(base_url="http://127.0.0.1:8000", ownership_file=False)
 
-        # ③ 向 teammate 发起 P2P 组队请求
-        if not p2p_send_team_invitation(teammate_endpoint):
-            return                          # with 退出会自动释放 lease
+# 预订 1 个空闲 blank agent，30 秒内其他 leader 看不到这个 sid
+reservation = client.reserve_blank_agents("team_pool", n=1, ttl_seconds=30)
+if not reservation.agents:
+    client.close()
+    return  # 池里暂时没人，稍后重试
 
-        # ── 业务层：与 teammate 协作完成任务 ──
-        # （teammate 在 ④ 已经调 replace_agent_card，自动钩子顺手把 lease 释放了；
-        #   此时 with 退出再调 release 是 idempotent 的 no-op）
-        do_collaborative_work(teammate_endpoint)
+teammate = reservation.agents[0]  # 扁平 dict：id / type / name / description / endpoint / ...
+teammate_endpoint = teammate["endpoint"]
 
-        # ⑤ 任务结束，向 teammate 发起 P2P 解散
-        p2p_send_disband_request(teammate_endpoint)
-        # teammate 自己会调 restore_to_blank 回池
+# 向 teammate 发起 P2P 组队请求，失败则立刻释放 lease 让位给其他 leader
+if not p2p_send_team_invitation(teammate_endpoint):
+    client.release_reservation(reservation)
+    client.close()
+    return
+
+# 与 teammate 协作完成任务
+# teammate 在接受邀请时已经调过 replace_agent_card，自动钩子把 lease 释放了
+do_collaborative_work(teammate_endpoint)
+
+# 任务结束，通知 teammate 解散，teammate 会自己调 restore_to_blank 回池
+p2p_send_disband_request(teammate_endpoint)
+client.close()
 ```
 
 **关键边界**：
 
-- ④ 和 ⑥ 必须由 **teammate 自己** 调用 —— SDK 的 ownership 检查只允许"谁注册的谁修改"。leader 没有 ownership，连 `replace_agent_card` 都会本地 fail-fast 抛 `NotOwnedError`。
-- ③ 和 ⑤ 完全不经注册中心 —— 是 teammate 和 leader 之间的 A2A 协议直连。注册中心只负责"发现 + 状态广告 + lease 锁"。
-- **lease 自动管理**：`with reserve_blank_agents(...) as r` 是首选模式 —— 谈判失败 / 抛异常时自动释放，`replace_agent_card` 成功时通过自动钩子（`release_my_lease`）提前释放，with 退出再调一次也是 no-op。
-- 如果 leader 想换更轻量的"不锁定，纯查询"模式（适合只浏览不预订的场景），仍可用 `client.list_idle_blank_agents("team_pool")` —— 但这有双重分配风险，新代码默认用 `reserve_blank_agents`。
+- `replace_agent_card` 和 `restore_to_blank` 必须由 teammate 自己调用。SDK 的 ownership 检查只允许谁注册的谁修改，leader 没有 ownership，调用会本地 fail-fast 抛 `NotOwnedError`。
+- P2P 组队邀请和解散通知都不经注册中心，是 teammate 和 leader 之间的 A2A 协议直连。注册中心只负责发现、状态广告和 lease 锁。
+- Lease 释放时机：teammate 的 `replace_agent_card` 自动钩子会释放 lease，leader 端不必再显式调 `release_reservation`。失败路径下 leader 应主动调 `release_reservation` 让位，否则要等 30 秒 TTL 过期。
+- 不需要 lease 锁的轻量场景仍可用 `client.list_idle_blank_agents("team_pool")`，但有双重分配风险，新代码建议默认用 `reserve_blank_agents`。
 
 #### 异步版
 
-`AsyncA2XClient` 一对一镜像 `A2XClient`，方法名/参数/返回类型完全一致；只需把 `with` 换成 `async with`，每个方法调用前加 `await`。其他逻辑无变化。
+`AsyncA2XClient` 一对一镜像 `A2XClient`，方法名 / 参数 / 返回类型完全一致。改动只有两处：每个方法调用前加 `await`，关闭方法 `client.close()` 改成 `await client.aclose()`。其他逻辑无变化。
 
 ### 2.2 全部 method 解释
 
