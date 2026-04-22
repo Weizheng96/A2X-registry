@@ -973,14 +973,15 @@ class RegistryService:
     def create_dataset(
         self,
         name: str,
-        embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_model: Optional[str] = None,
         formats: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """Create a new empty dataset directory with vector + register configs.
 
         Args:
             name: Dataset folder name under ``database/``.
-            embedding_model: Vector embedding model key.
+            embedding_model: Vector embedding model key. ``None`` resolves
+                to ``vector.utils.embedding.DEFAULT_EMBEDDING_MODEL``.
             formats: Per-type min_version map. Defaults to all three types
                 at ``v0.0``. Unknown types / versions are silently dropped.
 
@@ -992,6 +993,9 @@ class RegistryService:
         ds_dir = self._database_dir / name
         if ds_dir.exists():
             raise ValueError(f"Dataset '{name}' already exists")
+        if embedding_model is None:
+            from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL
+            embedding_model = DEFAULT_EMBEDDING_MODEL
         # Validate formats first so we fail fast before touching disk.
         normalized = self._normalize_or_default_formats(formats)
         self._init_dataset_files(name, embedding_model, normalized)

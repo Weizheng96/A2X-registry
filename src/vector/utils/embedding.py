@@ -59,7 +59,7 @@ class EmbeddingModel:
         (2, 384)
     """
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL):
         self.model_name = model_name
 
         # Load from local cache path directly to avoid any HF Hub network requests

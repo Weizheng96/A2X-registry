@@ -99,7 +99,7 @@ class A2XClient:
     def create_dataset(
         self,
         name: str,
-        embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_model: str = _i.DEFAULT_EMBEDDING_MODEL,
         formats: Any = _i.UNSET,
     ) -> DatasetCreateResponse:
         body = _i.build_create_dataset_body(name, embedding_model, formats)

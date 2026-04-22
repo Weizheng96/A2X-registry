@@ -463,8 +463,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # create-dataset
     p = sub.add_parser("create-dataset", help="Create a new dataset")
     p.add_argument("name", help="Dataset name")
-    p.add_argument("--embedding-model", default="all-MiniLM-L6-v2",
-                   help="Embedding model (default: all-MiniLM-L6-v2)")
+    from src.vector.utils.embedding import DEFAULT_EMBEDDING_MODEL
+    p.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL,
+                   help=f"Embedding model (default: {DEFAULT_EMBEDDING_MODEL})")
     p.add_argument("--formats", default=None,
                    help="Comma-separated allowed formats. "
                         "Examples: 'generic,a2a,skill' (all v0.0) or "

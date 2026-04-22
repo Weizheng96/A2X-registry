@@ -81,7 +81,9 @@ async def list_datasets():
 
 class CreateDatasetRequest(BaseModel):
     name: str
-    embedding_model: str = "all-MiniLM-L6-v2"
+    # None resolves to vector.utils.embedding.DEFAULT_EMBEDDING_MODEL on the
+    # service side — keeps the literal in one place.
+    embedding_model: Optional[str] = None
     # Optional {type: min_version} declaring which registration formats this
     # dataset will accept. Missing/None → all three types allowed from v0.0.
     formats: Optional[dict] = None
@@ -92,9 +94,12 @@ async def create_dataset(req: CreateDatasetRequest):
     """Create a new empty dataset directory with embedding + register-format config."""
     svc = get_registry_service()
     await _run(svc.create_dataset, req.name, req.embedding_model, req.formats)
+    # Echo back the *resolved* embedding model (None → default) by re-reading
+    # the persisted vector_config — single source of truth for what's on disk.
+    persisted = svc.get_vector_config(req.name)
     return {
         "dataset": req.name,
-        "embedding_model": req.embedding_model,
+        "embedding_model": persisted["embedding_model"],
         "formats": svc.get_register_config(req.name),
         "status": "created",
     }

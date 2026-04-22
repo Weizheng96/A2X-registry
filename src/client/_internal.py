@@ -23,6 +23,12 @@ UNSET: Final[Any] = object()
 DEFAULT_FORMATS: Final[dict[str, str]] = {"a2a": "v0.0"}
 """SDK default ``formats`` for Agent Team use cases."""
 
+DEFAULT_EMBEDDING_MODEL: Final[str] = "all-MiniLM-L6-v2"
+"""SDK default embedding model used by ``create_dataset``. Must stay in
+sync with the backend's ``vector.utils.embedding.DEFAULT_EMBEDDING_MODEL``
+— duplicated by design (the client package ships independently and
+cannot import from the rest of the project)."""
+
 DEFAULT_OWNERSHIP_FILE: Final[Path] = Path.home() / ".a2x_client" / "owned.json"
 
 STATUS_FIELD: Final[str] = "status"
