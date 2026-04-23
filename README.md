@@ -176,25 +176,7 @@ a2x-backend --port 8080        # 换端口
 a2x-backend --host 0.0.0.0     # 开放到局域网
 ```
 
-#### 方式三：Python 客户端 SDK
-
-通过 [a2x-registry-client](https://github.com/Weizheng96/A2X-registry-client) 以 Python 原生方式调用：
-
-```python
-from a2x_registry_client import A2XRegistryClient
-
-with A2XRegistryClient(base_url="http://127.0.0.1:8000") as client:
-    client.create_dataset("team_pool")
-    resp = client.register_agent("team_pool", {
-        "name": "Task Planner",
-        "description": "Decompose tasks into subtasks",
-    })
-    agents = client.list_agents("team_pool")
-```
-
-同步 `A2XRegistryClient` 与异步 `AsyncA2XRegistryClient` 双入口对称，支持 Agent Team 场景的预订锁、状态声明、所有权校验等细节。完整设计：[A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client)。
-
-#### 方式四：REST API
+#### 方式三：REST API
 
 直接通过 HTTP 调用 `a2x-backend` 暴露的接口。
 
@@ -300,6 +282,8 @@ curl -X POST http://localhost:8000/api/datasets/my_dataset/vector-config \
 | `paraphrase-multilingual-MiniLM-L12-v2` | 384 | 多语言 |
 
 > 完整 API 文档见 [docs/backend_api.md](docs/backend_api.md)，各模块内部接口见对应设计文档。
+
+> 同时我们为 Agent Team 场景提供特化的 Python 客户端 SDK：[A2X-registry-client](https://github.com/Weizheng96/A2X-registry-client)。
 
 ## 文档
 
