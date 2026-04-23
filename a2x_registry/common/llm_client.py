@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from requests.adapters import HTTPAdapter
 
+from a2x_registry.common.errors import LLMNotConfiguredError
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,12 +73,19 @@ class LLMClient:
         self.max_retries = max_retries
         self.timeout = timeout
 
-        # Load config and parse providers
-        config = self._load_config(config_path)
+        # Load config and parse providers, converting any failure into a
+        # readable LLMNotConfiguredError so the CLI/HTTP layer can show it raw.
+        config = self._load_config_or_raise(config_path)
         self.providers = self._parse_providers(config)
 
         if not self.providers:
-            raise ValueError("No valid provider found in config file")
+            raise LLMNotConfiguredError(
+                f"A2X build / search is unavailable: no valid LLM provider in "
+                f"{config_path!r}.\n\n"
+                f"Each entry under \"providers\" needs a non-empty \"api_keys\" list. "
+                f"Fill in a real API key and retry. See llm_apikey.example.json at "
+                f"https://github.com/Weizheng96/A2X-registry for a minimal template."
+            )
 
         # Expose primary provider's model for backward compatibility
         self.model = self.providers[0].model
@@ -110,6 +119,48 @@ class LLMClient:
             # Handle trailing commas in JSON
             content = content.replace(',\n}', '\n}').replace(',}', '}')
             return json.loads(content)
+
+    def _load_config_or_raise(self, config_path: str) -> Dict[str, Any]:
+        """Load config and translate failures into :class:`LLMNotConfiguredError`.
+
+        Wraps :meth:`_load_config` so callers see an actionable message instead
+        of a bare ``FileNotFoundError`` / ``JSONDecodeError`` traceback.
+        """
+        try:
+            return self._load_config(config_path)
+        except FileNotFoundError as exc:
+            raise LLMNotConfiguredError(
+                f"A2X build / search is unavailable: LLM API key file not found "
+                f"at {config_path!r}.\n\n"
+                f"To configure:\n"
+                f"  1. Create {config_path!r} with your provider list, or set the\n"
+                f"     A2X_REGISTRY_HOME environment variable to a directory that\n"
+                f"     contains llm_apikey.json.\n"
+                f"  2. Minimal example (OpenAI-compatible):\n"
+                f'         {{\n'
+                f'           "providers": [\n'
+                f'             {{\n'
+                f'               "name": "deepseek",\n'
+                f'               "base_url": "https://api.deepseek.com/chat/completions",\n'
+                f'               "model": "deepseek-chat",\n'
+                f'               "api_keys": ["sk-your-key"]\n'
+                f'             }}\n'
+                f'           ]\n'
+                f'         }}\n'
+                f"  3. Full template: llm_apikey.example.json at\n"
+                f"     https://github.com/Weizheng96/A2X-registry"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise LLMNotConfiguredError(
+                f"A2X build / search is unavailable: the LLM config at "
+                f"{config_path!r} is not valid JSON.\n"
+                f"Parse error at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+            ) from exc
+        except OSError as exc:
+            raise LLMNotConfiguredError(
+                f"A2X build / search is unavailable: cannot read the LLM config "
+                f"at {config_path!r}: {type(exc).__name__}: {exc}"
+            ) from exc
 
     @staticmethod
     def _parse_providers(config: Dict[str, Any]) -> List[ProviderConfig]:

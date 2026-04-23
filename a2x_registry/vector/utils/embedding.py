@@ -6,6 +6,8 @@ from typing import Dict, List, Union
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+from a2x_registry.common.errors import VectorSearchUnavailableError
+
 # ── Supported embedding models ────────────────────────────────────────────────
 
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
@@ -62,9 +64,43 @@ class EmbeddingModel:
     def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL):
         self.model_name = model_name
 
-        # Load from local cache path directly to avoid any HF Hub network requests
+        # Prefer local cache to avoid network; fall back to remote download if not cached
         local_path = _find_cached_model(model_name)
-        self.model = SentenceTransformer(local_path)
+        cached_locally = local_path != model_name
+        try:
+            self.model = SentenceTransformer(local_path)
+        except Exception as exc:
+            hf_home = Path(
+                os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")
+            )
+            if cached_locally:
+                # Cache existed but load still failed — corrupted or permissions
+                hint = (
+                    f"A cached copy was found at {local_path!r} but failed to load. "
+                    f"The cache may be corrupted — delete {hf_home}/hub/ and retry "
+                    f"on a connected host, or re-copy the cache from a working host."
+                )
+            else:
+                hint = (
+                    f"The model is not cached locally, so SentenceTransformer attempted "
+                    f"to download it from HuggingFace Hub. This typically fails when:\n"
+                    f"  1. HuggingFace is blocked by regional network restrictions.\n"
+                    f"     Fix: set HF_ENDPOINT to a reachable mirror before the first "
+                    f"call, e.g.\n"
+                    f"         export HF_ENDPOINT=https://hf-mirror.com   # Linux/macOS\n"
+                    f"         $env:HF_ENDPOINT='https://hf-mirror.com'   # PowerShell\n"
+                    f"     then re-run the command. The model will be cached under\n"
+                    f"         {hf_home}/hub/\n"
+                    f"     so subsequent runs work offline.\n"
+                    f"  2. This host has no internet. Download {model_name!r} on a\n"
+                    f"     connected machine and copy the ~/.cache/huggingface/ folder "
+                    f"over."
+                )
+            raise VectorSearchUnavailableError(
+                f"Vector search is unavailable: could not load embedding model "
+                f"{model_name!r}.\n\n{hint}\n\n"
+                f"Original error: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def encode(self, texts: Union[str, List[str]], show_progress: bool = True) -> np.ndarray:
         """将文本编码为归一化向量
