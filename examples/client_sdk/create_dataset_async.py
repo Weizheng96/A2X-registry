@@ -1,4 +1,4 @@
-"""Asynchronous examples for ``AsyncA2XClient.create_dataset``.
+"""Asynchronous examples for ``AsyncA2XRegistryClient.create_dataset``.
 
 This file mirrors the sync example and covers:
 
@@ -31,12 +31,12 @@ if str(project_root) not in sys.path:
 from a2x_client import (
     A2XConnectionError,
     A2XHTTPError,
-    AsyncA2XClient,
+    AsyncA2XRegistryClient,
     ValidationError,
 )
 
 
-async def cleanup_dataset(client: AsyncA2XClient, dataset: str) -> None:
+async def cleanup_dataset(client: AsyncA2XRegistryClient, dataset: str) -> None:
     try:
         await client.delete_dataset(dataset)
         print(f"  cleaned old dataset: {dataset}")
@@ -57,7 +57,7 @@ async def main() -> None:
 
     print(f"Using backend: {base_url}")
 
-    async with AsyncA2XClient(base_url=base_url) as client:
+    async with AsyncA2XRegistryClient(base_url=base_url) as client:
         ds_default = "example_async_default"
         ds_none = "example_async_none"
         ds_embedding = "example_async_embedding"
@@ -114,7 +114,7 @@ async def main() -> None:
     # a proxy you may see an HTTP 502/504 wrapped as A2XHTTPError.
     print("\n[network / gateway failure]")
     try:
-        async with AsyncA2XClient(base_url="http://127.0.0.1:8999") as bad_client:
+        async with AsyncA2XRegistryClient(base_url="http://127.0.0.1:8999") as bad_client:
             await bad_client.create_dataset("example_async_unreachable")
     except A2XConnectionError as exc:
         print(f"  caught: {type(exc).__name__}")

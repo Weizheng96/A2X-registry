@@ -1,4 +1,4 @@
-"""Asynchronous examples for ``AsyncA2XClient.register_blank_agent``.
+"""Asynchronous examples for ``AsyncA2XRegistryClient.register_blank_agent``.
 
 Mirrors ``register_blank_agent_sync.py``.
 """
@@ -15,10 +15,10 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from a2x_client import AsyncA2XClient, A2XConnectionError, A2XHTTPError, ValidationError
+from a2x_client import AsyncA2XRegistryClient, A2XConnectionError, A2XHTTPError, ValidationError
 
 
-async def ensure_absent(client: AsyncA2XClient, dataset: str) -> None:
+async def ensure_absent(client: AsyncA2XRegistryClient, dataset: str) -> None:
     try:
         await client.delete_dataset(dataset)
     except ValidationError:
@@ -29,7 +29,7 @@ async def main() -> None:
     base_url = os.getenv("A2X_BASE_URL", "http://127.0.0.1:8000")
     ownership_file = Path(tempfile.gettempdir()) / "a2x_example_register_blank_async.json"
 
-    async with AsyncA2XClient(base_url=base_url, ownership_file=ownership_file) as client:
+    async with AsyncA2XRegistryClient(base_url=base_url, ownership_file=ownership_file) as client:
         ds = "example_register_blank_async"
         await ensure_absent(client, ds)
         await client.create_dataset(ds)
@@ -57,7 +57,7 @@ async def main() -> None:
 
     print("\n[network failure]")
     try:
-        async with AsyncA2XClient(base_url="http://127.0.0.1:8999",
+        async with AsyncA2XRegistryClient(base_url="http://127.0.0.1:8999",
                                   ownership_file=False, timeout=2.0) as bad_client:
             await bad_client.register_blank_agent("example_unreachable", endpoint="http://x")
     except A2XConnectionError as exc:

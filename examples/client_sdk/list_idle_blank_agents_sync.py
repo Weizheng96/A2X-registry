@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.list_idle_blank_agents``.
+"""Synchronous examples for ``A2XRegistryClient.list_idle_blank_agents``.
 
 This file demonstrates:
 
@@ -26,10 +26,10 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from a2x_client import A2XClient, A2XConnectionError, A2XHTTPError, ValidationError
+from a2x_client import A2XRegistryClient, A2XConnectionError, A2XHTTPError, ValidationError
 
 
-def ensure_absent(client: A2XClient, dataset: str) -> None:
+def ensure_absent(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
     except ValidationError:
@@ -40,7 +40,7 @@ def main() -> None:
     base_url = os.getenv("A2X_BASE_URL", "http://127.0.0.1:8000")
     ownership_file = Path(tempfile.gettempdir()) / "a2x_example_list_idle_sync.json"
 
-    with A2XClient(base_url=base_url, ownership_file=ownership_file) as client:
+    with A2XRegistryClient(base_url=base_url, ownership_file=ownership_file) as client:
         ds = "example_list_idle_sync"
         ensure_absent(client, ds)
         client.create_dataset(ds)
@@ -104,7 +104,7 @@ def main() -> None:
 
     print("\n[network failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999",
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999",
                        ownership_file=False, timeout=2.0) as bad_client:
             bad_client.list_idle_blank_agents("example_unreachable")
     except A2XConnectionError as exc:

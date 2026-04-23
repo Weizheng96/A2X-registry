@@ -1,4 +1,4 @@
-"""Asynchronous examples for ``AsyncA2XClient.replace_agent_card``.
+"""Asynchronous examples for ``AsyncA2XRegistryClient.replace_agent_card``.
 
 Mirrors ``replace_agent_card_sync.py``.
 """
@@ -16,17 +16,17 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from a2x_client import (
-    AsyncA2XClient,
+    AsyncA2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
     NotFoundError,
     NotOwnedError,
     ValidationError,
-    A2XClient,  # for the bypass-ownership second client
+    A2XRegistryClient,  # for the bypass-ownership second client
 )
 
 
-async def ensure_absent(client: AsyncA2XClient, dataset: str) -> None:
+async def ensure_absent(client: AsyncA2XRegistryClient, dataset: str) -> None:
     try:
         await client.delete_dataset(dataset)
     except ValidationError:
@@ -37,7 +37,7 @@ async def main() -> None:
     base_url = os.getenv("A2X_BASE_URL", "http://127.0.0.1:8000")
     ownership_file = Path(tempfile.gettempdir()) / "a2x_example_replace_card_async.json"
 
-    async with AsyncA2XClient(base_url=base_url, ownership_file=ownership_file) as client:
+    async with AsyncA2XRegistryClient(base_url=base_url, ownership_file=ownership_file) as client:
         ds = "example_replace_agent_card_async"
         await ensure_absent(client, ds)
         await client.create_dataset(ds)
@@ -75,7 +75,7 @@ async def main() -> None:
 
         print("\n[backend deleted → NotFoundError + cleanup]")
         # Use a sync sibling client to bypass ownership and delete the sid
-        with A2XClient(base_url=base_url, ownership_file=False) as other:
+        with A2XRegistryClient(base_url=base_url, ownership_file=False) as other:
             other._owned.add(ds, sid)
             other.deregister_agent(ds, sid)
         try:
@@ -90,7 +90,7 @@ async def main() -> None:
 
     print("\n[network failure]")
     try:
-        async with AsyncA2XClient(base_url="http://127.0.0.1:8999",
+        async with AsyncA2XRegistryClient(base_url="http://127.0.0.1:8999",
                                   ownership_file=False, timeout=2.0) as bad_client:
             bad_client._owned.add("ds", "sid")
             await bad_client.replace_agent_card("ds", "sid",

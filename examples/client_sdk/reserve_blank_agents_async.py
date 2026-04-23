@@ -1,6 +1,6 @@
 """Async variant of ``reserve_blank_agents_sync.py``.
 
-Same flow, exercised through ``AsyncA2XClient`` to verify the async path
+Same flow, exercised through ``AsyncA2XRegistryClient`` to verify the async path
 produces identical semantics. See the sync example for narrative comments.
 
 Run:
@@ -19,10 +19,10 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from a2x_client import AsyncA2XClient, ValidationError
+from a2x_client import AsyncA2XRegistryClient, ValidationError
 
 
-async def ensure_absent(client: AsyncA2XClient, dataset: str) -> None:
+async def ensure_absent(client: AsyncA2XRegistryClient, dataset: str) -> None:
     try:
         await client.delete_dataset(dataset)
     except ValidationError:
@@ -37,9 +37,9 @@ async def main() -> None:
     leader_owned = Path(tempfile.gettempdir()) / "a2x_example_reserve_leader_async.json"
     print(f"Using backend: {base_url}")
 
-    teammate = AsyncA2XClient(base_url=base_url, ownership_file=teammate_owned)
-    leader_1 = AsyncA2XClient(base_url=base_url, ownership_file=leader_owned)
-    leader_2 = AsyncA2XClient(base_url=base_url, ownership_file=False)
+    teammate = AsyncA2XRegistryClient(base_url=base_url, ownership_file=teammate_owned)
+    leader_1 = AsyncA2XRegistryClient(base_url=base_url, ownership_file=leader_owned)
+    leader_2 = AsyncA2XRegistryClient(base_url=base_url, ownership_file=False)
 
     try:
         await ensure_absent(teammate, ds)

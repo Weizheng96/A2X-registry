@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.create_dataset``.
+"""Synchronous examples for ``A2XRegistryClient.create_dataset``.
 
 This file demonstrates the create-dataset sequence described in
 ``docs/client_design.md``:
@@ -28,10 +28,10 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from a2x_client import A2XClient, A2XConnectionError, A2XHTTPError, ValidationError
+from a2x_client import A2XRegistryClient, A2XConnectionError, A2XHTTPError, ValidationError
 
 
-def cleanup_dataset(client: A2XClient, dataset: str) -> None:
+def cleanup_dataset(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
         print(f"  cleaned old dataset: {dataset}")
@@ -52,7 +52,7 @@ def main() -> None:
 
     print(f"Using backend: {base_url}")
 
-    with A2XClient(base_url=base_url) as client:
+    with A2XRegistryClient(base_url=base_url) as client:
         ds_default = "example_sync_default"
         ds_none = "example_sync_none"
         ds_embedding = "example_sync_embedding"
@@ -109,7 +109,7 @@ def main() -> None:
     # a proxy you may see an HTTP 502/504 wrapped as A2XHTTPError.
     print("\n[network / gateway failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999") as bad_client:
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999") as bad_client:
             bad_client.create_dataset("example_sync_unreachable")
     except A2XConnectionError as exc:
         print(f"  caught: {type(exc).__name__}")

@@ -1,4 +1,4 @@
-"""Asynchronous examples for ``AsyncA2XClient.list_agents``.
+"""Asynchronous examples for ``AsyncA2XRegistryClient.list_agents``.
 
 Mirrors ``list_agents_sync.py``; same coverage, async style.
 
@@ -18,7 +18,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from a2x_client import (
-    AsyncA2XClient,
+    AsyncA2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
     ValidationError,
@@ -29,7 +29,7 @@ def make_card(name: str, description: str, **extra) -> dict:
     return {"protocolVersion": "0.0", "name": name, "description": description, **extra}
 
 
-async def ensure_absent(client: AsyncA2XClient, dataset: str) -> None:
+async def ensure_absent(client: AsyncA2XRegistryClient, dataset: str) -> None:
     try:
         await client.delete_dataset(dataset)
     except ValidationError:
@@ -40,7 +40,7 @@ async def main() -> None:
     base_url = os.getenv("A2X_BASE_URL", "http://127.0.0.1:8000")
     print(f"Using backend: {base_url}")
 
-    async with AsyncA2XClient(base_url=base_url, ownership_file=False) as client:
+    async with AsyncA2XRegistryClient(base_url=base_url, ownership_file=False) as client:
         ds = "example_list_agents_async"
         await ensure_absent(client, ds)
         await client.create_dataset(ds)
@@ -95,7 +95,7 @@ async def main() -> None:
 
     print("\n[network / gateway failure]")
     try:
-        async with AsyncA2XClient(base_url="http://127.0.0.1:8999",
+        async with AsyncA2XRegistryClient(base_url="http://127.0.0.1:8999",
                                   ownership_file=False, timeout=2.0) as bad_client:
             await bad_client.list_agents("example_unreachable")
     except A2XConnectionError as exc:

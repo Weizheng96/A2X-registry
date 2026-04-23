@@ -1,4 +1,4 @@
-"""Asynchronous examples for ``AsyncA2XClient.delete_dataset``.
+"""Asynchronous examples for ``AsyncA2XRegistryClient.delete_dataset``.
 
 This file demonstrates:
 
@@ -27,12 +27,12 @@ if str(project_root) not in sys.path:
 from a2x_client import (
     A2XConnectionError,
     A2XHTTPError,
-    AsyncA2XClient,
+    AsyncA2XRegistryClient,
     ValidationError,
 )
 
 
-async def ensure_absent(client: AsyncA2XClient, dataset: str) -> None:
+async def ensure_absent(client: AsyncA2XRegistryClient, dataset: str) -> None:
     try:
         await client.delete_dataset(dataset)
         print(f"  removed leftover dataset: {dataset}")
@@ -51,7 +51,7 @@ async def main() -> None:
 
     print(f"Using backend: {base_url}")
 
-    async with AsyncA2XClient(base_url=base_url) as client:
+    async with AsyncA2XRegistryClient(base_url=base_url) as client:
         ds_success = "example_delete_async_success"
         ds_missing = "example_delete_async_missing"
 
@@ -75,7 +75,7 @@ async def main() -> None:
     # 3) Network / gateway failure.
     print("\n[network / gateway failure]")
     try:
-        async with AsyncA2XClient(base_url="http://127.0.0.1:8999") as bad_client:
+        async with AsyncA2XRegistryClient(base_url="http://127.0.0.1:8999") as bad_client:
             await bad_client.delete_dataset("example_delete_async_unreachable")
     except A2XConnectionError as exc:
         print(f"  caught: {type(exc).__name__}")

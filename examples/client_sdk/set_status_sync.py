@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.set_status``.
+"""Synchronous examples for ``A2XRegistryClient.set_status``.
 
 This file demonstrates:
 
@@ -27,7 +27,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from a2x_client import (
-    A2XClient,
+    A2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
     NotFoundError,
@@ -40,7 +40,7 @@ def make_card(name: str, description: str) -> dict:
     return {"protocolVersion": "0.0", "name": name, "description": description}
 
 
-def ensure_absent(client: A2XClient, dataset: str) -> None:
+def ensure_absent(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
     except ValidationError:
@@ -52,7 +52,7 @@ def main() -> None:
     ownership_file = Path(tempfile.gettempdir()) / "a2x_example_set_status_sync.json"
     print(f"Using backend: {base_url}")
 
-    with A2XClient(base_url=base_url, ownership_file=ownership_file) as client:
+    with A2XRegistryClient(base_url=base_url, ownership_file=ownership_file) as client:
         ds = "example_set_status_sync"
         ensure_absent(client, ds)
         client.create_dataset(ds)
@@ -94,7 +94,7 @@ def main() -> None:
 
     # 4) NotFoundError + auto-cleanup
     print("\n[backend deleted under us → NotFoundError + ownership cleanup]")
-    with A2XClient(base_url=base_url, ownership_file=False) as client2:
+    with A2XRegistryClient(base_url=base_url, ownership_file=False) as client2:
         client2._owned.add("nonexistent_ds", "nonexistent_sid")
         try:
             client2.set_status("nonexistent_ds", "nonexistent_sid", "busy")
@@ -106,7 +106,7 @@ def main() -> None:
     # 5) Network failure
     print("\n[network / gateway failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999",
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999",
                        ownership_file=False, timeout=2.0) as bad_client:
             bad_client._owned.add("ds", "sid")
             bad_client.set_status("ds", "sid", "online")

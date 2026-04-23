@@ -1,4 +1,4 @@
-"""Asynchronous examples for ``AsyncA2XClient.register_agent``.
+"""Asynchronous examples for ``AsyncA2XRegistryClient.register_agent``.
 
 This file demonstrates:
 
@@ -30,7 +30,7 @@ if str(project_root) not in sys.path:
 from a2x_client import (
     A2XConnectionError,
     A2XHTTPError,
-    AsyncA2XClient,
+    AsyncA2XRegistryClient,
     NotOwnedError,
     ValidationError,
 )
@@ -44,7 +44,7 @@ def make_card(name: str, description: str) -> dict[str, str]:
     }
 
 
-async def ensure_absent(client: AsyncA2XClient, dataset: str) -> None:
+async def ensure_absent(client: AsyncA2XRegistryClient, dataset: str) -> None:
     try:
         await client.delete_dataset(dataset)
     except ValidationError:
@@ -58,7 +58,7 @@ async def main() -> None:
     print(f"Using backend: {base_url}")
     print(f"Using ownership file: {ownership_file}")
 
-    async with AsyncA2XClient(
+    async with AsyncA2XRegistryClient(
         base_url=base_url,
         ownership_file=ownership_file,
     ) as client:
@@ -143,7 +143,7 @@ async def main() -> None:
     # 5) Network / gateway failure.
     print("\n[network / gateway failure]")
     try:
-        async with AsyncA2XClient(
+        async with AsyncA2XRegistryClient(
             base_url="http://127.0.0.1:8999",
             ownership_file=False,
         ) as bad_client:

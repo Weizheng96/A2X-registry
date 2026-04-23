@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.update_agent``.
+"""Synchronous examples for ``A2XRegistryClient.update_agent``.
 
 This file demonstrates:
 
@@ -30,7 +30,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from a2x_client import (
-    A2XClient,
+    A2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
     NotFoundError,
@@ -47,7 +47,7 @@ def make_card(name: str, description: str) -> dict[str, str]:
     }
 
 
-def ensure_absent(client: A2XClient, dataset: str) -> None:
+def ensure_absent(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
     except ValidationError:
@@ -61,7 +61,7 @@ def main() -> None:
     print(f"Using backend: {base_url}")
     print(f"Using ownership file: {ownership_file}")
 
-    with A2XClient(base_url=base_url, ownership_file=ownership_file) as client:
+    with A2XRegistryClient(base_url=base_url, ownership_file=ownership_file) as client:
         ds = "example_update_sync"
         ensure_absent(client, ds)
         client.create_dataset(ds)
@@ -164,7 +164,7 @@ def main() -> None:
     # 6) Network / gateway failure.
     print("\n[network / gateway failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999", ownership_file=False) as bad_client:
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999", ownership_file=False) as bad_client:
             # Build ownership first so the call reaches the transport layer.
             bad_client._owned.add("bad_ds", "bad_sid")
             bad_client.update_agent("bad_ds", "bad_sid", {"description": "x"})

@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.replace_agent_card``.
+"""Synchronous examples for ``A2XRegistryClient.replace_agent_card``.
 
 This file demonstrates:
 
@@ -26,7 +26,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from a2x_client import (
-    A2XClient,
+    A2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
     NotFoundError,
@@ -35,7 +35,7 @@ from a2x_client import (
 )
 
 
-def ensure_absent(client: A2XClient, dataset: str) -> None:
+def ensure_absent(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
     except ValidationError:
@@ -46,7 +46,7 @@ def main() -> None:
     base_url = os.getenv("A2X_BASE_URL", "http://127.0.0.1:8000")
     ownership_file = Path(tempfile.gettempdir()) / "a2x_example_replace_card_sync.json"
 
-    with A2XClient(base_url=base_url, ownership_file=ownership_file) as client:
+    with A2XRegistryClient(base_url=base_url, ownership_file=ownership_file) as client:
         ds = "example_replace_agent_card_sync"
         ensure_absent(client, ds)
         client.create_dataset(ds)
@@ -96,7 +96,7 @@ def main() -> None:
         # 5) NotFoundError + auto-cleanup if sid removed on backend
         print("\n[backend deleted under us → NotFoundError + cache cleanup]")
         # Simulate via a second client bypassing ownership
-        with A2XClient(base_url=base_url, ownership_file=False) as other:
+        with A2XRegistryClient(base_url=base_url, ownership_file=False) as other:
             other._owned.add(ds, sid)
             other.deregister_agent(ds, sid)
         try:
@@ -114,7 +114,7 @@ def main() -> None:
     # 6) Network failure
     print("\n[network / gateway failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999",
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999",
                        ownership_file=False, timeout=2.0) as bad_client:
             bad_client._owned.add("ds", "sid")
             bad_client.replace_agent_card("ds", "sid",

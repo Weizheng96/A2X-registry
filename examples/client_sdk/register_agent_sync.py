@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.register_agent``.
+"""Synchronous examples for ``A2XRegistryClient.register_agent``.
 
 This file demonstrates:
 
@@ -27,7 +27,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from a2x_client import (
-    A2XClient,
+    A2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
     NotOwnedError,
@@ -43,7 +43,7 @@ def make_card(name: str, description: str) -> dict[str, str]:
     }
 
 
-def ensure_absent(client: A2XClient, dataset: str) -> None:
+def ensure_absent(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
     except ValidationError:
@@ -57,7 +57,7 @@ def main() -> None:
     print(f"Using backend: {base_url}")
     print(f"Using ownership file: {ownership_file}")
 
-    with A2XClient(
+    with A2XRegistryClient(
         base_url=base_url,
         ownership_file=ownership_file,
     ) as client:
@@ -142,7 +142,7 @@ def main() -> None:
     # 5) Network / gateway failure.
     print("\n[network / gateway failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999", ownership_file=False) as bad_client:
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999", ownership_file=False) as bad_client:
             bad_client.register_agent(
                 "example_register_sync_unreachable",
                 make_card("Bad Sync", "backend unreachable"),

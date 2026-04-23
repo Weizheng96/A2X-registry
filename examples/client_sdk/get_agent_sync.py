@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.get_agent``.
+"""Synchronous examples for ``A2XRegistryClient.get_agent``.
 
 This file demonstrates:
 
@@ -30,7 +30,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from a2x_client import (
-    A2XClient,
+    A2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
     NotFoundError,
@@ -49,7 +49,7 @@ def make_card(name: str, description: str) -> dict[str, str]:
     }
 
 
-def ensure_absent(client: A2XClient, dataset: str) -> None:
+def ensure_absent(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
     except ValidationError:
@@ -82,7 +82,7 @@ def main() -> None:
     base_url = os.getenv("A2X_BASE_URL", "http://127.0.0.1:8000")
     print(f"Using backend: {base_url}")
 
-    with A2XClient(base_url=base_url, ownership_file=False) as client:
+    with A2XRegistryClient(base_url=base_url, ownership_file=False) as client:
         ds = "example_get_agent_sync"
         ensure_absent(client, ds)
         client.create_dataset(ds, formats={"a2a": "v0.0", "skill": "v0.0"})
@@ -124,7 +124,7 @@ def main() -> None:
 
     print("\n[network / gateway failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999", ownership_file=False) as bad_client:
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999", ownership_file=False) as bad_client:
             bad_client.get_agent("example_get_agent_sync_unreachable", "bad_sid")
     except A2XConnectionError as exc:
         print(f"  caught: {type(exc).__name__}")

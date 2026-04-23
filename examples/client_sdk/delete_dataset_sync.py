@@ -1,4 +1,4 @@
-"""Synchronous examples for ``A2XClient.delete_dataset``.
+"""Synchronous examples for ``A2XRegistryClient.delete_dataset``.
 
 This file demonstrates:
 
@@ -23,10 +23,10 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from a2x_client import A2XClient, A2XConnectionError, A2XHTTPError, ValidationError
+from a2x_client import A2XRegistryClient, A2XConnectionError, A2XHTTPError, ValidationError
 
 
-def ensure_absent(client: A2XClient, dataset: str) -> None:
+def ensure_absent(client: A2XRegistryClient, dataset: str) -> None:
     try:
         client.delete_dataset(dataset)
         print(f"  removed leftover dataset: {dataset}")
@@ -45,7 +45,7 @@ def main() -> None:
 
     print(f"Using backend: {base_url}")
 
-    with A2XClient(base_url=base_url) as client:
+    with A2XRegistryClient(base_url=base_url) as client:
         ds_success = "example_delete_sync_success"
         ds_missing = "example_delete_sync_missing"
 
@@ -69,7 +69,7 @@ def main() -> None:
     # 3) Network / gateway failure.
     print("\n[network / gateway failure]")
     try:
-        with A2XClient(base_url="http://127.0.0.1:8999") as bad_client:
+        with A2XRegistryClient(base_url="http://127.0.0.1:8999") as bad_client:
             bad_client.delete_dataset("example_delete_sync_unreachable")
     except A2XConnectionError as exc:
         print(f"  caught: {type(exc).__name__}")
