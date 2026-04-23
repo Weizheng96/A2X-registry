@@ -113,35 +113,35 @@ update_service(dataset, service_id, updates):
 ### CLI 入口
 
 ```bash
-python -m src.register [--database-dir DIR] [--config FILE] [--json] [-v] <command>
+python -m a2x_registry.register [--database-dir DIR] [--config FILE] [--json] [-v] <command>
 ```
 
 | 子命令 | 说明 | 示例 |
 |--------|------|------|
-| `status [--dataset DS]` | 查看注册状态 | `python -m src.register status` |
-| `datasets` | 列出所有数据集 | `python -m src.register datasets` |
-| `list DATASET [--mode admin\|browse]` | 列出服务 | `python -m src.register list publicMCP` |
-| `get DATASET SERVICE_ID` | 查看单个服务 | `python -m src.register get default agent_xxx` |
-| `register-generic DATASET --name N --desc D` | 注册 Generic | `python -m src.register register-generic default --name "API" --desc "..."` |
-| `register-a2a DATASET (--url U \| --card-file F)` | 注册 A2A | `python -m src.register register-a2a default --url https://...` |
-| `register-skill DATASET ZIP` | 上传 Skill | `python -m src.register register-skill default skill.zip` |
-| `update DATASET SERVICE_ID [--json F \| --set k=v ...] [--name N] [--desc D]` | 部分字段更新 | `python -m src.register update default generic_xxx --desc "new"` |
-| `deregister DATASET SERVICE_ID` | 注销服务 | `python -m src.register deregister default generic_xxx` |
-| `deregister-skill DATASET NAME` | 删除 Skill | `python -m src.register deregister-skill default my-skill` |
-| `create-dataset NAME [--embedding-model M] [--formats SPEC]` | 创建数据集（可声明允许格式） | `python -m src.register create-dataset myDS --formats generic,a2a:v1.0` |
-| `delete-dataset NAME [--confirm]` | 删除数据集 | `python -m src.register delete-dataset old --confirm` |
-| `get-register-config DATASET` | 查看允许的注册格式 | `python -m src.register get-register-config default` |
-| `set-register-config DATASET --formats SPEC` | 修改允许的注册格式 | `python -m src.register set-register-config default --formats a2a:v1.0` |
+| `status [--dataset DS]` | 查看注册状态 | `python -m a2x_registry.register status` |
+| `datasets` | 列出所有数据集 | `python -m a2x_registry.register datasets` |
+| `list DATASET [--mode admin\|browse]` | 列出服务 | `python -m a2x_registry.register list publicMCP` |
+| `get DATASET SERVICE_ID` | 查看单个服务 | `python -m a2x_registry.register get default agent_xxx` |
+| `register-generic DATASET --name N --desc D` | 注册 Generic | `python -m a2x_registry.register register-generic default --name "API" --desc "..."` |
+| `register-a2a DATASET (--url U \| --card-file F)` | 注册 A2A | `python -m a2x_registry.register register-a2a default --url https://...` |
+| `register-skill DATASET ZIP` | 上传 Skill | `python -m a2x_registry.register register-skill default skill.zip` |
+| `update DATASET SERVICE_ID [--json F \| --set k=v ...] [--name N] [--desc D]` | 部分字段更新 | `python -m a2x_registry.register update default generic_xxx --desc "new"` |
+| `deregister DATASET SERVICE_ID` | 注销服务 | `python -m a2x_registry.register deregister default generic_xxx` |
+| `deregister-skill DATASET NAME` | 删除 Skill | `python -m a2x_registry.register deregister-skill default my-skill` |
+| `create-dataset NAME [--embedding-model M] [--formats SPEC]` | 创建数据集（可声明允许格式） | `python -m a2x_registry.register create-dataset myDS --formats generic,a2a:v1.0` |
+| `delete-dataset NAME [--confirm]` | 删除数据集 | `python -m a2x_registry.register delete-dataset old --confirm` |
+| `get-register-config DATASET` | 查看允许的注册格式 | `python -m a2x_registry.register get-register-config default` |
+| `set-register-config DATASET --formats SPEC` | 修改允许的注册格式 | `python -m a2x_registry.register set-register-config default --formats a2a:v1.0` |
 
 全局选项：`--json` 输出机器可读 JSON；`-v` 启用 DEBUG 日志。
 
-向后兼容旧用法：`python -m src.register --status` / `python -m src.register --config path`。
+向后兼容旧用法：`python -m a2x_registry.register --status` / `python -m a2x_registry.register --config path`。
 
 ### Python 接口
 
 ```python
-from src.register import RegistryService
-from src.register.models import RegisterGenericRequest, RegisterA2ARequest
+from a2x_registry.register import RegistryService
+from a2x_registry.register.models import RegisterGenericRequest, RegisterA2ARequest
 
 svc = RegistryService(database_dir=Path("database"))
 svc.startup()

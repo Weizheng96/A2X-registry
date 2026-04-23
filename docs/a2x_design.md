@@ -163,7 +163,7 @@ sequenceDiagram
 
     rect rgb(232, 234, 246)
         Note over CLI,FS: 注册服务
-        U->>CLI: python -m src.register register-generic ds --name N --desc D
+        U->>CLI: python -m a2x_registry.register register-generic ds --name N --desc D
         CLI->>REG: RegistryService(database_dir)
         CLI->>REG: startup()
         REG->>ST: load_user_config + load_api_config + load_skills
@@ -181,7 +181,7 @@ sequenceDiagram
 
     rect rgb(200, 230, 201)
         Note over CLI,FS: 构建分类树
-        U->>CLI: python -m src.a2x.build --service-path database/ds/service.json
+        U->>CLI: python -m a2x_registry.a2x.build --service-path database/ds/service.json
         Note right of CLI: 独立进程，直接读取<br/>service.json 构建分类树
         CLI->>FS: 读取 service.json
         CLI->>FS: 写 taxonomy.json + class.json + build_config.json
@@ -190,7 +190,7 @@ sequenceDiagram
 
     rect rgb(255, 243, 224)
         Note over CLI,FS: 查询服务
-        U->>CLI: python -m src.register list ds --mode admin
+        U->>CLI: python -m a2x_registry.register list ds --mode admin
         CLI->>REG: RegistryService(database_dir)
         CLI->>REG: startup()
         CLI->>REG: list_entries(ds)
@@ -200,7 +200,7 @@ sequenceDiagram
 
     rect rgb(255, 205, 210)
         Note over CLI,FS: 注销服务
-        U->>CLI: python -m src.register deregister ds service_id
+        U->>CLI: python -m a2x_registry.register deregister ds service_id
         CLI->>REG: RegistryService(database_dir)
         CLI->>REG: startup()
         CLI->>REG: deregister(ds, service_id)
@@ -280,5 +280,5 @@ src/
 ├── register/        # 服务注册（generic / a2a / skill）
 ├── backend/         # FastAPI 后端（routers: dataset, build, search, provider）
 ├── frontend/        # React + Vite + Tailwind + D3.js
-└── ui/              # 集成启动器（python -m src.ui）
+└── ui/              # 集成启动器（python -m a2x_registry.ui）
 ```

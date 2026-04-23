@@ -249,11 +249,11 @@ GET /api/datasets/{dataset}/taxonomy
 
 ```bash
 # 开发模式（Vite 热更新）
-python -m src.ui   # 自动启动 Vite dev server（port 5173）+ 后端（port 8000）
+python -m a2x_registry.ui   # 自动启动 Vite dev server（port 5173）+ 后端（port 8000）
 
 # 生产构建
-python -m src.frontend  # 执行 npm run build，产物输出到 src/frontend/dist/
+python -m a2x_registry.frontend  # 执行 npm run build，产物输出到 src/frontend/dist/
 
 # 生产模式（后端托管静态文件）
-python -m src.ui   # 检测到 dist/ 存在，后端直接托管，访问 http://localhost:8000
+python -m a2x_registry.ui   # 检测到 dist/ 存在，后端直接托管，访问 http://localhost:8000
 ```

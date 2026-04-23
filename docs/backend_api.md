@@ -3,7 +3,7 @@
 后端基于 FastAPI，启动命令：
 
 ```bash
-python -m src.backend
+python -m a2x_registry.backend
 # 服务地址: http://127.0.0.1:8000
 # 交互文档: http://127.0.0.1:8000/docs
 ```

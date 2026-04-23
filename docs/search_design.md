@@ -11,7 +11,7 @@
 ```
 src/a2x/search/
 ├── __init__.py      — 公共 API: A2XSearch, SearchResult, SearchStats, NavigationStep
-├── __main__.py      — CLI 入口 (python -m src.a2x.search)
+├── __main__.py      — CLI 入口 (python -m a2x_registry.a2x.search)
 ├── a2x_search.py    — 编排器: 组合 Navigator + Selector，管理搜索流程和流式输出
 ├── models.py        — 数据类: SearchStats, NavigationStep, TerminalNode, ServiceGroup (SearchResult 已移至 src/common/models.py)
 ├── navigator.py     — Phase 1: CategoryNavigator (LLM 递归分类导航)
@@ -45,7 +45,7 @@ src/a2x/search/
 ### Python 接口
 
 ```python
-from src.a2x.search import A2XSearch
+from a2x_registry.a2x.search import A2XSearch
 
 searcher = A2XSearch(
     taxonomy_path="taxonomy.json",
@@ -95,8 +95,8 @@ class NavigationStep:   # UI 动画用
 ### CLI
 
 ```bash
-python -m src.a2x.search --query "I need to book a flight" --mode get_important
-python -m src.a2x.evaluation --data-dir database/ToolRet_clean --max-queries 50 --mode get_all
+python -m a2x_registry.a2x.search --query "I need to book a flight" --mode get_important
+python -m a2x_registry.a2x.evaluation --data-dir database/ToolRet_clean --max-queries 50 --mode get_all
 ```
 
 ## 5. 逻辑视图

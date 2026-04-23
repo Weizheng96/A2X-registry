@@ -14,7 +14,7 @@
 
 ```bash
 # 起后端
-python -m src.backend
+python -m a2x_registry.backend
 
 # 另一个终端
 python examples/client_sdk/run_all_examples.py
