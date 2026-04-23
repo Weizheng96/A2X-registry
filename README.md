@@ -4,7 +4,7 @@
 
 ## 概述
 
-A2X Registry 既是一个**标准服务注册中心**，也提供 **Agent 原生的高效服务发现**。
+A2X Registry 是一个 **Agent 及 Agent 可调用服务的注册中心**，同时内置 **Agent 原生的高效服务发现方案（A2X 搜索）**。
 
 作为注册中心，它提供服务全生命周期的常规管理能力：注册 / 注销、按字段查询、整卡覆盖与字段级更新、状态声明（online / busy / offline）、基于所有权的权限控制，以及 Agent Team 场景下的短时预订锁（reservation lease），便于多 agent 在同一池子里互相协调。数据集隔离、Embedding 模型可选、多种服务类型（generic / A2A / Skill）并存。
 
