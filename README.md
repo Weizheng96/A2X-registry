@@ -1,20 +1,14 @@
 # A2X Registry — 智能体服务发现注册中心
 
-**v0.1.4**
+**v0.1.5**
 
 ## 概述
 
-A2X 是一种 **Agent 原生**的服务发现注册中心，用于解决智能体互联网时代的核心问题：**如何让智能体从海量服务中高效、准确地找到所需能力。**
+A2X Registry 既是一个**标准服务注册中心**，也提供 **Agent 原生的高效服务发现**。
 
-现有方案的局限：
+作为注册中心，它提供服务全生命周期的常规管理能力：注册 / 注销、按字段查询、整卡覆盖与字段级更新、状态声明（online / busy / offline）、基于所有权的权限控制，以及 Agent Team 场景下的短时预订锁（reservation lease），便于多 agent 在同一池子里互相协调。数据集隔离、Embedding 模型可选、多种服务类型（generic / A2A / Skill）并存。
 
-| 方案 | 问题 |
-|------|------|
-| **MCP 全量上下文** | 上下文空间有限，服务规模增长后窗口溢出，"Lost in the Middle" 导致性能下降 |
-| **关键词 / 向量检索** | 未利用 LLM 的理解能力，跨术语映射和复杂意图场景召回不稳定 |
-| **查询改写** | 模型不了解服务库内部术语，改写方向不确定，容易引入偏差 |
-
-A2X 通过自动构建 **层次化能力目录**（分类树）+ **LLM 递归语义导航**，实现 LLM 亲和且 Agent 自治的服务注册发现方案。分类树由 LLM 从服务描述中全自动构建。搜索时，LLM 沿着"领域 → 子领域 → 具体能力 → 服务"逐层逼近目标，查找成本接近 O(log N)。
+特色功能是 A2X 搜索，用于解决智能体互联网时代的核心问题：**如何让智能体从海量服务中高效、准确地找到所需能力。** 现有方案各有局限 —— MCP 全量上下文溢出、"Lost in the Middle" 效应；向量检索不理解跨术语意图；查询改写方向不确定。A2X 通过自动构建 **层次化能力目录**（分类树）+ **LLM 递归语义导航**，由 LLM 沿"领域 → 子领域 → 具体能力 → 服务"逐层逼近目标，查找成本接近 O(log N)，兼顾召回与精度。分类树由 LLM 从服务描述中全自动构建，无需人工维护。
 
 ## 评估结果
 
@@ -44,17 +38,55 @@ A2X 通过自动构建 **层次化能力目录**（分类树）+ **LLM 递归语
 
 ## 快速开始
 
-### 1. 环境准备
+### 1. 安装
+
+从 PyPI 标签安装（推荐，不需要源码）：
 
 ```bash
-pip install -r requirements.txt
+pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.1.5
 ```
 
-### 2. 下载演示数据集（可选）
-
-项目提供预构建的演示数据集（含服务描述、分类树、评估查询），克隆到 `database/` 目录即可使用：
+或克隆源码 + 可编辑安装（想改代码或用 Web UI）：
 
 ```bash
+git clone https://github.com/Weizheng96/A2X-registry.git
+cd A2X-registry
+pip install -e .
+```
+
+> 推荐同时安装 Python 客户端 SDK：`pip install git+https://github.com/Weizheng96/A2X-registry-client.git@v0.1.5`（提供 `A2XRegistryClient` / `AsyncA2XRegistryClient` 两个类）
+
+### 2. 配置 LLM API（A2X 搜索和分类树构建必需）
+
+默认位置 `~/.a2x_registry/llm_apikey.json`（Windows 下 `C:\Users\<你>\.a2x_registry\llm_apikey.json`）。参考 `a2x_registry/llm_apikey.example.json` 模板：
+
+```json
+{
+  "providers": [
+    {
+      "name": "deepseek",
+      "base_url": "https://api.deepseek.com/chat/completions",
+      "model": "deepseek-chat",
+      "api_keys": ["sk-your-deepseek-api-key"]
+    }
+  ]
+}
+```
+
+支持多 provider 配置，按顺序轮询使用，兼容所有 OpenAI-compatible API。
+
+> 仅使用向量检索 / 通用 CRUD 时不需要此配置。
+> 如需把 key 文件放到别处，设 `A2X_REGISTRY_HOME=/your/path` 环境变量即可。
+
+### 3. 下载演示数据集（可选）
+
+项目提供预构建的演示数据集（含服务描述、分类树、评估查询）：
+
+```bash
+# pip 用户：克隆到默认位置
+git clone https://github.com/Weizheng96/A2X-registry-demo-data.git ~/.a2x_registry/database
+
+# 源码用户：克隆到项目根
 git clone https://github.com/Weizheng96/A2X-registry-demo-data.git database
 ```
 
@@ -70,35 +102,6 @@ git clone https://github.com/Weizheng96/A2X-registry-demo-data.git database
 | `publicSkill` | 17 | EN | Claude Code Skill 集合 |
 
 > 不下载也可以正常使用，通过 UI 或 API 创建自己的数据集并注册服务。
-
-### 3. 配置
-
-#### LLM API（A2X 搜索和分类树构建必需）
-
-在项目根目录创建 `llm_apikey.json`（参考 `llm_apikey.example.json`）：
-
-```json
-{
-  "providers": [
-    {
-      "name": "deepseek",
-      "base_url": "https://api.deepseek.com/chat/completions",
-      "model": "deepseek-chat",
-      "api_keys": ["sk-your-deepseek-api-key"]
-    },
-    {
-      "name": "aliyun",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-      "model": "deepseek-v3.2",
-      "api_keys": ["sk-your-aliyun-api-key"]
-    }
-  ]
-}
-```
-
-支持多 provider 配置，按顺序轮询使用。兼容所有 OpenAI-compatible API。
-
-> 仅使用向量检索时不需要此配置。
 
 #### 基于配置文件的服务注册（可选）
 
@@ -140,20 +143,20 @@ git clone https://github.com/Weizheng96/A2X-registry-demo-data.git database
 
 ### 4. 使用
 
-#### 方式一：UI 界面
+#### 方式一：Web UI（仅源码安装可用）
 
 ```bash
-python -m src.ui
+python ui/launcher.py
 ```
 
-启动模式根据 `src/frontend/dist/` 是否存在自动判断：
+启动模式根据 `ui/frontend/dist/` 是否存在自动判断：
 
 | 情况 | 行为 | 访问地址 |
 |------|------|----------|
 | 有 `dist/` | 后端直接托管静态文件，无需 Node.js | http://localhost:8000 |
 | 无 `dist/`（首次） | 自动启动 Vite 开发服务器（需 Node.js） | http://localhost:5173 |
 
-构建前端生产版本：`python -m src.frontend`
+构建前端生产版本：`cd ui/frontend && npm install && npm run build`
 
 UI 提供两个模式：
 - **搜索模式** — 交互对比 A2X / 向量 / MCP 的检索效果，D3.js 实时动画展示分类树导航过程
@@ -168,10 +171,32 @@ https://github.com/Weizheng96/A2X-registry-demo-data/raw/doc/ui_demo.mp4
 #### 方式二：后端 API
 
 ```bash
-python -m src.backend
-# 服务: http://127.0.0.1:8000
-# 文档: http://127.0.0.1:8000/docs
+a2x-backend                    # http://127.0.0.1:8000，docs 在 /docs
+a2x-backend --port 8080        # 换端口
+a2x-backend --host 0.0.0.0     # 开放到局域网
 ```
+
+#### 方式三：Python 客户端 SDK
+
+通过 [a2x-registry-client](https://github.com/Weizheng96/A2X-registry-client) 以 Python 原生方式调用：
+
+```python
+from a2x_registry_client import A2XRegistryClient
+
+with A2XRegistryClient(base_url="http://127.0.0.1:8000") as client:
+    client.create_dataset("team_pool")
+    resp = client.register_agent("team_pool", {
+        "name": "Task Planner",
+        "description": "Decompose tasks into subtasks",
+    })
+    agents = client.list_agents("team_pool")
+```
+
+同步 `A2XRegistryClient` 与异步 `AsyncA2XRegistryClient` 双入口对称，支持 Agent Team 场景的预订锁、状态声明、所有权校验等细节。完整设计：[A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client)。
+
+#### 方式四：REST API
+
+直接通过 HTTP 调用 `a2x-backend` 暴露的接口。
 
 **数据集管理**：
 

@@ -1,6 +1,29 @@
 # A2X 版本说明
 
-## 当前版本: v0.1.4
+## 当前版本: v0.1.5
+
+---
+
+## v0.1.5 (2026-04-23)
+
+### 概述
+pip 打包正式发布版本。包名从 `src/` 重命名为 `a2x_registry/`，客户端 SDK 拆到独立仓库 [A2X-registry-client](https://github.com/Weizheng96/A2X-registry-client)；新增 6 个 CLI 入口；配置文件移至用户目录；Web UI 迁出 pip 包作为 clone-only demo。算法无变更。
+
+### 新功能
+- **pip 可装**：`pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.1.5`
+- **CLI 入口**：`a2x-backend` / `a2x-build` / `a2x-register` / `a2x-evaluate-a2x` / `a2x-evaluate-vector` / `a2x-evaluate-traditional`
+- **客户端 SDK**：`a2x-registry-client` 独立包，`A2XRegistryClient` / `AsyncA2XRegistryClient` 双入口对称
+- **路径抽象**：`A2X_REGISTRY_HOME` 环境变量 + `~/.a2x_registry/` 默认位置
+- **友好错误**：`LLMNotConfiguredError` / `VectorSearchUnavailableError` 给出明确修复指引（含 HF 镜像建议）
+- **Web UI 独立**：仓根 `ui/` 目录 + `python ui/launcher.py`，不进 pip 包
+
+### 重构
+- `src/` → `a2x_registry/`：59 处 import 全量迁移
+- `llm_apikey.example.json` 进入 pip 包，`llm_apikey.json` 默认 `~/.a2x_registry/llm_apikey.json`
+- 清理 `sys.path.insert` hack
+
+### 评估结果
+与 v0.1.4 一致（本次为打包重构，无算法变更）。
 
 ---
 
