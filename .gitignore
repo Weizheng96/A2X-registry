@@ -1,6 +1,9 @@
 # Reference materials - ignore from version control
 reference/
 
+# Sibling client SDK repo (independent git repository, not tracked here)
+A2X-registry-client/
+
 # Python virtual environment
 .venv/
 
