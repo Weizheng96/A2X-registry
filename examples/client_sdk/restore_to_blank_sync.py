@@ -24,7 +24,7 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from a2x_client import (
+from a2x_registry_client import (
     A2XRegistryClient,
     A2XConnectionError,
     A2XHTTPError,
