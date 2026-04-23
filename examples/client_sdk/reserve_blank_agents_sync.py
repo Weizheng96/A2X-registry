@@ -32,7 +32,7 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.client import A2XClient, ValidationError
+from a2x_client import A2XClient, ValidationError
 
 
 def ensure_absent(client: A2XClient, dataset: str) -> None:
