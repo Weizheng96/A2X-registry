@@ -57,3 +57,6 @@ version = { attr = "a2x_registry.__version__" }
 where = ["."]
 include = ["a2x_registry*"]
 exclude = ["reference*", "examples*", "tests*", "database*", "A2X-registry-client*"]
+
+[tool.setuptools.package-data]
+a2x_registry = ["llm_apikey.example.json"]

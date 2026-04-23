@@ -79,12 +79,13 @@ class LLMClient:
         self.providers = self._parse_providers(config)
 
         if not self.providers:
+            from a2x_registry.common.paths import LLM_APIKEY_EXAMPLE_PATH
             raise LLMNotConfiguredError(
                 f"A2X build / search is unavailable: no valid LLM provider in "
                 f"{config_path!r}.\n\n"
                 f"Each entry under \"providers\" needs a non-empty \"api_keys\" list. "
-                f"Fill in a real API key and retry. See llm_apikey.example.json at "
-                f"https://github.com/Weizheng96/A2X-registry for a minimal template."
+                f"Fill in a real API key and retry. A bundled template is at\n"
+                f"  {LLM_APIKEY_EXAMPLE_PATH}"
             )
 
         # Expose primary provider's model for backward compatibility
@@ -129,14 +130,18 @@ class LLMClient:
         try:
             return self._load_config(config_path)
         except FileNotFoundError as exc:
+            from a2x_registry.common.paths import LLM_APIKEY_EXAMPLE_PATH
             raise LLMNotConfiguredError(
                 f"A2X build / search is unavailable: LLM API key file not found "
                 f"at {config_path!r}.\n\n"
                 f"To configure:\n"
-                f"  1. Create {config_path!r} with your provider list, or set the\n"
-                f"     A2X_REGISTRY_HOME environment variable to a directory that\n"
-                f"     contains llm_apikey.json.\n"
-                f"  2. Minimal example (OpenAI-compatible):\n"
+                f"  1. Copy the bundled template into the default location:\n"
+                f"         mkdir -p ~/.a2x_registry\n"
+                f"         cp {LLM_APIKEY_EXAMPLE_PATH} ~/.a2x_registry/llm_apikey.json\n"
+                f"     (or set the A2X_REGISTRY_HOME env var to point at a dir\n"
+                f"      containing your own llm_apikey.json)\n"
+                f"  2. Edit the file and fill in your provider's api_keys.\n"
+                f"  3. Minimal inline example (OpenAI-compatible):\n"
                 f'         {{\n'
                 f'           "providers": [\n'
                 f'             {{\n'
@@ -146,9 +151,7 @@ class LLMClient:
                 f'               "api_keys": ["sk-your-key"]\n'
                 f'             }}\n'
                 f'           ]\n'
-                f'         }}\n'
-                f"  3. Full template: llm_apikey.example.json at\n"
-                f"     https://github.com/Weizheng96/A2X-registry"
+                f'         }}'
             ) from exc
         except json.JSONDecodeError as exc:
             raise LLMNotConfiguredError(
