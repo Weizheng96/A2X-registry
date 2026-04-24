@@ -24,6 +24,7 @@ Incremental / resumable:
 
 from __future__ import annotations
 import argparse
+import io
 import json
 import logging
 import sys
@@ -152,6 +153,16 @@ def write_consolidated_summary(
 
 
 def main():
+    # Force UTF-8 on stdout/stderr so Unicode symbols don't crash on Windows GBK console.
+    # Safe no-op if stdout is already UTF-8 (e.g. when logged to file).
+    for _stream in ("stdout", "stderr"):
+        s = getattr(sys, _stream)
+        if hasattr(s, "buffer") and getattr(s, "encoding", "").lower() != "utf-8":
+            try:
+                setattr(sys, _stream, io.TextIOWrapper(s.buffer, encoding="utf-8", errors="replace"))
+            except Exception:
+                pass
+
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] %(message)s",
