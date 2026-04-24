@@ -54,9 +54,7 @@ cd A2X-registry
 pip install -e .
 ```
 
-> 推荐同时安装 Python 客户端 SDK：`pip install git+https://github.com/Weizheng96/A2X-registry-client.git@v0.1.5`（提供 `A2XRegistryClient` / `AsyncA2XRegistryClient` 两个类）
-
-### 2. 配置 LLM API（A2X 搜索和分类树构建必需）
+### 2. 配置 LLM API（可选，A2X 搜索和分类树构建必需）
 
 默认位置 `~/.a2x_registry/llm_apikey.json`（Windows 下 `C:\Users\<你>\.a2x_registry\llm_apikey.json`）。参考 `a2x_registry/llm_apikey.example.json` 模板：
 
@@ -103,53 +101,25 @@ git clone https://github.com/Weizheng96/A2X-registry-demo-data.git database
 
 > 不下载也可以正常使用，通过 UI 或 API 创建自己的数据集并注册服务。
 
-#### 基于配置文件的服务注册（可选）
+### 4. 启动
 
-通过 `user_config.json` 声明服务，放在 `database/{数据集名}/user_config.json`：
+两种启动方式二选一。方式 A 仅起后端（走 HTTP API 或本地配置），方式 B 同时起后端和网页 UI。
 
-```json
-{
-  "services": [
-    {
-      "type": "generic",
-      "name": "天气查询",
-      "description": "根据城市名查询实时天气和未来预报",
-      "url": "https://api.example.com/weather"
-    },
-    {
-      "type": "a2a",
-      "agent_card_url": "https://agent.example.com/.well-known/agent.json"
-    },
-    {
-      "type": "a2a",
-      "agent_card": {
-        "name": "翻译助手",
-        "description": "支持中英日韩多语言互译",
-        "url": "https://translate.example.com/a2a",
-        "skills": [
-          {"name": "translate", "description": "将文本翻译为目标语言"}
-        ]
-      }
-    }
-  ]
-}
+**方式 A：常规启动（仅后端）**
+
+```bash
+a2x-backend                    # http://127.0.0.1:8000，docs 在 /docs
+a2x-backend --port 8080        # 换端口
+a2x-backend --host 0.0.0.0     # 开放到局域网
 ```
 
-支持四种注册方式：
-- **generic** — 通用服务，提供 name + description
-- **a2a (URL)** — 通过 `agent_card_url` 自动拉取 [A2A 协议](https://google.github.io/A2A/) Agent Card
-- **a2a (内联)** — 通过 `agent_card` 直接提供 Agent Card 内容
-- **skill (文件夹)** — 放入 `database/{数据集名}/skills/{skill名}/` 目录（需含 `SKILL.md`），或通过 API 上传 ZIP
-
-### 4. 使用
-
-#### 方式一：Web UI（仅源码安装可用）
+**方式 B：带前端启动（后端 + 网页 UI，仅源码安装可用）**
 
 ```bash
 python ui/launcher.py
 ```
 
-启动模式根据 `ui/frontend/dist/` 是否存在自动判断：
+launcher 自带后端，无需额外跑方式 A。启动模式根据 `ui/frontend/dist/` 是否存在自动判断：
 
 | 情况 | 行为 | 访问地址 |
 |------|------|----------|
@@ -158,7 +128,12 @@ python ui/launcher.py
 
 构建前端生产版本：`cd ui/frontend && npm install && npm run build`
 
-UI 提供两个模式：
+### 5. 使用
+
+#### 方式一：网页 UI
+
+启动时选择了方式 B 即可打开浏览器使用。UI 提供两个模式：
+
 - **搜索模式** — 交互对比 A2X / 向量 / MCP 的检索效果，D3.js 实时动画展示分类树导航过程
 - **管理员模式** — 数据集管理、服务注册/注销（含 Skill 文件夹上传）、服务查询、分类树构建、Embedding 模型配置
 
@@ -168,15 +143,7 @@ https://github.com/Weizheng96/A2X-registry-demo-data/raw/doc/ui_demo.mp4
 
 > 注：演示中注销阶段灰色不可选的服务是通过 `user_config.json` 注册的，不支持单独注销。
 
-#### 方式二：后端 API
-
-```bash
-a2x-backend                    # http://127.0.0.1:8000，docs 在 /docs
-a2x-backend --port 8080        # 换端口
-a2x-backend --host 0.0.0.0     # 开放到局域网
-```
-
-#### 方式三：REST API
+#### 方式二：HTTP Fast API
 
 直接通过 HTTP 调用 `a2x-backend` 暴露的接口。
 
@@ -284,6 +251,44 @@ curl -X POST http://localhost:8000/api/datasets/my_dataset/vector-config \
 > 完整 API 文档见 [docs/backend_api.md](docs/backend_api.md)，各模块内部接口见对应设计文档。
 
 > 同时我们为 Agent Team 场景提供特化的 Python 客户端 SDK：[A2X-registry-client](https://github.com/Weizheng96/A2X-registry-client)。
+
+#### 方式三：基于本地配置文档
+
+不通过 API，直接在磁盘上编辑 `database/{数据集名}/user_config.json`，声明要注册的服务；下次启动时后端自动加载。
+
+```json
+{
+  "services": [
+    {
+      "type": "generic",
+      "name": "天气查询",
+      "description": "根据城市名查询实时天气和未来预报",
+      "url": "https://api.example.com/weather"
+    },
+    {
+      "type": "a2a",
+      "agent_card_url": "https://agent.example.com/.well-known/agent.json"
+    },
+    {
+      "type": "a2a",
+      "agent_card": {
+        "name": "翻译助手",
+        "description": "支持中英日韩多语言互译",
+        "url": "https://translate.example.com/a2a",
+        "skills": [
+          {"name": "translate", "description": "将文本翻译为目标语言"}
+        ]
+      }
+    }
+  ]
+}
+```
+
+支持四种注册对象：
+- **generic** — 通用服务，提供 name + description
+- **a2a (URL)** — 通过 `agent_card_url` 自动拉取 [A2A 协议](https://google.github.io/A2A/) Agent Card
+- **a2a (内联)** — 通过 `agent_card` 直接提供 Agent Card 内容
+- **skill (文件夹)** — 放入 `database/{数据集名}/skills/{skill名}/` 目录（需含 `SKILL.md`），或通过 API 上传 ZIP
 
 ## 文档
 
