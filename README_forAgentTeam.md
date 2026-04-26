@@ -2,7 +2,7 @@
 
 **v0.1.6**
 
-本文档是针对 **Agent Team 动态组队** 场景的简化版本，仅包含启动一个空白后端所需的最少步骤。后续所有服务注册、查询、预订锁等操作均通过客户端 SDK（[A2X-registry-client](https://gitcode.com/openJiuwen/agent-protocol/tree/develop/registry/registry_client)）完成，服务端无需任何预置数据或 LLM 配置。
+本文档是针对 **Agent Team 动态组队** 场景的简化版本，仅包含启动一个空白后端所需的最少步骤。后续所有服务注册、查询、预订锁等操作均通过客户端SDK完成，服务端无需任何预置数据或 LLM 配置。
 
 ## 安装与启动
 
@@ -10,11 +10,17 @@
 
 0.1.6 起 `pip install` **默认就是 Agent Team 精简版**——只装 SDK 必需的 5 个轻量包（`requests` / `fastapi` / `pydantic` / `python-multipart` / `uvicorn[standard]`），不再附带 `numpy` / `sentence-transformers` / `chromadb` 等数百 MB 的搜索/索引依赖。
 
-从 GitCode 克隆 `agent-protocol` 的 `feature/Agentregistry` 分支安装：
+从 GitHub 标签直接安装（推荐，无需源码）：
 
 ```bash
-git clone -b feature/Agentregistry https://gitcode.com/openJiuwen/agent-protocol.git
-cd agent-protocol
+pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.1.6
+```
+
+或克隆源码后可编辑安装：
+
+```bash
+git clone https://github.com/Weizheng96/A2X-registry.git
+cd A2X-registry
 pip install -e .
 ```
 
@@ -53,5 +59,3 @@ a2x-backend --host 0.0.0.0 --port 8080  # 指定端口
 4. **生产环境**（可选）：建议前面挂 nginx 反向代理 + HTTPS，客户端使用 `https://registry.yourdomain.com`
 
 后端启动后，即可使用注册中心客户端 SDK 进行相关操作。
-
-> 客户端 SDK 使用方式见 [A2X-registry-client README](https://gitcode.com/openJiuwen/agent-protocol/tree/develop/registry/registry_client)。
