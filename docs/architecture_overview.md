@@ -144,20 +144,3 @@ a2x/search ←──┬──→ vector/search ←──┬──→ traditional
 | `pip install 'a2x-registry[full]'` | 上述全部 | 等价 ≤0.1.5 默认安装 |
 
 `feature_flags.require()` 入口拦截使用 `importlib.util.find_spec`（不缓存），所以 `pip install [vector]` 后**重启 backend** 即可生效，无需改代码。
-
-## 5. 错误层级
-
-| 异常 | 谁抛 | 谁接 |
-|---|---|---|
-| `LLMNotConfiguredError` | `LLMClient.__init__` | CLI 直接打印 / FastAPI 500 |
-| `VectorSearchUnavailableError` | `EmbeddingModel.__init__`（HF 下载失败等） | 当前由 search_service catch + 日志 |
-| `FeatureNotInstalledError` | `feature_flags.require(name)` | FastAPI app 级 handler → 503；CLI 入口 → stderr + `sys.exit(2)` |
-| `RegistryNotFoundError` / `ValueError` / `PermissionError` / `FileNotFoundError` | RegistryService | dataset router 的 `_run` 包装器 → 404/400/403/404 |
-
-## 6. 测试入口
-
-- `tests/test_lite_imports.py` — 用 `monkeypatch` 模拟缺依赖，验证 lite 路径不导入重模块。
-- `tests/test_lite_e2e.py` — 用 `TestClient` 跑 lite 模拟下的 12 个 SDK 接口 + 503 路径 + WebSocket。
-- `tests/test_full_regression.py` — 全量模式下常量三路径一致性 + PEP 562 + 路由挂载校验。
-
-`pytest tests/ -v` 一次跑完 22 个 case。
