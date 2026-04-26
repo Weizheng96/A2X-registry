@@ -1,7 +1,6 @@
 """FastAPI router for taxonomy build operations.
 
-Extracted from src/register/router.py — handles build trigger, status,
-cancellation, and SSE log streaming.
+Handles build trigger, status, cancellation, and SSE log streaming.
 """
 
 import asyncio
@@ -182,7 +181,7 @@ def _run_taxonomy_build(dataset: str, resume: str, extra_params: dict = None,
     class _LogCapture(logging.Handler):
         def emit(self, record):
             # Filter to this build's thread only — prevents cross-dataset contamination
-            # when multiple datasets build simultaneously (all share the src.a2x logger)
+            # when multiple datasets build simultaneously (all share the a2x_registry.a2x logger)
             if record.thread != _thread_id:
                 return
             try:
@@ -194,7 +193,7 @@ def _run_taxonomy_build(dataset: str, resume: str, extra_params: dict = None,
 
     handler = _LogCapture()
     handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S"))
-    # Attach directly to src.a2x logger — captures all build output without root-level filtering.
+    # Attach directly to a2x_registry.a2x logger — captures all build output without root-level filtering.
     # Thread-ID filter above ensures concurrent builds don't receive each other's log records.
     a2x_logger = logging.getLogger("a2x_registry.a2x")
     # Use caller-specified log level, otherwise follow the logger's effective level
