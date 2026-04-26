@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 
 from a2x_registry.register.models import BuildRequest
 from a2x_registry.register.service import RegistryService
+from a2x_registry.common import feature_flags
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ def _get_service() -> RegistryService:
 @router.post("/{dataset}/build")
 async def trigger_build(dataset: str, req: BuildRequest, background_tasks: BackgroundTasks):
     """Trigger A2X taxonomy build for a dataset (runs in background)."""
+    feature_flags.require("vector")
     if _build_jobs.get(dataset, {}).get("status") == "running":
         raise HTTPException(status_code=409, detail=f"Build already running for '{dataset}'")
     stop_event = threading.Event()
