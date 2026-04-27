@@ -29,15 +29,15 @@ a2x_registry/                      # pip 包根
 │   ├── startup.py                 #   warmup（按 has("vector") 分阶段）
 │   ├── routers/                   #   dataset / search / build / provider
 │   └── services/                  #   search_service / taxonomy_service
-├── a2x/                           # ⚠️ 需 [vector] extras
-│   ├── build/                     #   分类树构建
+├── a2x/                           # 纯 LLM，lite 可用
+│   ├── build/                     #   分类树构建（需 LLM 配置）
 │   └── search/                    #   两阶段 LLM 递归检索
 ├── vector/                        # ⚠️ 需 [vector] extras
 │   ├── utils/embedding_constants.py  # 0 重依赖，常量在此对外暴露
 │   ├── utils/{embedding,chroma_store,metrics}.py
 │   ├── search/, build/            #   ChromaDB 向量索引与检索
 │   └── evaluation/                #   评估 CLI（需额外 [evaluation]）
-└── traditional/                   # ⚠️ 需 [vector] extras
+└── traditional/                   # 纯 LLM，lite 可用
     └── search/                    #   MCP 全上下文基线
 ```
 
@@ -74,12 +74,14 @@ a2x_registry/                      # pip 包根
 |---|---|---|
 | `/api/datasets/*` | `routers/dataset.py` | ✅ 全部 |
 | `/api/datasets/{ds}/build/{status,stream}`（只读） | `routers/build.py` | ✅ |
-| `POST /api/datasets/{ds}/build`（触发） | `routers/build.py` | ❌ 503 |
-| `/api/search/*`（含 WebSocket） | `routers/search.py` | ❌ 503 |
+| `POST /api/datasets/{ds}/build`（A2X 分类构建，纯 LLM） | `routers/build.py` | ✅（需配 LLM） |
+| `POST /api/search`（按 method 分发） | `routers/search.py` | a2x_*/traditional ✅；vector ❌ 503 |
+| `POST /api/search/judge`（LLM 判定相关性） | `routers/search.py` | ✅（需配 LLM） |
+| `/api/search/ws`（按 method 分发） | `routers/search.py` | a2x_*/traditional ✅；vector ❌ 503 |
 | `/api/providers/*` | `routers/provider.py` | ✅（仅文件读写） |
 | `/api/warmup-status` | `app.py` | ✅ |
 
-503 响应 body：`{feature, extras, detail}`，detail 含可执行的 `pip install` 命令。详见 [backend_api.md](backend_api.md) 的"安装模式与可用性"小节。
+**关键：only `method=vector` 真正需要 `[vector]` extras**（numpy + chromadb + sentence-transformers）。A2X 和 Traditional 都是纯 LLM 算法，lite 安装直接可用。503 响应 body：`{feature, extras, detail}`，detail 含可执行的 `pip install` 命令。详见 [backend_api.md](backend_api.md) 的"安装模式与可用性"小节。
 
 辅助层：
 

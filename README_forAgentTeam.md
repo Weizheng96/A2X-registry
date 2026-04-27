@@ -29,8 +29,10 @@ pip install -e .
 ### 精简版能力范围
 
 - ✅ **可用**：所有 SDK 接口（数据集 CRUD、agent 注册/注销/更新/状态、按字段查询、整卡覆盖、预订锁 reservation lease、`/embedding-models` 元数据、`/build/status` 状态查询）。
+- ✅ **可用（需配 LLM）**：A2X 搜索 / Traditional（MCP）搜索 / `POST /build`（A2X 分类构建）—— 都是纯 LLM 工作流，不需要 ML 栈，只要在 `~/.a2x_registry/llm_apikey.json` 配好 API key 就能跑。
+- ❌ **不可用（需 `[vector]`）**：`POST /api/search` 的 `method=vector` 向量检索、向量索引同步、`a2x-evaluate-vector` 评估 CLI —— 这些功能依赖 `numpy` / `sentence-transformers` / `chromadb`（数百 MB ML 栈）。调用时返回 503，body 里给出 `pip install 'a2x-registry[vector]' and restart` 的可执行提示。
 
-如果同一环境之后想启用全量功能，运行 `pip install -e '.[full]'` 安装额外依赖然后**重启 `a2x-registry`** 即可，无需改任何代码。
+如果同一环境之后想启用向量功能，运行 `pip install -e '.[vector]'`（或 `[full]`）安装额外依赖然后**重启 `a2x-registry`** 即可，无需改任何代码。
 
 ## 启动后端
 

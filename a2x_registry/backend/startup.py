@@ -70,24 +70,23 @@ def run_warmup() -> None:
                 logger.warning("  Taxonomy failed for %s: %s", ds, e)
         logger.info("Warmup: taxonomy done (%.1fs)", time.time() - t0)
 
-        # Stages 3-6 all need the [vector] extras (numpy / sentence_transformers
-        # / chromadb). In lite installs we skip them cleanly so warmup still
-        # completes — the registry/dataset routes are already serving by now.
-        if feature_flags.has("vector"):
-            # 3. A2X engines
-            _stage("加载 A2X 搜索引擎...", 35)
-            for ds in discover_datasets():
-                paths = resolve_dataset_paths(ds)
-                if paths["taxonomy_path"].exists():
-                    for mode in ("get_one", "get_all", "get_important"):
-                        _stage(f"加载 A2X {mode} ({ds})...", 35)
-                        try:
-                            search_service._get_a2x(ds, mode)
-                            logger.info("  A2X %s ready: %s", mode, ds)
-                        except Exception as e:
-                            logger.warning("  A2X %s failed for %s: %s", mode, ds, e)
-            logger.info("Warmup: A2X done (%.1fs)", time.time() - t0)
+        # 3. A2X engines — pure LLM, runs on the lite install too.
+        _stage("加载 A2X 搜索引擎...", 35)
+        for ds in discover_datasets():
+            paths = resolve_dataset_paths(ds)
+            if paths["taxonomy_path"].exists():
+                for mode in ("get_one", "get_all", "get_important"):
+                    _stage(f"加载 A2X {mode} ({ds})...", 35)
+                    try:
+                        search_service._get_a2x(ds, mode)
+                        logger.info("  A2X %s ready: %s", mode, ds)
+                    except Exception as e:
+                        logger.warning("  A2X %s failed for %s: %s", mode, ds, e)
+        logger.info("Warmup: A2X done (%.1fs)", time.time() - t0)
 
+        # Stages 4-6 truly need the [vector] extras (numpy / chromadb /
+        # sentence_transformers). On lite installs we skip them cleanly.
+        if feature_flags.has("vector"):
             # 4. Clean stale ChromaDB collections
             _stage("清理向量数据库...", 58)
             try:
@@ -139,7 +138,7 @@ def run_warmup() -> None:
                     except Exception as e:
                         logger.warning("  Embedding warmup failed for %s: %s", model_name, e)
         else:
-            logger.info("Warmup: lite install detected — skipping A2X / vector / chroma stages")
+            logger.info("Warmup: lite install detected — skipping vector / chroma stages")
 
         warmup_state["stage"] = "完成"
         warmup_state["progress"] = 100

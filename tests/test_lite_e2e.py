@@ -46,7 +46,11 @@ def lite_app(tmp_path_factory):
     run_warmup()
 
     from fastapi.testclient import TestClient
-    yield TestClient(app)
+    # raise_server_exceptions=False so downstream errors (e.g. missing
+    # taxonomy.json on a fresh dataset) come back as HTTP 500 instead of
+    # propagating to pytest. We're testing the *gate* behavior here, not
+    # the downstream search logic.
+    yield TestClient(app, raise_server_exceptions=False)
 
 
 def _agent_card(name: str = "agent-1") -> dict:
@@ -190,10 +194,15 @@ def test_embedding_models_lite_safe(lite_app):
     assert "all-MiniLM-L6-v2" in models
 
 
-# ── Heavy paths (must 503 with structured install hint) ──────────────────────
+# ── Gating contract ──────────────────────────────────────────────────────────
+# Only ``method=vector`` actually needs the [vector] extras. A2X and
+# Traditional are pure LLM and run on the lite install (they may still
+# fail downstream for missing taxonomy.json / LLM creds, but that is a
+# different failure mode — not a 503 from feature_flags).
 
 
-def test_search_returns_503(lite_app, dataset):
+def test_search_vector_returns_503(lite_app, dataset):
+    """method=vector must 503 with the structured install hint."""
     r = lite_app.post(
         "/api/search",
         json={"query": "x", "method": "vector", "dataset": dataset, "top_k": 3},
@@ -205,21 +214,41 @@ def test_search_returns_503(lite_app, dataset):
     assert "pip install 'a2x-registry[vector]'" in body["detail"]
 
 
-def test_search_judge_returns_503(lite_app):
+def test_search_a2x_does_not_503(lite_app, dataset):
+    """method=a2x_* must NOT 503 — A2X is pure LLM. Downstream may fail
+    for substantive reasons (e.g. no taxonomy.json) but the gate must
+    pass through."""
+    r = lite_app.post(
+        "/api/search",
+        json={"query": "x", "method": "a2x_get_all", "dataset": dataset, "top_k": 3},
+    )
+    assert r.status_code != 503, r.text
+
+
+def test_search_traditional_does_not_503(lite_app, dataset):
+    """method=traditional must NOT 503 — pure LLM full-context."""
+    r = lite_app.post(
+        "/api/search",
+        json={"query": "x", "method": "traditional", "dataset": dataset, "top_k": 3},
+    )
+    assert r.status_code != 503, r.text
+
+
+def test_search_judge_does_not_503(lite_app):
+    """/judge is pure LLM; no extras gating."""
     r = lite_app.post(
         "/api/search/judge",
         json={"query": "x", "services": []},
     )
-    assert r.status_code == 503
-    assert r.json()["extras"] == "vector"
+    assert r.status_code != 503, r.text
 
 
-def test_build_trigger_returns_503(lite_app, dataset):
+def test_build_trigger_does_not_503(lite_app, dataset):
+    """A2X build is pure LLM; available on lite (assuming LLM creds)."""
     r = lite_app.post(
         f"/api/datasets/{dataset}/build", json={"resume": "no"}
     )
-    assert r.status_code == 503
-    assert r.json()["extras"] == "vector"
+    assert r.status_code != 503, r.text
 
 
 def test_build_status_works_in_lite(lite_app, dataset):
@@ -229,12 +258,9 @@ def test_build_status_works_in_lite(lite_app, dataset):
     assert r.json()["status"] == "idle"
 
 
-def test_search_ws_returns_install_hint(lite_app, dataset):
-    """WebSocket: server accepts, then sends an error JSON with the hint."""
+def test_search_ws_vector_returns_install_hint(lite_app, dataset):
+    """WS with method=vector: server reads, gates, sends error JSON, closes."""
     with lite_app.websocket_connect("/api/search/ws") as ws:
-        # Server's `feature_flags.require("vector")` fires before reading
-        # input — but FastAPI WS handler reads first in our code, so we need
-        # to send something. Send a search request payload.
         ws.send_json({
             "query": "x", "method": "vector",
             "dataset": dataset, "top_k": 3,
