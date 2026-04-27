@@ -21,6 +21,7 @@
 
 ### 重构
 - `pyproject.toml` 依赖布局重写为 lite + extras 三段式
+- **CLI 重命名**：后端启动命令 `a2x-backend` → `a2x-registry`（与包名一致）；老命令在 0.1.6 起不再可用
 - README 快速开始拆分为"启动" / "使用"独立章节；`README_forAgentTeam.md` 重写围绕新的 lite 默认
 - 清理残留 `src.*` / `src/*` 路径引用（5 处文档/注释 + 1 处 evaluation CLI 默认路径修复）
 

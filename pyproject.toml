@@ -55,7 +55,7 @@ Issues = "https://github.com/Weizheng96/A2X-registry/issues"
 Documentation = "https://github.com/Weizheng96/A2X-registry#readme"
 
 [project.scripts]
-a2x-backend = "a2x_registry.backend.__main__:main"
+a2x-registry = "a2x_registry.backend.__main__:main"
 a2x-build = "a2x_registry.a2x.build.__main__:main"
 a2x-register = "a2x_registry.register.__main__:main"
 a2x-evaluate-a2x = "a2x_registry.a2x.evaluation.__main__:main"

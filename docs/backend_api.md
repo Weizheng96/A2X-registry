@@ -31,7 +31,7 @@ Content-Type: application/json
 | `POST /api/search`、`POST /api/search/judge`、`/api/search/ws` | 503（WS 握手后发 `{"type":"error","message":"… pip install …"}` 再关闭） | ✅ |
 | `/api/providers/*` | ✅（仅读 `llm_apikey.json`，需 LLM 配置） | ✅ |
 
-**复原**：在同一 venv 里运行 `pip install 'a2x-registry[full]'`（或 `[vector]` / `[evaluation]`）后**重启 `a2x-backend`** 即可，无需改代码或配置。检测使用 `importlib.util.find_spec`，重启时即时生效。
+**复原**：在同一 venv 里运行 `pip install 'a2x-registry[full]'`（或 `[vector]` / `[evaluation]`）后**重启 `a2x-registry`** 即可，无需改代码或配置。检测使用 `importlib.util.find_spec`，重启时即时生效。
 
 ## 路由总览
 

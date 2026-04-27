@@ -24,13 +24,13 @@ cd A2X-registry
 pip install -e .
 ```
 
-要求 Python ≥ 3.10。安装完成后即可使用 `a2x-backend` 启动注册中心。
+要求 Python ≥ 3.10。安装完成后即可使用 `a2x-registry` 启动注册中心。
 
 ### 精简版能力范围
 
 - ✅ **可用**：所有 SDK 接口（数据集 CRUD、agent 注册/注销/更新/状态、按字段查询、整卡覆盖、预订锁 reservation lease、`/embedding-models` 元数据、`/build/status` 状态查询）。
 
-如果同一环境之后想启用全量功能，运行 `pip install -e '.[full]'` 安装额外依赖然后**重启 `a2x-backend`** 即可，无需改任何代码。
+如果同一环境之后想启用全量功能，运行 `pip install -e '.[full]'` 安装额外依赖然后**重启 `a2x-registry`** 即可，无需改任何代码。
 
 ## 启动后端
 
@@ -39,7 +39,7 @@ pip install -e .
 **单机部署**（所有 Agent 与注册中心在同一台机器上）：
 
 ```bash
-a2x-backend                    # 默认监听 127.0.0.1:8000
+a2x-registry                    # 默认监听 127.0.0.1:8000
 ```
 
 客户端 SDK 的 `base_url` 填 `http://127.0.0.1:8000`。
@@ -47,8 +47,8 @@ a2x-backend                    # 默认监听 127.0.0.1:8000
 **分布式部署**（Agent 分散在多台机器上，需要跨机访问注册中心）：
 
 ```bash
-a2x-backend --host 0.0.0.0              # 监听所有网卡，默认端口 8000
-a2x-backend --host 0.0.0.0 --port 8080  # 指定端口
+a2x-registry --host 0.0.0.0              # 监听所有网卡，默认端口 8000
+a2x-registry --host 0.0.0.0 --port 8080  # 指定端口
 ```
 
 分布式部署下各端需要关注：

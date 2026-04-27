@@ -120,10 +120,12 @@ git clone https://github.com/Weizheng96/A2X-registry-demo-data.git database
 **方式 A：常规启动（仅后端）**
 
 ```bash
-a2x-backend                    # http://127.0.0.1:8000，docs 在 /docs
-a2x-backend --port 8080        # 换端口
-a2x-backend --host 0.0.0.0     # 开放到局域网
+a2x-registry                    # http://127.0.0.1:8000，docs 在 /docs
+a2x-registry --port 8080        # 换端口
+a2x-registry --host 0.0.0.0     # 开放到局域网
 ```
+
+> 0.1.6 起命令名从 `a2x-backend` 改为 `a2x-registry`（与包名一致）。老用户升级后老命令不再可用。
 
 **方式 B：带前端启动（后端 + 网页 UI，仅源码安装可用）**
 
@@ -157,7 +159,7 @@ https://github.com/Weizheng96/A2X-registry-demo-data/raw/doc/ui_demo.mp4
 
 #### 方式二：HTTP Fast API
 
-直接通过 HTTP 调用 `a2x-backend` 暴露的接口。
+直接通过 HTTP 调用 `a2x-registry` 暴露的接口。
 
 **数据集管理**：
 
