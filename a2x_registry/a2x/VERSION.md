@@ -1,6 +1,30 @@
 # A2X 版本说明
 
-## 当前版本: v0.1.6
+## 当前版本: v0.1.7（开发中）
+
+---
+
+## v0.1.7 (开发中)
+
+### 概述
+v0.1.6 的 gating 策略修正：把"任何辅助搜索/构建"统一关在 `[vector]` 后面是设计漏洞——A2X 搜索 / Traditional 搜索 / A2X 分类构建实际上都是纯 LLM 工作流，根本不需要 numpy / chromadb / sentence-transformers。本版本把 gating 改为按真实依赖精确锁定，把这些纯 LLM 能力从 lite 默认启用。
+
+### 新功能
+- **A2X 搜索在精简版默认可用**：`POST /api/search` 的 `method=a2x_get_one` / `a2x_get_all` / `a2x_get_important`，以及 `method=traditional`，全部在 lite 安装下可调用（前提：配好 LLM API key，A2X 搜索还需 `taxonomy.json`）
+- **A2X 分类构建在精简版默认可用**：`POST /api/datasets/{ds}/build` 与 `a2x-build` CLI 不再要求 `[vector]`
+- **`/api/search/judge`**（LLM 相关性判定）也是纯 LLM，去掉 gating
+
+### 重构
+- **按真实依赖精确 gating**：`[vector]` extras 只锁真正需要 `numpy` / `chromadb` / `sentence-transformers` 的功能（向量检索 + 向量索引同步 + 嵌入模型预热）。`a2x-evaluate-a2x` / `a2x-evaluate-traditional` 只需 `[evaluation]`（tqdm）即可，不再要求 `[vector]`；`a2x-evaluate-vector` 仍需两者
+- WebSocket `/api/search/ws` 改为读完请求后再按 `method` 决定是否 require
+- `startup.py` 把 A2X 引擎 warmup 移出 `has("vector")` 块（A2X 不需要 vector deps）
+- `__version__` 升至 `0.1.7.dev0`（PEP 440 pre-release 标识，区分 develop HEAD 与已发布的 v0.1.6）
+
+### 测试
+- `tests/test_lite_e2e.py` 新增 3 条 "must not 503" 用例（a2x / traditional / judge）；移除已过时的 `test_search_judge_returns_503` / `test_build_trigger_returns_503`；总数 11 → 14（lite e2e 套件）
+
+### 评估结果
+与 v0.1.5 / v0.1.6 一致（本次为 gating 策略修正，无算法变更）。
 
 ---
 
@@ -22,9 +46,11 @@
 ### 重构
 - `pyproject.toml` 依赖布局重写为 lite + extras 三段式
 - **CLI 重命名**：后端启动命令 `a2x-backend` → `a2x-registry`（与包名一致）；老命令在 0.1.6 起不再可用
-- **按真实依赖精确 gating**：`[vector]` extras 只锁真正需要 `numpy` / `chromadb` / `sentence-transformers` 的功能（向量检索）；A2X 搜索 / Traditional 搜索 / A2X 分类构建本就是纯 LLM 工作流（仅需 `requests`），从 lite 默认启用，无需安装 `[vector]`。`a2x-evaluate-a2x` / `a2x-evaluate-traditional` 只需 `[evaluation]`（tqdm）即可
 - README 快速开始拆分为"启动" / "使用"独立章节；`README_forAgentTeam.md` 重写围绕新的 lite 默认
 - 清理残留 `src.*` / `src/*` 路径引用（5 处文档/注释 + 1 处 evaluation CLI 默认路径修复）
+
+### 已知遗憾（v0.1.7 修正）
+- 把 A2X 搜索 / Traditional 搜索 / A2X 分类构建一并关在 `[vector]` 后面属设计漏洞——这三个都是纯 LLM 工作流，本应在 lite 默认可用。0.1.7 修正
 
 ### 评估结果
 与 v0.1.5 一致（本次为依赖打包重构，无算法变更）。
