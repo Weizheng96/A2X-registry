@@ -1,13 +1,18 @@
 """Query (search) feature tests.
 
 Covers the A2X search surface:
-- POST /api/search           — sync search (503 in lite, gate-passes in full)
-- POST /api/search/judge     — relevance judge (503 in lite)
-- WS   /api/search/ws        — streaming search (lite delivers install hint)
+- POST /api/search           — sync search; ``method="vector"`` gates on
+                               ``[vector]`` extras (503 in lite). A2X /
+                               Traditional methods are pure-LLM and run on
+                               lite as long as ``llm_apikey.json`` exists.
+- POST /api/search/judge     — relevance judge; pure-LLM, no extras gating.
+                               Returns 503 with ``reason="llm_not_configured"``
+                               when ``llm_apikey.json`` is absent.
+- WS   /api/search/ws        — streaming search (lite delivers install hint
+                               for vector method).
 
-In lite mode every search route must respond with the structured
-``FeatureNotInstalledError`` body so SDK users get a copy-pasteable
-``pip install`` hint instead of a stack trace.
+Each "503 in lite" assertion below is checking the *structured* error body
+so SDK users see an actionable copy-pasteable hint, not a stack trace.
 """
 
 from __future__ import annotations
@@ -25,13 +30,21 @@ def test_search_returns_503(lite_app, dataset):
     assert "pip install 'a2x-registry[vector]'" in body["detail"]
 
 
-def test_search_judge_returns_503(lite_app):
+def test_search_judge_returns_503_when_llm_unconfigured(lite_app):
+    """Judge is pure-LLM and un-gated from [vector], but it still needs
+    ``llm_apikey.json``. In the lite test fixture the env var
+    ``A2X_REGISTRY_HOME`` points at an empty tmp dir, so the LLM client
+    raises ``LLMNotConfiguredError`` which the app handler renders as 503
+    with ``reason: "llm_not_configured"`` + setup instructions in ``detail``.
+    """
     r = lite_app.post(
         "/api/search/judge",
         json={"query": "x", "services": []},
     )
     assert r.status_code == 503
-    assert r.json()["extras"] == "vector"
+    body = r.json()
+    assert body["reason"] == "llm_not_configured"
+    assert "llm_apikey.json" in body["detail"]
 
 
 def test_search_ws_returns_install_hint(lite_app, dataset):
