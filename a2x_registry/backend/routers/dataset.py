@@ -6,14 +6,19 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from a2x_registry.auth.deps import (
+    authorize, get_auth_store, require_admin, require_admin_or_anon,
+    require_admin_strict,
+)
 from a2x_registry.backend.schemas.models import DatasetInfo, DefaultQuery
 from a2x_registry.backend.services.search_service import search_service
 from a2x_registry.backend.services.taxonomy_service import get_taxonomy_tree
 from a2x_registry.backend.default_queries import get_default_queries
+from a2x_registry.common.auth_context import AuthContext
 from a2x_registry.register.errors import RegistryNotFoundError
 from a2x_registry.register.models import (
     RegisterGenericRequest, RegisterA2ARequest,
@@ -87,13 +92,60 @@ class CreateDatasetRequest(BaseModel):
     # Optional {type: min_version} declaring which registration formats this
     # dataset will accept. Missing/None → all three types allowed from v0.0.
     formats: Optional[dict] = None
+    # Opt-in: when True, mutations on this dataset will require a valid
+    # API key with namespace access (enforced once the auth router lands
+    # in Phase D). Default False keeps backward-compat — datasets created
+    # without this field stay fully anonymous, identical to today.
+    auth_required: bool = False
 
 
 @router.post("")
-async def create_dataset(req: CreateDatasetRequest):
-    """Create a new empty dataset directory with embedding + register-format config."""
+async def create_dataset(
+    req: CreateDatasetRequest,
+    request: Request,
+):
+    """Create a new empty dataset directory with embedding + register-format config.
+
+    Auth behavior:
+      - ``auth_required=False`` (default): no token check — preserves the
+        legacy fully-anonymous behavior for every existing caller.
+      - ``auth_required=True``: requires admin token AND a bootstrapped
+        auth store. If the store is None we return 409 with an actionable
+        message telling the operator how to bootstrap.
+    """
     svc = get_registry_service()
-    await _run(svc.create_dataset, req.name, req.embedding_model, req.formats)
+    if req.auth_required:
+        store = get_auth_store()
+        if store is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "auth_not_initialized: cannot create an auth-required "
+                    "namespace before bootstrapping. Run "
+                    "'a2x-registry auth init' first."
+                ),
+            )
+        # Inline admin check (FastAPI Depends would require restructuring;
+        # the body-driven conditional gating is clearer inline here).
+        auth_header = request.headers.get("authorization")
+        from a2x_registry.auth.deps import _parse_bearer
+        from a2x_registry.auth.errors import AuthenticationError
+        token = _parse_bearer(auth_header)
+        if token is None:
+            raise HTTPException(401, "Admin token required to create auth-required namespace",
+                                headers={"WWW-Authenticate": "Bearer"})
+        try:
+            ctx = store.authenticate(token)
+        except AuthenticationError as exc:
+            raise HTTPException(401, str(exc), headers={"WWW-Authenticate": "Bearer"}) from exc
+        if not ctx.is_admin:
+            store.audit("permission.denied", reason="admin_required",
+                        principal_id=ctx.principal_id, role=ctx.role)
+            raise HTTPException(403, "Admin role required to create auth-required namespace")
+    await _run(
+        svc.create_dataset,
+        req.name, req.embedding_model, req.formats, req.auth_required,
+    )
     # Echo back the *resolved* embedding model (None → default) by re-reading
     # the persisted vector_config — single source of truth for what's on disk.
     persisted = svc.get_vector_config(req.name)
@@ -101,8 +153,47 @@ async def create_dataset(req: CreateDatasetRequest):
         "dataset": req.name,
         "embedding_model": persisted["embedding_model"],
         "formats": svc.get_register_config(req.name),
+        "auth_required": svc.is_auth_required(req.name),
         "status": "created",
     }
+
+
+# ── Auth config toggle (admin-only, only valid when store is initialized) ──
+
+@router.get("/{dataset}/auth-config")
+async def get_auth_config(dataset: str):
+    """Read the per-namespace auth flag. Public — no token required."""
+    svc = get_registry_service()
+    if not (svc._database_dir / dataset).exists():
+        raise HTTPException(404, f"Dataset '{dataset}' not found")
+    return {"dataset": dataset, "required": svc.is_auth_required(dataset)}
+
+
+class AuthConfigRequest(BaseModel):
+    required: bool
+
+
+@router.post("/{dataset}/auth-config")
+async def set_auth_config(
+    dataset: str,
+    req: AuthConfigRequest,
+    _admin: AuthContext = Depends(require_admin_strict),
+):
+    """Toggle the per-namespace auth flag. Admin-only.
+
+    Note: turning auth ON for a namespace that already has entries leaves
+    those entries with ``owner_id=None`` → only admin can mutate them
+    until they're re-registered. Documented in the design as the least-
+    surprising semantics for retrofit; admins can ``PATCH`` ownership
+    onto specific entries later if needed.
+    """
+    cfg = await _run(svc_set_auth_config, dataset, req.required)
+    return {"dataset": dataset, **cfg}
+
+
+def svc_set_auth_config(dataset: str, required: bool):
+    """Adapter for ``_run`` — keeps the awaited call site short."""
+    return get_registry_service().set_auth_config(dataset, required)
 
 
 # ── Registration format config ────────────────────────────────────────────────
@@ -112,18 +203,26 @@ class RegisterConfigRequest(BaseModel):
 
 
 @router.get("/{dataset}/register-config")
-async def get_register_config(dataset: str):
+async def get_register_config(
+    dataset: str,
+    _ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Return the per-type ``min_version`` map that gates registration."""
     svc = get_registry_service()
     return {"dataset": dataset, "formats": svc.get_register_config(dataset)}
 
 
 @router.post("/{dataset}/register-config")
-async def set_register_config(dataset: str, req: RegisterConfigRequest):
+async def set_register_config(
+    dataset: str, req: RegisterConfigRequest,
+    _ctx: Optional[AuthContext] = Depends(require_admin_or_anon),
+):
     """Replace the allowed registration formats for a dataset.
 
     Body: ``{"formats": {"generic": "v0.0", "a2a": "v1.0", "skill": "v0.0"}}``.
     Unknown types / versions are silently dropped. Empty result → 400.
+
+    Admin-only on auth-required datasets; anon-OK on legacy datasets.
     """
     svc = get_registry_service()
     cfg = await _run(svc.set_register_config, dataset, req.formats)
@@ -131,8 +230,14 @@ async def set_register_config(dataset: str, req: RegisterConfigRequest):
 
 
 @router.delete("/{dataset}")
-async def delete_dataset(dataset: str):
-    """Delete a dataset directory and all associated data."""
+async def delete_dataset(
+    dataset: str,
+    _ctx: Optional[AuthContext] = Depends(require_admin_or_anon),
+):
+    """Delete a dataset directory and all associated data.
+
+    Admin-only on auth-required datasets; anon-OK on legacy datasets.
+    """
     search_service.purge_dataset(dataset)
     await _run(get_registry_service().delete_dataset, dataset)
     return {"dataset": dataset, "status": "deleted"}
@@ -191,6 +296,7 @@ async def list_services(
     size: int = Query(-1, ge=-1),
     page: int = Query(1, ge=1),
     include_leased: bool = Query(False, description="include reserved (leased) entries"),
+    _ctx: Optional[AuthContext] = Depends(authorize),
 ):
     """List services in a dataset, optionally filtered.
 
@@ -269,7 +375,10 @@ async def list_services(
 
 
 @router.get("/{dataset}/services/{service_id}")
-async def get_single_service(dataset: str, service_id: str):
+async def get_single_service(
+    dataset: str, service_id: str,
+    _ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Fetch a single service by ID.
 
     For a2a / generic: returns the full wrapped entry as JSON.
@@ -306,21 +415,41 @@ async def get_single_service(dataset: str, service_id: str):
 
 
 @router.post("/{dataset}/services/generic", response_model=RegisterResponse)
-async def register_generic(dataset: str, req: RegisterGenericRequest):
-    """Register a generic service."""
+async def register_generic(
+    dataset: str, req: RegisterGenericRequest,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
+    """Register a generic service.
+
+    ``ctx`` is set by the ``authorize`` dep when the dataset is auth-required;
+    None for anon namespaces (backward-compat). The service layer writes
+    ``owner_id = ctx.principal_id`` when set, ``None`` otherwise.
+    """
     req.dataset = dataset
-    return await _run(get_registry_service().register_generic, req)
+    return await _run(get_registry_service().register_generic, req, ctx)
 
 
 @router.post("/{dataset}/services/a2a", response_model=RegisterResponse)
-async def register_a2a(dataset: str, req: RegisterA2ARequest):
+async def register_a2a(
+    dataset: str, req: RegisterA2ARequest,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Register an A2A agent."""
     req.dataset = dataset
-    return await _run(get_registry_service().register_a2a, req)
+    return await _run(get_registry_service().register_a2a, req, ctx)
+
+
+# Fields a non-admin caller may NEVER write via PUT — server identity
+# columns. Filtered before the merge so a provider can't relabel their
+# ownership of a service.
+_FORBIDDEN_UPDATE_FIELDS = frozenset({"owner_id", "service_id", "type", "source"})
 
 
 @router.put("/{dataset}/services/{service_id}", response_model=UpdateResponse)
-async def update_service(dataset: str, service_id: str, updates: dict):
+async def update_service(
+    dataset: str, service_id: str, updates: dict,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Partially update a service by top-level field upsert.
 
     Body is an arbitrary ``{field: value}`` dict. Fields not present are
@@ -328,19 +457,28 @@ async def update_service(dataset: str, service_id: str, updates: dict):
     fields are only added/replaced, not removed). Changing ``name`` or
     ``description`` marks the taxonomy as stale.
 
+    Server identity fields (``owner_id``, ``service_id``, ``type``,
+    ``source``) are stripped from the body before merge — providers must
+    not be able to relabel ownership or service type via PUT.
+
     Rejected:
       - user_config-sourced entries (edit user_config.json directly)
       - unknown fields for generic / skill types (strict schema)
       - skill rename whose target folder already exists
     """
+    if isinstance(updates, dict):
+        updates = {k: v for k, v in updates.items() if k not in _FORBIDDEN_UPDATE_FIELDS}
     return await _run(get_registry_service().update_service,
-                      dataset, service_id, updates)
+                      dataset, service_id, updates, ctx)
 
 
 @router.delete("/{dataset}/services/{service_id}", response_model=DeregisterResponse)
-async def deregister(dataset: str, service_id: str):
+async def deregister(
+    dataset: str, service_id: str,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Deregister a service."""
-    return await _run(get_registry_service().deregister, dataset, service_id)
+    return await _run(get_registry_service().deregister, dataset, service_id, ctx)
 
 
 # ── Reservations (in-memory leases) ──────────────────────────────────────────
@@ -353,12 +491,15 @@ class ReservationRequest(BaseModel):
 
 
 @router.post("/{dataset}/reservations")
-async def create_reservation(dataset: str, req: ReservationRequest):
+async def create_reservation(
+    dataset: str, req: ReservationRequest,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Reserve up to ``n`` services matching ``filters``, locked for ``ttl_seconds``.
 
-    Returns the lease holder_id (caller-supplied or auto-generated) and the
-    list of wrapped service entries that were claimed. If fewer than ``n``
-    services match (or are unleased), returns whatever was claimed.
+    On auth-required namespaces, ``holder_id`` in the request body is
+    silently overridden with the caller's principal_id (the service layer
+    handles this when ``ctx`` is non-None).
 
     Body: {filters, n, ttl_seconds, holder_id}
     Resp: {holder_id, ttl_seconds, expires_at_unix, reservations: [...]}
@@ -366,7 +507,7 @@ async def create_reservation(dataset: str, req: ReservationRequest):
     svc = get_registry_service()
     holder_id, expires_at_unix, claimed = await _run(
         svc.reserve_services,
-        dataset, req.filters, req.n, req.ttl_seconds, req.holder_id,
+        dataset, req.filters, req.n, req.ttl_seconds, req.holder_id, ctx,
     )
     return {
         "holder_id": holder_id,
@@ -377,23 +518,34 @@ async def create_reservation(dataset: str, req: ReservationRequest):
 
 
 @router.delete("/{dataset}/reservations/{holder_id}")
-async def release_reservation_bulk(dataset: str, holder_id: str):
-    """Release ALL leases held by ``holder_id`` in this dataset. Idempotent."""
+async def release_reservation_bulk(
+    dataset: str, holder_id: str,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
+    """Release ALL leases held by ``holder_id`` in this dataset. Idempotent.
+
+    On auth-required namespaces, non-admin callers can only release their
+    own holder_id (enforced in the service layer).
+    """
     svc = get_registry_service()
-    released = await _run(svc.release_reservation, dataset, holder_id, None)
+    released = await _run(svc.release_reservation, dataset, holder_id, None, ctx)
     return {"released": released}
 
 
 @router.delete("/{dataset}/reservations/{holder_id}/{service_id}")
-async def release_reservation_one(dataset: str, holder_id: str, service_id: str):
+async def release_reservation_one(
+    dataset: str, holder_id: str, service_id: str,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Release a single sid lease IF held by ``holder_id``.
 
     - Lease missing → ``released: []`` (idempotent)
     - Lease held by a DIFFERENT holder → ``403`` (via _run mapping)
+    - On auth-required namespaces, non-admin caller != path holder → ``403``
     """
     svc = get_registry_service()
     released = await _run(
-        svc.release_reservation, dataset, holder_id, [service_id],
+        svc.release_reservation, dataset, holder_id, [service_id], ctx,
     )
     return {"released": released}
 
@@ -401,24 +553,30 @@ async def release_reservation_one(dataset: str, holder_id: str, service_id: str)
 @router.post("/{dataset}/reservations/{holder_id}/extend")
 async def extend_reservation(
     dataset: str, holder_id: str, body: dict,
+    ctx: Optional[AuthContext] = Depends(authorize),
 ):
     """Extend all of holder's leases by ``ttl_seconds``. 404 if none held."""
     ttl = int(body.get("ttl_seconds", 30))
     svc = get_registry_service()
-    new_expires_at = await _run(svc.extend_reservation, dataset, holder_id, ttl)
+    new_expires_at = await _run(svc.extend_reservation, dataset, holder_id, ttl, ctx)
     return {"expires_at_unix": new_expires_at}
 
 
 @router.delete("/{dataset}/services/{service_id}/lease")
-async def release_lease_self(dataset: str, service_id: str):
+async def release_lease_self(
+    dataset: str, service_id: str,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Release ANY lease on (dataset, service_id) regardless of holder.
 
     Used by the teammate-self path: the agent itself doesn't know who locked
-    it. SDK ``_owned`` check is the authorization gate. Idempotent.
+    it. On anon namespaces, SDK ``_owned`` check is the only gate; on
+    auth-required namespaces, the caller must be the entry owner (or admin).
+    Idempotent.
     """
     svc = get_registry_service()
     released, prev_holder_id = await _run(
-        svc.release_lease_by_sid, dataset, service_id,
+        svc.release_lease_by_sid, dataset, service_id, ctx,
     )
     return {"released": released, "prev_holder_id": prev_holder_id}
 
@@ -426,21 +584,30 @@ async def release_lease_self(dataset: str, service_id: str):
 # ── Skills (register / download / delete) ─────────────────────────────────────
 
 @router.post("/{dataset}/skills", response_model=SkillResponse)
-async def upload_skill(dataset: str, file: UploadFile = File(...)):
+async def upload_skill(
+    dataset: str, file: UploadFile = File(...),
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Upload a skill as a ZIP file. ZIP must contain SKILL.md with valid frontmatter."""
     zip_bytes = await file.read()
     svc = get_registry_service()
-    return await _run(svc.register_skill, dataset, zip_bytes)
+    return await _run(svc.register_skill, dataset, zip_bytes, ctx)
 
 
 @router.delete("/{dataset}/skills/{name}", response_model=SkillResponse)
-async def delete_skill(dataset: str, name: str):
+async def delete_skill(
+    dataset: str, name: str,
+    ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Delete a skill and its registry entry."""
-    return await _run(get_registry_service().deregister_skill, dataset, name)
+    return await _run(get_registry_service().deregister_skill, dataset, name, ctx)
 
 
 @router.get("/{dataset}/skills/{name}/download")
-async def download_skill(dataset: str, name: str):
+async def download_skill(
+    dataset: str, name: str,
+    _ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Download a skill folder as a ZIP file."""
     svc = get_registry_service()
     try:
@@ -457,7 +624,10 @@ async def download_skill(dataset: str, name: str):
 # ── Taxonomy ──────────────────────────────────────────────────────────────────
 
 @router.get("/{dataset}/taxonomy")
-async def get_taxonomy(dataset: str):
+async def get_taxonomy(
+    dataset: str,
+    _ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Return taxonomy tree structure for D3.js visualization."""
     try:
         return get_taxonomy_tree(dataset)
@@ -468,7 +638,10 @@ async def get_taxonomy(dataset: str):
 # ── Default queries ───────────────────────────────────────────────────────────
 
 @router.get("/{dataset}/default-queries")
-async def default_queries(dataset: str):
+async def default_queries(
+    dataset: str,
+    _ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Return all default queries for the given dataset in original order.
 
     Response includes a ``source`` field so the frontend can detect when two
@@ -493,15 +666,24 @@ async def list_embedding_models():
 
 
 @router.get("/{dataset}/vector-config")
-async def get_vector_config(dataset: str):
+async def get_vector_config(
+    dataset: str,
+    _ctx: Optional[AuthContext] = Depends(authorize),
+):
     """Get the vector (embedding) config for a dataset."""
     cfg = get_registry_service().get_vector_config(dataset)
     return {"dataset": dataset, **cfg}
 
 
 @router.post("/{dataset}/vector-config")
-async def set_vector_config(dataset: str, body: dict):
-    """Set the embedding model for a dataset. Triggers vector index rebuild."""
+async def set_vector_config(
+    dataset: str, body: dict,
+    _ctx: Optional[AuthContext] = Depends(require_admin_or_anon),
+):
+    """Set the embedding model for a dataset. Triggers vector index rebuild.
+
+    Admin-only on auth-required datasets; anon-OK on legacy datasets.
+    """
     svc = get_registry_service()
     cfg = await _run(
         svc.set_vector_config,

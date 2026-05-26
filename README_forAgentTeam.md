@@ -61,3 +61,17 @@ a2x-registry --host 0.0.0.0 --port 8080  # 指定端口
 4. **生产环境**（可选）：建议前面挂 nginx 反向代理 + HTTPS，客户端使用 `https://registry.yourdomain.com`
 
 后端启动后，即可使用注册中心客户端 SDK 进行相关操作。
+
+## 鉴权（可选）
+
+精简版默认完全开放，与 0.1.6 行为完全一致 —— Agent Team 内部场景通常不需要鉴权。
+
+如果要把注册中心暴露到公网或多团队共享（一台注册中心服务多个互不信任的 Agent Team），可启用静态 API Key 鉴权：
+
+```bash
+a2x-registry auth init                          # 一次性 bootstrap，stderr 打印 admin token
+```
+
+之后管理员可以：① 为整个 Agent Team 池创建 `auth_required=true` 的 namespace；② 为每个 Agent 进程 / teammate 颁发 `provider` 角色的 token，scope 到该 namespace；③ 为协调方颁发 `user` 角色 token，只读 + 预约。token 通过 `cli_token.json` 配置文件分发，详见 [docs/auth_design.md](docs/auth_design.md) 与 [A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client/blob/main/README.md)。
+
+未跑 `auth init` 的部署 + 未声明 `auth_required` 的 namespace 永远走匿名通道，向前兼容已部署的 Agent Team 客户端无需任何改动。

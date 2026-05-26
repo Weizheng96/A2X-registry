@@ -50,6 +50,31 @@ def run_warmup() -> None:
             logger.info("  Registry %s: %d services, taxonomy=%s", ds, count, state.value)
 
         set_registry(registry_svc)
+
+        # 1b. Auth store — load if bootstrapped, else leave global at None
+        # so every request flows through the anonymous fast-path. Loading
+        # is synchronous and cheap (one or two small JSON files); never
+        # fails the warmup — auth corruption is logged but the server
+        # still starts so operators can investigate via /api/warmup-status.
+        try:
+            from a2x_registry.auth.store import AuthStore
+            from a2x_registry.auth.deps import set_auth_store
+            auth_store = AuthStore.load_or_none()
+            set_auth_store(auth_store)
+            if auth_store is not None:
+                logger.info(
+                    "  Auth store loaded (%d principals, %d keys) at %s",
+                    len(auth_store.list_principals()),
+                    len(auth_store.list_keys()),
+                    auth_store.data_dir,
+                )
+            else:
+                logger.info("  Auth not initialized — registry runs in anonymous mode")
+        except Exception as exc:
+            logger.error("  Auth store load failed: %s", exc, exc_info=True)
+            from a2x_registry.auth.deps import set_auth_store
+            set_auth_store(None)
+
         # Only wire vector-sync side effects when the [vector] extras are
         # installed; otherwise every SDK register/deregister would spawn a
         # daemon thread that immediately ImportErrors on chromadb.

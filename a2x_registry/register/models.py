@@ -88,6 +88,13 @@ class RegistryEntry(BaseModel):
     agent_card: Optional[AgentCard] = None
     agent_card_url: Optional[str] = None
     skill_data: Optional[SkillData] = None
+    # Auth-aware ownership. ``None`` for legacy entries, entries from
+    # ``user_config.json``, and any entry registered against an
+    # ``auth_required=false`` namespace. Set to the caller principal_id when
+    # an authenticated registration lands on an auth-required namespace.
+    # Entries with ``owner_id=None`` in an auth-required namespace are
+    # "unclaimed" and only admin can mutate them.
+    owner_id: Optional[str] = None
 
 
 # --- HTTP request models ---

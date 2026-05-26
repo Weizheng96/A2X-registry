@@ -24,9 +24,15 @@ USER_CONFIG_FILE = "user_config.json"
 API_CONFIG_FILE = "api_config.json"
 REGISTER_CONFIG_FILE = "register_config.json"
 VECTOR_CONFIG_FILE = "vector_config.json"
+AUTH_CONFIG_FILE = "auth_config.json"
 SERVICE_JSON_FILE = "service.json"
 SKILLS_DIR = "skills"
 REMOVED_SKILLS_DIR = "removed_skills"
+
+# Default behavior when ``auth_config.json`` is missing: the namespace is
+# anonymous (backward-compat with every dataset created before this module
+# existed). Setting ``required: true`` is opt-in per dataset.
+AUTH_CONFIG_DEFAULT: Dict[str, Any] = {"required": False, "schema_version": 1}
 
 
 class RegistryStore:
@@ -313,6 +319,41 @@ class RegistryStore:
             {"embedding_model": embedding_model, "embedding_dim": embedding_dim},
         )
 
+    # --- Auth config (per-namespace opt-in) ---
+
+    def load_auth_config(self) -> Dict[str, Any]:
+        """Read ``auth_config.json``; missing file → backward-compat default.
+
+        Returns a dict at least containing ``required: bool``. The default
+        when the file is absent is ``{"required": False, ...}`` so existing
+        datasets (created before this field existed) behave as anonymous.
+        Malformed file → log + default; never raises, never blocks startup.
+        """
+        path = self._dir / AUTH_CONFIG_FILE
+        if not path.exists():
+            return dict(AUTH_CONFIG_DEFAULT)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                logger.warning("Malformed %s (not a dict); falling back to default", path)
+                return dict(AUTH_CONFIG_DEFAULT)
+            required = bool(data.get("required", False))
+            return {
+                "required": required,
+                "schema_version": int(data.get("schema_version", 1)),
+            }
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            logger.warning("Failed to load %s: %s; falling back to default", path, exc)
+            return dict(AUTH_CONFIG_DEFAULT)
+
+    def write_auth_config(self, required: bool) -> None:
+        """Persist ``auth_config.json`` with ``{"required": bool, ...}``."""
+        _atomic_write(
+            self._dir / AUTH_CONFIG_FILE,
+            {"required": bool(required), "schema_version": 1},
+        )
+
 
 # ---------------------------------------------------------------------------
 # Module-level utilities (no instance state, reusable)
@@ -353,6 +394,7 @@ def _parse_service_entry(svc: dict, source: str) -> Optional[RegistryEntry]:
     """Parse a single service dict from config into a RegistryEntry."""
     svc_type = svc.get("type", "generic")
     service_id = svc.get("service_id", "")
+    owner_id = svc.get("owner_id") or None  # missing field → unclaimed/legacy
 
     if svc_type == "generic":
         name = (svc.get("name") or "").strip()
@@ -365,6 +407,7 @@ def _parse_service_entry(svc: dict, source: str) -> Optional[RegistryEntry]:
             service_id=service_id,
             type="generic",
             source=source,
+            owner_id=owner_id,
             service_data=GenericServiceData(
                 name=name, description=desc,
                 inputSchema=svc.get("inputSchema", {}),
@@ -380,13 +423,19 @@ def _parse_service_entry(svc: dict, source: str) -> Optional[RegistryEntry]:
             service_id = generate_service_id("agent", name)
         return RegistryEntry(
             service_id=service_id, type="a2a", source=source,
+            owner_id=owner_id,
             agent_card=agent_card, agent_card_url=card_url,
         )
     return None
 
 
 def _entry_to_config_dict(entry: RegistryEntry) -> dict:
-    """Convert a RegistryEntry back to the config file dict format."""
+    """Convert a RegistryEntry back to the config file dict format.
+
+    ``owner_id`` is omit-when-None so pre-auth ``api_config.json`` files
+    stay byte-equal after a round-trip (the backward-compat lockfile relies
+    on this).
+    """
     d: dict = {"type": entry.type, "service_id": entry.service_id}
     if entry.type == "generic" and entry.service_data:
         d["name"] = entry.service_data.name
@@ -400,6 +449,8 @@ def _entry_to_config_dict(entry: RegistryEntry) -> dict:
             d["agent_card_url"] = entry.agent_card_url
         if entry.agent_card:
             d["agent_card"] = entry.agent_card.model_dump(exclude_defaults=True)
+    if entry.owner_id:
+        d["owner_id"] = entry.owner_id
     return d
 
 

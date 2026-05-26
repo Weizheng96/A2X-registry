@@ -263,6 +263,29 @@ curl -X POST http://localhost:8000/api/datasets/my_dataset/vector-config \
 | `shibing624/text2vec-base-chinese` | 768 | 中文 |
 | `paraphrase-multilingual-MiniLM-L12-v2` | 384 | 多语言 |
 
+### 鉴权（可选）
+
+默认完全开放：任何调用方均可注册 / 改 / 删。**0.1.7 起内置静态 API Key 鉴权模块**，向前兼容 —— 不启用时行为与之前版本完全一致。
+
+启用一次（生成第一个管理员 token，stderr 一次性打印）：
+
+```bash
+a2x-registry auth init
+```
+
+之后创建需要鉴权的 namespace 时显式声明：
+
+```bash
+curl -X POST http://localhost:8000/api/datasets \
+     -H "Authorization: Bearer <admin token>" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "my_protected_ns", "auth_required": true}'
+```
+
+未带 `auth_required` 的 namespace（包括所有 0.1.6 及之前创建的数据集）行为不变，无需 token。三档角色（admin / provider / user）+ namespace 作用域设计详见 [docs/auth_design.md](docs/auth_design.md)。
+
+客户端 SDK 通过 `~/.a2x_registry_client/cli_token.json` 配置文件读取 token（由 `a2x-registry-client login` 写入），详见 [A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client/blob/main/README.md)。
+
 > 完整 API 文档见 [docs/backend_api.md](docs/backend_api.md)，各模块内部接口见对应设计文档。
 
 > 同时我们为 Agent Team 场景提供特化的 Python 客户端 SDK：[A2X-registry-client](https://github.com/Weizheng96/A2X-registry-client)。
@@ -317,6 +340,7 @@ curl -X POST http://localhost:8000/api/datasets/my_dataset/vector-config \
 | [docs/register_design.md](docs/register_design.md) | 服务注册模块设计 |
 | [docs/search_design.md](docs/search_design.md) | 搜索流程详细设计 |
 | [docs/incremental_design.md](docs/incremental_design.md) | 增量构建设计 |
+| [docs/auth_design.md](docs/auth_design.md) | 鉴权模块设计（静态 API Key + 三档角色 + namespace 作用域；默认关闭） |
 
 ## 适用场景
 

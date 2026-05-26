@@ -7,6 +7,7 @@
 - [build_design.md](build_design.md) — A2X 分类树自动构建
 - [search_design.md](search_design.md) — A2X 搜索算法
 - [incremental_design.md](incremental_design.md) — 增量构建
+- [auth_design.md](auth_design.md) — 鉴权模块（静态 API Key + 三档角色 + namespace 作用域，**默认关闭，向前兼容**）
 - [backend_api.md](backend_api.md) — 后端 HTTP API
 - [frontend_design.md](frontend_design.md) — Web UI
 - [a2x_design.md](a2x_design.md) — 系统整体视图（更深入）
@@ -18,15 +19,22 @@ a2x_registry/                      # pip 包根
 ├── common/                        # 横切层：models / errors / paths / naming
 │   ├── llm_client.py              #   多 provider LLM 客户端（requests）
 │   ├── feature_flags.py           #   has() / require() — 检测可选 extras
+│   ├── auth_context.py            #   中立 AuthContext dataclass（register/auth 共用）
 │   └── errors.py                  #   FeatureNotInstalledError 等
 ├── register/                      # 注册中心核心
 │   ├── service.py                 #   RegistryService（多数据集 CRUD + 预订锁）
 │   ├── store.py                   #   service.json / api_config.json 持久化
 │   ├── validation.py              #   Generic / A2A / Skill 校验
 │   └── agent_card.py              #   AgentCard 抓取与描述生成
+├── auth/                          # 鉴权模块（默认关闭；不 import register/）
+│   ├── store.py                   #   AuthStore：principal/key 文件 IO + 索引
+│   ├── deps.py                    #   FastAPI Depends（authorize / require_admin / ...）
+│   ├── router.py                  #   /api/auth/* 端点
+│   ├── cli.py                     #   `a2x-registry auth init / reset-admin`
+│   └── auth_data/                 #   运行时数据，.gitignore，不进 wheel
 ├── backend/                       # FastAPI 应用
 │   ├── app.py                     #   入口、CORS、503 异常 handler
-│   ├── startup.py                 #   warmup（按 has("vector") 分阶段）
+│   ├── startup.py                 #   warmup（按 has("vector") 分阶段；加载 AuthStore）
 │   ├── routers/                   #   dataset / search / build / provider
 │   └── services/                  #   search_service / taxonomy_service
 ├── a2x/                           # 纯 LLM，lite 可用
@@ -111,6 +119,21 @@ a2x_registry/                      # pip 包根
 | 接口 | 说明 |
 |---|---|
 | `traditional.search.traditional_search.TraditionalSearch.search(query)` | 把全部服务塞 LLM context 由 LLM 选择 |
+
+### 2.7 `auth/` — 静态 API Key 鉴权（默认关闭）
+
+**两层 opt-in**：注册中心未跑 `a2x-registry auth init` 时，所有 `/api/auth/*` 返回 404、所有 namespace 维持完全匿名（与无鉴权代码 byte-equal）；每个 namespace 通过 `auth_required=true` 才进入鉴权路径。
+
+| 接口 | 说明 |
+|---|---|
+| `auth.cli.main(["init"])` | 首次 bootstrap，生成第一个 admin principal + key |
+| `auth.store.AuthStore.load_or_none()` | 启动时由 `backend/startup.py` 调用；未 bootstrap 返回 None |
+| `auth.deps.authorize` | 单一 FastAPI Depends，按 `request.path_params["dataset"]` 自动分流匿名 / 严格路径 |
+| `auth.deps.require_admin` / `require_admin_or_anon` / `require_admin_strict` | 分别对应"始终管理员"、"管理员或匿名 ns"、"管理员但跳过 namespace 网关"三种场景 |
+| `auth.router` — `/api/auth/{whoami,principals,keys}` | 自管 API（CRUD principal、CRUD 自己的 key） |
+| `common.auth_context.AuthContext` | `register/` 与 `auth/` 之间的中立握手类型（`register/` 永不 import `auth/`） |
+
+三档角色：**admin** 全局；**provider** 绑定 namespace 列表，可注册并改自己 owned 的服务；**user** 绑定 namespace 列表，只读 + 预约。owner / holder 字段服务端强制写入，客户端无法伪造。完整鉴权矩阵与不变式见 [auth_design.md](auth_design.md)。
 
 ## 3. 主要数据流
 
