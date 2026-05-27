@@ -1,7 +1,8 @@
 """AuthStore — file-backed credential store.
 
-Persisted layout (under ``a2x_registry/auth/auth_data/`` by default,
-overridable via ``$A2X_REGISTRY_AUTH_DATA``):
+Persisted layout (under ``~/.a2x_registry/auth_data/`` by default;
+``<A2X_REGISTRY_HOME>/auth_data`` when the env var is set;
+``$A2X_REGISTRY_AUTH_DATA`` for a per-resource explicit override):
 
     principals.json   — list[Principal] dumps
     api_keys.json     — list[ApiKey] dumps
@@ -51,15 +52,21 @@ def default_data_dir() -> Path:
     """Resolve the auth_data directory.
 
     Order:
-      1. ``$A2X_REGISTRY_AUTH_DATA`` (if set and non-empty)
-      2. ``<this-module>/auth_data/`` (lives inside the installed package
-         tree so a single ``pip install`` + ``a2x-registry auth init`` puts
-         data exactly where the code lives)
+      1. ``$A2X_REGISTRY_AUTH_DATA`` (per-resource explicit override)
+      2. ``<A2X_REGISTRY_HOME>/auth_data`` (when the env var is set)
+      3. ``./auth_data`` under CWD if CWD contains ``database/`` (source-tree
+         dev mode parity with ``database_dir()``)
+      4. ``~/.a2x_registry/auth_data`` (default user home)
+
+    Mirrors the ``database/`` and ``llm_apikey.json`` resolution shape so
+    a fresh ``pip install`` + ``a2x-registry auth init`` writes outside
+    ``site-packages`` and survives venv re-creation / package upgrade.
     """
     env = os.environ.get("A2X_REGISTRY_AUTH_DATA", "").strip()
     if env:
         return Path(env)
-    return Path(__file__).resolve().parent / "auth_data"
+    from a2x_registry.common.paths import get_home
+    return get_home() / "auth_data"
 
 
 def _utcnow_iso() -> str:
