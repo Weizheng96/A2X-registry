@@ -8,6 +8,7 @@
 - [search_design.md](search_design.md) — A2X 搜索算法
 - [incremental_design.md](incremental_design.md) — 增量构建
 - [auth_design.md](auth_design.md) — 鉴权模块（静态 API Key + 三档角色 + namespace 作用域，**默认关闭，向前兼容**）
+- [heartbeat_design.md](heartbeat_design.md) — 心跳保活模块（per-namespace opt-in 租约 + 软驱逐 / 硬删两段式，**默认关闭，向前兼容**）
 - [backend_api.md](backend_api.md) — 后端 HTTP API
 - [frontend_design.md](frontend_design.md) — Web UI
 - [a2x_design.md](a2x_design.md) — 系统整体视图（更深入）
@@ -32,6 +33,11 @@ a2x_registry/                      # pip 包根
 │   ├── router.py                  #   /api/auth/* 端点
 │   ├── cli.py                     #   `a2x-registry auth init / reset-admin`
 │   └── auth_data/                 #   运行时数据，.gitignore，不进 wheel
+├── heartbeat/                     # 心跳保活（per-namespace opt-in；不 import register/）
+│   ├── store.py                   #   HeartbeatStore：lease 状态机 + sweep_tick
+│   ├── sweeper.py                 #   后台 daemon 线程，mark unhealthy / 硬删
+│   ├── router.py                  #   /api/datasets/{ds}/services/{sid}/heartbeat
+│   └── system_ctx.py              #   合成 admin context 给 sweeper 走 deregister
 ├── backend/                       # FastAPI 应用
 │   ├── app.py                     #   入口、CORS、503 异常 handler
 │   ├── startup.py                 #   warmup（按 has("vector") 分阶段；加载 AuthStore）
@@ -134,6 +140,25 @@ a2x_registry/                      # pip 包根
 | `common.auth_context.AuthContext` | `register/` 与 `auth/` 之间的中立握手类型（`register/` 永不 import `auth/`） |
 
 三档角色：**admin** 全局；**provider** 绑定 namespace 列表，可注册并改自己 owned 的服务；**user** 绑定 namespace 列表，只读 + 预约。owner / holder 字段服务端强制写入，客户端无法伪造。完整鉴权矩阵与不变式见 [auth_design.md](auth_design.md)。
+
+### 2.8 `heartbeat/` — 服务心跳保活 / 租约（默认关闭）
+
+**Per-namespace opt-in**：注册中心始终加载心跳模块，但 namespace 必须显式 POST `lease_config {enabled:true, min_ttl, max_ttl, grace_period}` 才会接受 `lease_ttl`。客户端注册时也要显式带 `lease_ttl` —— 4 角矩阵：
+
+| ns / client | 不带 ttl | 带 ttl |
+|---|---|---|
+| 未启用 | ✅ 永久（向前兼容） | 400 `heartbeat_not_supported` |
+| 已启用 | 400 `ttl_required` | ✅ in-range / 400 `ttl_out_of_range` |
+
+| 接口 | 说明 |
+|---|---|
+| `heartbeat.store.HeartbeatStore` | 内存 lease 表 + `validate/install/heartbeat/revoke/sweep_tick` |
+| `heartbeat.sweeper.HeartbeatSweeper` | 后台 daemon 线程，TTL 过期 → mark UNHEALTHY；grace 过期 → 走 `RegistryService.deregister(caller=SYSTEM_CTX)` |
+| `heartbeat.router` — POST `/services/{sid}/heartbeat` | 续约（可顺带 status piggyback） |
+| `heartbeat.router` — DELETE `/services/{sid}/heartbeat` | 软撤销 (mark unhealthy) 或 `{permanent:true}` 硬删 |
+| `RegistryService.set_unhealthy_check(callback)` | 注入点 —— `register/` 不 import `heartbeat/`，靠 callback 通信 |
+
+三档租约状态：HEALTHY → UNHEALTHY（TTL 过期，软驱逐 + grace window 可恢复）→ HARD-DELETED（grace 过期）。`list_services` 默认过滤 UNHEALTHY，`?include_unhealthy=true` 可查全部。完整状态机 / 矩阵 / 重启恢复设计见 [heartbeat_design.md](heartbeat_design.md)。
 
 ## 3. 主要数据流
 

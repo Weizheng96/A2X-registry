@@ -14,6 +14,11 @@ from a2x_registry.auth.deps import (
     authorize, get_auth_store, require_admin, require_admin_or_anon,
     require_admin_strict,
 )
+from a2x_registry.heartbeat.deps import get_heartbeat_store
+from a2x_registry.heartbeat.errors import (
+    HeartbeatError, HeartbeatNotSupportedError,
+    TTLOutOfRangeError, TTLRequiredError,
+)
 from a2x_registry.backend.schemas.models import DatasetInfo, DefaultQuery
 from a2x_registry.backend.services.search_service import search_service
 from a2x_registry.backend.services.taxonomy_service import get_taxonomy_tree
@@ -52,16 +57,30 @@ async def _run(fn, *args):
 
     Layered error contract (see docs/client_design.md §3.4):
       RegistryNotFoundError → 404   (business "resource doesn't exist")
+      HeartbeatError        → 400 + structured body {code, min_ttl?, max_ttl?}
       ValueError            → 400   (validation / forbidden source)
       PermissionError       → 403   (lease held by a different holder)
       FileNotFoundError     → 404   (skill folder missing on disk)
       KeyError              → 404   (legacy fallback for any not-yet-migrated path)
+
+    ``HeartbeatError`` is a ``ValueError`` subclass; the explicit branch
+    runs first to attach the structured body that the client SDK uses to
+    auto-retry / surface "valid range [min, max]" hints.
     """
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(_executor, fn, *args)
     except RegistryNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HeartbeatError as e:
+        # Structured body — SDK dispatches by ``code`` to the right error
+        # subclass. ``min_ttl`` / ``max_ttl`` present only when relevant.
+        body = {"code": e.code, "detail": str(e)}
+        if e.min_ttl is not None:
+            body["min_ttl"] = e.min_ttl
+        if e.max_ttl is not None:
+            body["max_ttl"] = e.max_ttl
+        raise HTTPException(status_code=400, detail=body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except PermissionError as e:
@@ -196,6 +215,59 @@ def svc_set_auth_config(dataset: str, required: bool):
     return get_registry_service().set_auth_config(dataset, required)
 
 
+# ── Lease (heartbeat) config — public GET, admin-only POST ───────────────
+
+@router.get("/{dataset}/lease-config")
+async def get_lease_config(dataset: str):
+    """Read the per-namespace heartbeat lease config. Public — no token
+    required, so SDKs can detect whether to send ``lease_ttl`` before
+    triggering a 400."""
+    svc = get_registry_service()
+    if not (svc._database_dir / dataset).exists():
+        raise HTTPException(404, f"Dataset '{dataset}' not found")
+    return {"dataset": dataset, **svc.get_lease_config(dataset)}
+
+
+class LeaseConfigRequest(BaseModel):
+    enabled: bool
+    min_ttl: int = 10
+    max_ttl: int = 3600
+    grace_period: int = 300
+
+
+@router.post("/{dataset}/lease-config")
+async def set_lease_config(
+    dataset: str,
+    req: LeaseConfigRequest,
+    _ctx: Optional[AuthContext] = Depends(require_admin_or_anon),
+):
+    """Toggle / configure the per-namespace heartbeat lease policy.
+
+    Admin-only when the registry has auth initialized; anon-OK when no
+    auth has been bootstrapped (legacy / dev parity — heartbeat shouldn't
+    require admins to also enable the auth module first).
+
+    Existing services on the namespace are not retroactively gated: those
+    registered before this toggle have ``lease_ttl=None`` (permanent) and
+    stay permanent until re-registered with a ttl. Newly-registered
+    services from now on get the matrix validation.
+    """
+    cfg = await _run(
+        svc_set_lease_config, dataset,
+        req.enabled, req.min_ttl, req.max_ttl, req.grace_period,
+    )
+    return {"dataset": dataset, **cfg}
+
+
+def svc_set_lease_config(
+    dataset: str, enabled: bool, min_ttl: int, max_ttl: int, grace_period: int,
+):
+    return get_registry_service().set_lease_config(
+        dataset, enabled=enabled, min_ttl=min_ttl,
+        max_ttl=max_ttl, grace_period=grace_period,
+    )
+
+
 # ── Registration format config ────────────────────────────────────────────────
 
 class RegisterConfigRequest(BaseModel):
@@ -245,7 +317,9 @@ async def delete_dataset(
 
 # ── Services (register / deregister / list) ───────────────────────────────────
 
-_RESERVED_QUERY_PARAMS = frozenset({"fields", "page", "size", "include_leased"})
+_RESERVED_QUERY_PARAMS = frozenset({
+    "fields", "page", "size", "include_leased", "include_unhealthy",
+})
 _VALID_FIELDS = frozenset({"brief", "detail"})
 
 
@@ -296,6 +370,9 @@ async def list_services(
     size: int = Query(-1, ge=-1),
     page: int = Query(1, ge=1),
     include_leased: bool = Query(False, description="include reserved (leased) entries"),
+    include_unhealthy: bool = Query(
+        False, description="include heartbeat-expired (unhealthy) entries; default false",
+    ),
     _ctx: Optional[AuthContext] = Depends(authorize),
 ):
     """List services in a dataset, optionally filtered.
@@ -339,6 +416,12 @@ async def list_services(
     matched = []
     for entry in sorted(svc.list_entries(dataset), key=lambda e: e.service_id):
         if not include_leased and svc.is_leased(dataset, entry.service_id):
+            continue
+        # Skip heartbeat-unhealthy entries by default; ?include_unhealthy=true
+        # surfaces them for ops diagnostics. is_unhealthy is a thin dict
+        # lookup against HeartbeatStore (or always-False when the heartbeat
+        # module isn't loaded — backward compat).
+        if not include_unhealthy and svc.is_unhealthy(dataset, entry.service_id):
             continue
         match_dict = _entry_filter_dict(entry)
         if match_dict is None:
@@ -414,6 +497,55 @@ async def get_single_service(
     return output[0] if output else None
 
 
+def _validate_lease_request(dataset: str, client_ttl: Optional[int]) -> Optional[int]:
+    """Run the heartbeat 4-corner matrix BEFORE registering the service.
+
+    Three outcomes:
+    - ``None``: no heartbeat module loaded AND client didn't request a
+      lease → permanent service (legacy path; perfectly fine).
+    - ``int``: validated ttl ready for ``store.install()`` after register.
+    - raises ``HTTPException`` (400 with structured body) on matrix violation.
+
+    Caller is the sync register endpoint; we convert HeartbeatError →
+    HTTPException here directly because this function runs outside
+    ``_run``'s exception mapper.
+    """
+    store = get_heartbeat_store()
+    try:
+        if store is None:
+            if client_ttl is None:
+                return None  # permanent (heartbeat module not loaded — fine)
+            raise HeartbeatNotSupportedError(
+                "Heartbeat module not initialized on this registry; "
+                "remove 'lease_ttl' from the request."
+            )
+        return store.validate(dataset, client_ttl)
+    except HeartbeatError as exc:
+        body = {"code": exc.code, "detail": str(exc)}
+        if exc.min_ttl is not None:
+            body["min_ttl"] = exc.min_ttl
+        if exc.max_ttl is not None:
+            body["max_ttl"] = exc.max_ttl
+        raise HTTPException(status_code=400, detail=body) from exc
+
+
+def _install_lease(
+    response: RegisterResponse, dataset: str, ttl: Optional[int],
+) -> RegisterResponse:
+    """Install the validated lease after successful register, and attach
+    lease info to the response so clients know the expires_at. No-op
+    when ``ttl is None`` (permanent service)."""
+    if ttl is None:
+        return response
+    store = get_heartbeat_store()
+    assert store is not None  # would have raised in _validate_lease_request
+    import time as _t
+    lease = store.install(dataset, response.service_id, ttl)
+    response.lease_ttl = lease.ttl_seconds
+    response.lease_expires_at = _t.time() + lease.ttl_seconds
+    return response
+
+
 @router.post("/{dataset}/services/generic", response_model=RegisterResponse)
 async def register_generic(
     dataset: str, req: RegisterGenericRequest,
@@ -424,9 +556,19 @@ async def register_generic(
     ``ctx`` is set by the ``authorize`` dep when the dataset is auth-required;
     None for anon namespaces (backward-compat). The service layer writes
     ``owner_id = ctx.principal_id`` when set, ``None`` otherwise.
+
+    Heartbeat: when ``lease_ttl`` is supplied AND the namespace's
+    ``lease_config.enabled=true``, the value must satisfy ``[min_ttl,
+    max_ttl]``. Validation happens upfront; install happens after register
+    succeeds (so a registration failure doesn't leave a dangling lease).
     """
     req.dataset = dataset
-    return await _run(get_registry_service().register_generic, req, ctx)
+    validated_ttl = _validate_lease_request(dataset, req.lease_ttl)
+    # Ensure the entry's persisted lease_ttl matches what the heartbeat
+    # store actually installs (None on permanent path, int otherwise).
+    req.lease_ttl = validated_ttl
+    response = await _run(get_registry_service().register_generic, req, ctx)
+    return _install_lease(response, dataset, validated_ttl)
 
 
 @router.post("/{dataset}/services/a2a", response_model=RegisterResponse)
@@ -434,9 +576,12 @@ async def register_a2a(
     dataset: str, req: RegisterA2ARequest,
     ctx: Optional[AuthContext] = Depends(authorize),
 ):
-    """Register an A2A agent."""
+    """Register an A2A agent. See ``register_generic`` for heartbeat semantics."""
     req.dataset = dataset
-    return await _run(get_registry_service().register_a2a, req, ctx)
+    validated_ttl = _validate_lease_request(dataset, req.lease_ttl)
+    req.lease_ttl = validated_ttl
+    response = await _run(get_registry_service().register_a2a, req, ctx)
+    return _install_lease(response, dataset, validated_ttl)
 
 
 # Fields a non-admin caller may NEVER write via PUT — server identity

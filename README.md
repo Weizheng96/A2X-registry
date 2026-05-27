@@ -286,6 +286,30 @@ curl -X POST http://localhost:8000/api/datasets \
 
 客户端 SDK 通过 `~/.a2x_registry_client/cli_token.json` 配置文件读取 token（由 `a2x-registry-client login` 写入），详见 [A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client/blob/main/README.md)。
 
+### 心跳保活（可选）
+
+默认行为：服务一旦注册永久存在。**0.1.8 起内置心跳模块**，向前兼容 —— 既有 namespace 与既有客户端零影响。
+
+启用某个 namespace：
+
+```bash
+curl -X POST http://localhost:8000/api/datasets/my_ds/lease-config \
+     -H "Content-Type: application/json" \
+     -d '{"enabled": true, "min_ttl": 10, "max_ttl": 600, "grace_period": 60}'
+```
+
+之后注册到该 namespace 时声明 `lease_ttl`：
+
+```bash
+curl -X POST http://localhost:8000/api/datasets/my_ds/services/a2a \
+     -H "Content-Type: application/json" \
+     -d '{"agent_card": {...}, "lease_ttl": 60}'
+```
+
+服务必须每 `ttl/3` 秒发一次 `POST /api/datasets/my_ds/services/{sid}/heartbeat`，否则 `lease_ttl` 过期后被标记为不健康并最终自动清理。Grace 窗口期内重新心跳即可恢复，无需重新注册。
+
+未带 `lease_config` 的 namespace 不接受 `lease_ttl`，行为不变。状态机、4 角矩阵、客户端 `auto_renew` 详见 [docs/heartbeat_design.md](docs/heartbeat_design.md)。
+
 > 完整 API 文档见 [docs/backend_api.md](docs/backend_api.md)，各模块内部接口见对应设计文档。
 
 > 同时我们为 Agent Team 场景提供特化的 Python 客户端 SDK：[A2X-registry-client](https://github.com/Weizheng96/A2X-registry-client)。
@@ -341,6 +365,7 @@ curl -X POST http://localhost:8000/api/datasets \
 | [docs/search_design.md](docs/search_design.md) | 搜索流程详细设计 |
 | [docs/incremental_design.md](docs/incremental_design.md) | 增量构建设计 |
 | [docs/auth_design.md](docs/auth_design.md) | 鉴权模块设计（静态 API Key + 三档角色 + namespace 作用域；默认关闭） |
+| [docs/heartbeat_design.md](docs/heartbeat_design.md) | 心跳保活模块设计（per-namespace opt-in 租约；软驱逐 / 硬删两段式；默认关闭） |
 
 ## 适用场景
 

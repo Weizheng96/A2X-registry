@@ -75,6 +75,45 @@ def run_warmup() -> None:
             from a2x_registry.auth.deps import set_auth_store
             set_auth_store(None)
 
+        # 1c. Heartbeat module — always loaded (the per-namespace
+        # lease_config.json is the actual opt-in switch; loading the
+        # store / sweeper here just makes the machinery available).
+        # Failure is non-fatal: backward compat is preserved (services
+        # without lease_ttl stay permanent; sweep just doesn't fire).
+        try:
+            from a2x_registry.heartbeat.store import HeartbeatStore
+            from a2x_registry.heartbeat.sweeper import HeartbeatSweeper
+            from a2x_registry.heartbeat.deps import set_heartbeat_store
+            hb_store = HeartbeatStore(
+                config_provider=registry_svc.get_lease_config,
+            )
+            registry_svc.set_unhealthy_check(hb_store.is_unhealthy)
+            # Recover any entries persisted with lease_ttl into a grace
+            # window so they get one chance to re-heartbeat after restart.
+            recovered = [
+                (ds, e.service_id, e.lease_ttl)
+                for ds in registry_svc.list_datasets()
+                for e in registry_svc.list_entries(ds)
+                if e.lease_ttl is not None
+            ]
+            if recovered:
+                hb_store.recover_from_persisted(recovered)
+            set_heartbeat_store(hb_store)
+            # Sweeper period 5s — see docs/heartbeat_design.md. Daemon
+            # thread so it doesn't block server shutdown.
+            sweeper = HeartbeatSweeper(registry_svc, hb_store, period=5.0)
+            sweeper.start()
+            # Stash on warmup_state so tests / shutdown logic can access.
+            warmup_state["_heartbeat_sweeper"] = sweeper
+            logger.info(
+                "  Heartbeat store loaded (recovered %d leases into grace window)",
+                len(recovered),
+            )
+        except Exception as exc:
+            logger.error("  Heartbeat init failed: %s", exc, exc_info=True)
+            from a2x_registry.heartbeat.deps import set_heartbeat_store
+            set_heartbeat_store(None)
+
         # Only wire vector-sync side effects when the [vector] extras are
         # installed; otherwise every SDK register/deregister would spawn a
         # daemon thread that immediately ImportErrors on chromadb.

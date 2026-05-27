@@ -103,6 +103,10 @@ class RegistryService:
         # dataset -> bool; populated lazily from auth_config.json.
         # File-missing default is False so pre-auth datasets stay anonymous.
         self._auth_required_cache: Dict[str, bool] = {}
+        # dataset -> dict; populated lazily from lease_config.json. Default
+        # is {"enabled": False, ...} so pre-heartbeat datasets stay permanent.
+        # See docs/heartbeat_design.md.
+        self._lease_config_cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         # Reservation leases — protected by _lock, lazy-swept on access.
         # No background daemon, no disk persistence. Restart clears them.
@@ -110,6 +114,12 @@ class RegistryService:
         # Optional callback: called with dataset name whenever service.json content changes.
         # Used by SearchService to keep the vector index in sync.
         self._on_service_changed = None
+        # Heartbeat: optional callback (dataset, service_id) -> bool that the
+        # heartbeat module installs at startup. Default no-op so the registry
+        # behaves identically to pre-heartbeat when the module isn't loaded
+        # (lite mode, no heartbeat init, etc.). Affects list_services /
+        # list_entries / reserve_services filtering.
+        self._unhealthy_check = lambda dataset, service_id: False
 
     # -----------------------------------------------------------------------
     # Startup
@@ -245,6 +255,9 @@ class RegistryService:
             service_id=service_id, type="generic",
             source="api_config" if req.persistent else "ephemeral",
             owner_id=(caller.principal_id if caller is not None else None),
+            # lease_ttl is pre-validated by the router's 4-corner matrix
+            # check; None means permanent (no heartbeat tracking).
+            lease_ttl=req.lease_ttl,
             service_data=GenericServiceData(
                 name=req.name, description=req.description,
                 inputSchema=req.inputSchema, url=req.url,
@@ -276,6 +289,7 @@ class RegistryService:
             service_id=service_id, type="a2a",
             source="api_config" if req.persistent else "ephemeral",
             owner_id=(caller.principal_id if caller is not None else None),
+            lease_ttl=req.lease_ttl,  # pre-validated by router
             agent_card=agent_card, agent_card_url=agent_card_url,
         )
         return self._do_register(dataset, entry, req.persistent)
@@ -650,14 +664,39 @@ class RegistryService:
     # -----------------------------------------------------------------------
 
     def list_services(self, dataset: str) -> List[dict]:
-        """Return cached output for a dataset."""
+        """Return cached output for a dataset (raw, no liveness filtering)."""
         with self._lock:
             return list(self._output_cache.get(dataset, []))
 
     def list_entries(self, dataset: str) -> List[RegistryEntry]:
-        """Return all RegistryEntry objects for a dataset (includes source info)."""
+        """Return all RegistryEntry objects for a dataset (includes source info, no filter)."""
         with self._lock:
             return list(self._entries.get(dataset, {}).values())
+
+    def is_unhealthy(self, dataset: str, service_id: str) -> bool:
+        """Return True if heartbeat module marked this service unhealthy.
+
+        Default (no heartbeat module loaded) → always False. The router calls
+        this during list/get to apply ``include_unhealthy=false`` filtering;
+        ``reserve_services`` calls it internally to skip unhealthy candidates.
+        Cheap dict lookup in the heartbeat store; no I/O.
+        """
+        try:
+            return bool(self._unhealthy_check(dataset, service_id))
+        except Exception:
+            # Defensive: a buggy heartbeat module must not break list_services.
+            logger.exception("unhealthy_check raised for (%s, %s)", dataset, service_id)
+            return False
+
+    def set_unhealthy_check(self, callback) -> None:
+        """Install the heartbeat unhealthy predicate (called once at startup).
+
+        ``callback(dataset, service_id) -> bool``. Mirrors the
+        ``set_on_service_changed`` pattern — single injection point, default
+        no-op so the registry runs identically when no heartbeat module is
+        loaded (lite mode, no startup init, etc.).
+        """
+        self._unhealthy_check = callback or (lambda d, s: False)
 
     def get_entry(self, dataset: str, service_id: str) -> Optional[RegistryEntry]:
         """Get a single registry entry."""
@@ -856,6 +895,11 @@ class RegistryService:
                 key=lambda e: e.service_id,
             ):
                 if (dataset, entry.service_id) in self._leases:
+                    continue
+                # Skip entries that heartbeat marked unhealthy — don't lease
+                # what we'd never want callers to talk to. No-op when the
+                # heartbeat module isn't loaded (default callback is False).
+                if self.is_unhealthy(dataset, entry.service_id):
                     continue
                 if not self._entry_matches_filters(entry, filters):
                     continue
@@ -1254,6 +1298,7 @@ class RegistryService:
             self._stores.pop(name, None)
             self._format_configs.pop(name, None)
             self._auth_required_cache.pop(name, None)
+            self._lease_config_cache.pop(name, None)
         shutil.rmtree(ds_dir)
         logger.info("Deleted dataset '%s'", name)
 
@@ -1296,6 +1341,59 @@ class RegistryService:
         self._get_store(dataset).write_auth_config(required=required)
         self._auth_required_cache[dataset] = bool(required)
         return {"required": bool(required), "schema_version": 1}
+
+    # -----------------------------------------------------------------------
+    # Per-namespace heartbeat / lease gating (storage + read; enforcement in
+    # heartbeat module + router layer)
+    # -----------------------------------------------------------------------
+
+    def get_lease_config(self, dataset: str) -> Dict[str, Any]:
+        """Return the heartbeat lease config for ``dataset``.
+
+        Lazy: reads ``lease_config.json`` once per dataset and caches.
+        Missing file → ``{"enabled": False, ...}`` (backward-compat default —
+        every dataset created before this code shipped reads as
+        no-heartbeat-supported). Cache invalidated by ``set_lease_config``
+        and ``delete_dataset``. Identical shape to ``is_auth_required``
+        cache pattern.
+        """
+        cached = self._lease_config_cache.get(dataset)
+        if cached is not None:
+            return cached
+        # Don't read disk for nonexistent datasets — caller hits 404 elsewhere.
+        if not (self._database_dir / dataset).exists():
+            from .store import LEASE_CONFIG_DEFAULT
+            return dict(LEASE_CONFIG_DEFAULT)
+        cfg = self._get_store(dataset).load_lease_config()
+        self._lease_config_cache[dataset] = cfg
+        return cfg
+
+    def set_lease_config(
+        self, dataset: str, *,
+        enabled: bool, min_ttl: int, max_ttl: int, grace_period: int,
+    ) -> Dict[str, Any]:
+        """Toggle / configure the heartbeat lease policy on a dataset.
+
+        Admin-only at the router layer. Writes ``lease_config.json`` (with
+        bound sanity in store layer), invalidates the cache, returns the
+        persisted config. Bound validation errors propagate as ``ValueError``
+        → 400 via the existing ``_run`` mapper.
+        """
+        if not (self._database_dir / dataset).exists():
+            raise ValueError(f"Dataset '{dataset}' does not exist")
+        self._get_store(dataset).write_lease_config(
+            enabled=enabled, min_ttl=min_ttl, max_ttl=max_ttl,
+            grace_period=grace_period,
+        )
+        cfg = {
+            "enabled": bool(enabled),
+            "min_ttl": int(min_ttl),
+            "max_ttl": int(max_ttl),
+            "grace_period": int(grace_period),
+            "schema_version": 1,
+        }
+        self._lease_config_cache[dataset] = cfg
+        return cfg
 
     # -----------------------------------------------------------------------
     # Internal — unified format validation
