@@ -37,23 +37,18 @@ def test_readme_admin_flow_runs_end_to_end(admin_app):
     """§2.1 admin block — bootstrap, create ns with auth+heartbeat, issue keys."""
     client, admin_token = admin_app
 
-    # (1) create namespace with auth
+    # (1) create namespace with auth AND heartbeat in one request (README pattern)
     r = _admin_call(client, admin_token, "POST", "/api/datasets", json={
         "name": "translators",
         "auth_required": True,
+        "lease_config": {"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
     })
     assert r.status_code == 200, r.text
-
-    # (2) enable heartbeat
-    r = _admin_call(client, admin_token,
-        "POST", "/api/datasets/translators/lease-config",
-        json={"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
-    )
-    assert r.status_code == 200, r.text
-    cfg = r.json()
-    assert cfg["enabled"] is True
-    assert cfg["min_ttl"] == 10
-    assert cfg["grace_period"] == 60
+    body = r.json()
+    assert body["auth_required"] is True
+    assert body["lease_config"]["enabled"] is True
+    assert body["lease_config"]["min_ttl"] == 10
+    assert body["lease_config"]["grace_period"] == 60
 
     # (3) issue provider token
     r = _admin_call(client, admin_token, "POST", "/api/auth/principals", json={
@@ -81,12 +76,10 @@ def test_readme_provider_flow_runs_end_to_end(admin_app):
     client, admin_token = admin_app
 
     # Setup from §2.1
-    _admin_call(client, admin_token, "POST", "/api/datasets",
-                json={"name": "translators", "auth_required": True})
-    _admin_call(client, admin_token,
-        "POST", "/api/datasets/translators/lease-config",
-        json={"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
-    )
+    _admin_call(client, admin_token, "POST", "/api/datasets", json={
+        "name": "translators", "auth_required": True,
+        "lease_config": {"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
+    })
     r = _admin_call(client, admin_token, "POST", "/api/auth/principals", json={
         "handle": "alice-rm-p1",
         "role": "provider",
@@ -170,12 +163,10 @@ def test_readme_user_flow_runs_end_to_end(admin_app):
     client, admin_token = admin_app
 
     # Setup: namespace + provider + user
-    _admin_call(client, admin_token, "POST", "/api/datasets",
-                json={"name": "translators", "auth_required": True})
-    _admin_call(client, admin_token,
-        "POST", "/api/datasets/translators/lease-config",
-        json={"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
-    )
+    _admin_call(client, admin_token, "POST", "/api/datasets", json={
+        "name": "translators", "auth_required": True,
+        "lease_config": {"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
+    })
     provider_token = _admin_call(client, admin_token,
         "POST", "/api/auth/principals", json={
             "handle": "alice-rm-p2", "role": "provider",
@@ -259,12 +250,10 @@ def test_readme_user_cannot_register_provider_can(admin_app):
     """Negative path: confirms role enforcement matches what 2.3 implies
     (user 只读 + 预约)."""
     client, admin_token = admin_app
-    _admin_call(client, admin_token, "POST", "/api/datasets",
-                json={"name": "translators", "auth_required": True})
-    _admin_call(client, admin_token,
-        "POST", "/api/datasets/translators/lease-config",
-        json={"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
-    )
+    _admin_call(client, admin_token, "POST", "/api/datasets", json={
+        "name": "translators", "auth_required": True,
+        "lease_config": {"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
+    })
     user_token = _admin_call(client, admin_token,
         "POST", "/api/auth/principals", json={
             "handle": "bob-rm-u2", "role": "user",
@@ -293,12 +282,10 @@ def test_readme_status_busy_hides_from_user_filter(admin_app):
     to "online" brings it back. This is what makes 'self-disable' actually
     work end-to-end across the two role boundaries."""
     client, admin_token = admin_app
-    _admin_call(client, admin_token, "POST", "/api/datasets",
-                json={"name": "translators", "auth_required": True})
-    _admin_call(client, admin_token,
-        "POST", "/api/datasets/translators/lease-config",
-        json={"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
-    )
+    _admin_call(client, admin_token, "POST", "/api/datasets", json={
+        "name": "translators", "auth_required": True,
+        "lease_config": {"enabled": True, "min_ttl": 10, "max_ttl": 600, "grace_period": 60},
+    })
     provider_token = _admin_call(client, admin_token,
         "POST", "/api/auth/principals", json={
             "handle": "alice-disable", "role": "provider",

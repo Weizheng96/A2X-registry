@@ -1,10 +1,37 @@
 # A2X 版本说明
 
-## 当前版本: v0.1.7（开发中）
+## 当前版本: v0.2.0
 
 ---
 
-## v0.1.7 (开发中)
+## v0.2.0 (2026-05-27)
+
+### 概述
+内置静态 API Key 鉴权（三档角色 / per-namespace 作用域）与服务心跳保活模块（per-namespace lease + 4 角矩阵 + 软驱逐 / 硬删两段式状态机）。register/ 模块对两者均无 import 依赖，通过回调注入完成耦合，默认全部关闭 —— 现有部署与现有客户端零影响。
+
+同时合入 v0.1.7 的 gating 策略修正：A2X 搜索 / Traditional 搜索 / A2X 分类构建从精简版默认可用（之前误关在 `[vector]` extras 之后）。
+
+### 新功能
+- **`a2x_registry/auth/`**：管理员 bootstrap、API Key 创建 / 撤销 / 禁用、`/api/auth/principals` CRUD、namespace 级 `auth_required` 开关、`POST /api/datasets` 接 `auth_required: true` 字段、JSONL audit log。三档角色 admin / provider / user，作用域到 namespaces 列表。
+- **`a2x_registry/heartbeat/`**：per-namespace `lease_config.json`（`enabled / min_ttl / max_ttl / grace_period`）、`POST /services/{a2a,generic}` 接 `lease_ttl` 字段、`POST/DELETE /services/{sid}/heartbeat` 端点、后台 sweeper（HEALTHY → UNHEALTHY → HARD-DELETED）、客户端 SDK `auto_renew=True` 自动续约。
+- **`POST /api/datasets` 内联 `lease_config`**：admin 一次请求即可建 namespace + 配置 auth + 配置心跳。
+- **A2X 搜索 / Traditional 搜索 / A2X 分类构建在精简版默认可用**：`POST /api/search` 的 `method=a2x_*` / `method=traditional` 与 `POST /api/datasets/{ds}/build` 不再需要 `[vector]` extras（gating 策略修正）。
+
+### 重构
+- **后端 CLI 重命名**：`a2x-backend` → `a2x-registry`（与包名一致）
+- **gating 按真实依赖精确锁定**：`[vector]` 只锁真正需要 numpy / chromadb / sentence-transformers 的功能；`a2x-evaluate-a2x` / `a2x-evaluate-traditional` 只需 `[evaluation]`
+- `register/` 通过 `set_unhealthy_check(callback)` 接 heartbeat、通过 `AuthContext` 接 auth；register/ 本身对 auth/heartbeat 零 import 依赖
+
+### 测试
+- `tests/auth/`（78）+ `tests/heartbeat/`（52）+ 既有 `tests/`（24）= 154 测试全绿
+- SDK `A2X-registry-client/tests/`（31，含 heartbeat renewer + 错误子类映射）全绿
+
+### 评估结果
+A2X 算法本身无变更，评估指标与 v0.1.5 / v0.1.6 一致。
+
+---
+
+## v0.1.7 (并入 v0.2.0)
 
 ### 概述
 v0.1.6 的 gating 策略修正：把"任何辅助搜索/构建"统一关在 `[vector]` 后面是设计漏洞——A2X 搜索 / Traditional 搜索 / A2X 分类构建实际上都是纯 LLM 工作流，根本不需要 numpy / chromadb / sentence-transformers。本版本把 gating 改为按真实依赖精确锁定，把这些纯 LLM 能力从 lite 默认启用。

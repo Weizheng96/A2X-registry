@@ -103,6 +103,23 @@ async def list_datasets():
     return [DatasetInfo(**item) for item in items]
 
 
+class _InlineLeaseConfig(BaseModel):
+    """Optional lease config payload embedded in CreateDatasetRequest.
+
+    Same shape as the standalone ``LeaseConfigRequest`` used by the
+    ``POST /{dataset}/lease-config`` endpoint, but inlined here so admin
+    can create + configure heartbeat in one HTTP request (symmetric with
+    ``auth_required`` already being a top-level field). Validation logic
+    (bound sanity) is identical — both paths converge in
+    ``RegistryStore.write_lease_config``.
+    """
+
+    enabled: bool = True
+    min_ttl: int = 10
+    max_ttl: int = 3600
+    grace_period: int = 300
+
+
 class CreateDatasetRequest(BaseModel):
     name: str
     # None resolves to vector.utils.embedding.DEFAULT_EMBEDDING_MODEL on the
@@ -116,6 +133,12 @@ class CreateDatasetRequest(BaseModel):
     # in Phase D). Default False keeps backward-compat — datasets created
     # without this field stay fully anonymous, identical to today.
     auth_required: bool = False
+    # Opt-in inline heartbeat config. When present, equivalent to creating
+    # the dataset then immediately POSTing to /{ds}/lease-config — saves
+    # one round-trip for the common "set up a fully-configured namespace"
+    # admin flow. Default None preserves backward-compat (no heartbeat
+    # config; namespace doesn't accept lease_ttl on register).
+    lease_config: Optional[_InlineLeaseConfig] = None
 
 
 @router.post("")
@@ -165,16 +188,35 @@ async def create_dataset(
         svc.create_dataset,
         req.name, req.embedding_model, req.formats, req.auth_required,
     )
+    # Inline lease config: same write path as POST /{ds}/lease-config so
+    # bounds validation + cache invalidation are identical. Atomic enough
+    # for practical purposes — the dataset directory exists by this point,
+    # and a failure mid-write here leaves the namespace as anonymous +
+    # heartbeat-disabled (caller can retry the lease-config call later).
+    if req.lease_config is not None:
+        await _run(
+            svc_set_lease_config, req.name,
+            req.lease_config.enabled,
+            req.lease_config.min_ttl,
+            req.lease_config.max_ttl,
+            req.lease_config.grace_period,
+        )
     # Echo back the *resolved* embedding model (None → default) by re-reading
     # the persisted vector_config — single source of truth for what's on disk.
     persisted = svc.get_vector_config(req.name)
-    return {
+    response = {
         "dataset": req.name,
         "embedding_model": persisted["embedding_model"],
         "formats": svc.get_register_config(req.name),
         "auth_required": svc.is_auth_required(req.name),
         "status": "created",
     }
+    # Surface the lease config in the response only if it was set inline —
+    # otherwise omit the key entirely so legacy callers see the exact same
+    # response shape as before.
+    if req.lease_config is not None:
+        response["lease_config"] = svc.get_lease_config(req.name)
+    return response
 
 
 # ── Auth config toggle (admin-only, only valid when store is initialized) ──
