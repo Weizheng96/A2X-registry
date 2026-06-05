@@ -49,6 +49,7 @@ class ClusterStore:
         transport: Optional[Transport] = None,
         advertise: str = "",
         auth_store_getter=None,
+        clock=None,
     ) -> None:
         self._state = state
         self._config = config or ClusterConfig()
@@ -56,6 +57,10 @@ class ClusterStore:
         self._transport = transport or HttpTransport(self._config.http_timeout)
         self._advertise = advertise
         self._auth_store_getter = auth_store_getter or (lambda: None)
+        # Monotonic clock for liveness timers (leases / HOLD / suppression).
+        # Injectable so tests can drive eviction deterministically; defaults
+        # to time.monotonic in production.
+        self._clock = clock or time.monotonic
         self._lock = threading.RLock()
         # (dataset, origin_id, sid) -> envelope (live or tombstone)
         self._foreign: Dict[_Key, SyncEnvelope] = {}
@@ -67,6 +72,12 @@ class ClusterStore:
         # origin node_id -> last beacon seq seen (flood dedup).
         self._beacon_seen: Dict[str, int] = {}
         self._my_beacon_seq = 0
+        # origin node_id -> monotonic deadline until which records from that
+        # origin are suppressed (rejected) after eviction. Prevents a just-
+        # evicted origin's records from being re-pulled via gossip from a
+        # peer that hasn't evicted yet (which would otherwise ping-pong and
+        # never converge). A genuine beacon from the origin clears it.
+        self._evicted_until: Dict[str, float] = {}
 
     @classmethod
     def load_or_none(
@@ -221,6 +232,12 @@ class ClusterStore:
         if env.origin_id == self.node_id:
             return False
         with self._lock:
+            # Suppress re-learning a just-evicted origin until the cooldown
+            # elapses (or a real beacon proves it's back). Without this, a
+            # peer that hasn't evicted yet would resurrect it via gossip.
+            until = self._evicted_until.get(env.origin_id)
+            if until is not None and self._clock() < until:
+                return False
             cur = self._foreign.get(env.key)
             cur_v = cur.version if cur is not None else None
             if not version_newer(env.version, cur_v):
@@ -231,6 +248,7 @@ class ClusterStore:
         # beacon arrives. Beacons keep renewing it; silence expires it.
         self._origin_leases.install(
             env.origin_id, self._config.beacon_ttl, self._config.beacon_grace,
+            now=self._clock(),
         )
         return True
 
@@ -255,7 +273,7 @@ class ClusterStore:
         )
         with self._lock:
             self._sessions[from_node] = Peer(
-                from_node, address, set(accepted), last_seen=time.monotonic(),
+                from_node, address, set(accepted), last_seen=self._clock(),
             )
         logger.info("cluster: session opened with %s (ns=%s)", from_node, accepted)
         return {"node_id": self.node_id, "accepted": accepted, "ephemeral": ephemeral}
@@ -265,7 +283,7 @@ class ClusterStore:
         with self._lock:
             peer = self._sessions.get(node_id)
             if peer is not None:
-                peer.last_seen = time.monotonic()
+                peer.last_seen = self._clock()
 
     def _public_namespaces(self) -> Set[str]:
         if self._registry is None:
@@ -382,9 +400,13 @@ class ClusterStore:
             if seq <= self._beacon_seen.get(origin, -1):
                 return {"accepted": False}  # dedup → stops the flood
             self._beacon_seen[origin] = seq
+            # A genuine beacon proves the origin is alive again → lift any
+            # post-eviction suppression so its records can re-sync.
+            self._evicted_until.pop(origin, None)
         # install() resets the TTL each beacon → acts as renew.
         self._origin_leases.install(
             origin, self._config.beacon_ttl, self._config.beacon_grace,
+            now=self._clock(),
         )
         self._broadcast_beacon(beacon, exclude=from_node)
         return {"accepted": True}
@@ -407,7 +429,7 @@ class ClusterStore:
         """Drop sessions whose direct link has been silent past ``hold_timeout``.
         Returns the dropped node ids."""
         if now is None:
-            now = time.monotonic()
+            now = self._clock()
         with self._lock:
             stale = [
                 p.node_id for p in self._sessions.values()
@@ -422,18 +444,30 @@ class ClusterStore:
         """Drive the origin-lease state machine; evict every record from an
         origin whose beacons stopped (lease grace expired). Returns the
         evicted origin ids."""
+        if now is None:
+            now = self._clock()
         _newly_unhealthy, to_evict = self._origin_leases.sweep_tick(now)
         for origin in to_evict:
             self._evict_origin(origin)
+        # Prune expired suppression entries.
+        mono = self._clock()
+        with self._lock:
+            for o in [o for o, t in self._evicted_until.items() if mono >= t]:
+                del self._evicted_until[o]
         return to_evict
 
     def _evict_origin(self, origin: str) -> None:
-        """Remove all replicated records (and the session) for ``origin``."""
+        """Remove all replicated records (and the session) for ``origin``,
+        and start a suppression cooldown so gossip can't resurrect them
+        before every node has evicted."""
         with self._lock:
             for k in [k for k in self._foreign if k[1] == origin]:
                 del self._foreign[k]
             self._beacon_seen.pop(origin, None)
             self._sessions.pop(origin, None)
+            self._evicted_until[origin] = (
+                self._clock() + self._config.beacon_ttl + self._config.beacon_grace
+            )
         logger.info("cluster: evicted origin %s (beacons stopped)", origin)
 
     # ── orchestration (us → peer) ───────────────────────────────────────
@@ -455,7 +489,7 @@ class ClusterStore:
         }
         resp = self._transport.open(address, body)
         peer = Peer(resp["node_id"], address, set(resp.get("accepted") or []),
-                    last_seen=time.monotonic())
+                    last_seen=self._clock())
         with self._lock:
             self._sessions[peer.node_id] = peer
         logger.info("cluster: connected to %s (ns=%s)", peer.node_id, sorted(peer.namespaces))

@@ -103,8 +103,53 @@ class InProcessTransport(Transport):
         return self._target(from_node, address).handle_keepalive(from_node)
 
 
+def converge(stores, rounds: int = 4) -> None:
+    """Drive anti-entropy: each node reconciles each of its peers, several
+    rounds, so gossip propagates transitively to a fixed point."""
+    from a2x_registry.cluster.transport import TransportError
+    for _ in range(rounds):
+        for s in stores:
+            for p in s.list_peers():
+                try:
+                    s.reconcile(p)
+                except TransportError:
+                    pass
+
+
+def beacon_flood(stores, rounds: int = 2) -> None:
+    """Each node emits its beacon (floods + relays) so every reachable node
+    arms/renews that origin's liveness lease."""
+    for _ in range(rounds):
+        for s in stores:
+            s.emit_beacon()
+
+
+def visible(store, registry, dataset: str) -> set:
+    """Service names a node can serve from ``dataset`` = local entries +
+    replicated foreign rows (what the merged list endpoint returns)."""
+    local = {
+        e.service_data.name for e in registry.list_entries(dataset)
+        if e.service_data is not None
+    }
+    foreign = {r["wrapped"]["name"] for r in store.foreign_rows(dataset)}
+    return local | foreign
+
+
+class FakeClock:
+    """Manually-advanced monotonic clock for deterministic liveness tests."""
+
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
 def build_store(tmp_path, name, registry, transport, *, auth_store=None,
-                config: Optional[ClusterConfig] = None) -> ClusterStore:
+                config: Optional[ClusterConfig] = None, clock=None) -> ClusterStore:
     state = ClusterState.init(node_id=name, path=tmp_path / f"{name}.json")
     store = ClusterStore(
         state,
@@ -113,6 +158,7 @@ def build_store(tmp_path, name, registry, transport, *, auth_store=None,
         transport=transport,
         advertise=name,  # node name doubles as its in-process address
         auth_store_getter=(lambda: auth_store),
+        clock=clock,
     )
     transport.register(name, store)
     return store
