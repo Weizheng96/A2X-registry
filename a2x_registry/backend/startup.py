@@ -254,7 +254,7 @@ def run_warmup() -> None:
         warmup_state["stage"] = "完成"
         warmup_state["progress"] = 100
         warmup_state["ready"] = True
-        logger.info("Warmup complete — total %.1fs", time.time() - t0)
+        logger.info("Warmup [100%%] complete — total %.1fs", time.time() - t0)
 
     except Exception as e:
         import traceback
