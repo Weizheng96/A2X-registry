@@ -72,7 +72,7 @@ a2x-registry --host 0.0.0.0 --port 8080  # 指定端口
 a2x-registry auth init                          # 一次性 bootstrap，stderr 打印 admin token
 ```
 
-之后管理员可以：① 为整个 Agent Team 池创建 `auth_required=true` 的 namespace；② 为每个 Agent 进程 / teammate 颁发 `provider` 角色的 token，scope 到该 namespace；③ 为协调方颁发 `user` 角色 token，只读 + 预约。token 通过 `cli_token.json` 配置文件分发，详见 [docs/auth_design.md](docs/auth_design.md) 与 [A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client/blob/main/README.md)。
+之后管理员可以：① 为整个 Agent Team 池创建 `auth_required=true` 的 namespace；② 为每个 Agent 进程 / teammate 颁发 `provider` 角色的 token，scope 到该 namespace；③ 为协调方颁发 `user` 角色 token，只读 + 预约。token 通过 `cli_token.json` 配置文件分发，详见 [docs/auth_design.md](docs/auth_design.md) 与 [client/README.md](client/README.md)。
 
 未跑 `auth init` 的部署 + 未声明 `auth_required` 的 namespace 走匿名通道，无需 token。
 
@@ -95,6 +95,6 @@ client.register_blank_agent("team_pool", endpoint="http://teammate-1:8080",
                              lease_ttl=30, auto_renew=True)
 ```
 
-Teammate 崩溃 → 30s 后被标记为不健康 → leader 的 `reserve_blank_agents` 不再选中 → grace_period 之后从注册表彻底清理。详见 [docs/heartbeat_design.md](docs/heartbeat_design.md) 与 [A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client/blob/main/README.md)。
+Teammate 崩溃 → 30s 后被标记为不健康 → leader 的 `reserve_blank_agents` 不再选中 → grace_period 之后从注册表彻底清理。详见 [docs/heartbeat_design.md](docs/heartbeat_design.md) 与 [client/README.md](client/README.md)。
 
 未启用 `lease_config` 的 namespace 不需要心跳，注册的服务永久存在。

@@ -280,7 +280,7 @@ curl -X POST http://localhost:8000/api/datasets \
 
 未带 `auth_required` 的 namespace 无需 token。三档角色（admin / provider / user）+ namespace 作用域设计详见 [docs/auth_design.md](docs/auth_design.md)。
 
-客户端 SDK 通过 `~/.a2x_registry_client/cli_token.json` 配置文件读取 token（由 `a2x-registry-client login` 写入），详见 [A2X-registry-client/README.md](https://github.com/Weizheng96/A2X-registry-client/blob/main/README.md)。
+客户端 SDK 通过 `~/.a2x_registry_client/cli_token.json` 配置文件读取 token（由 `a2x-registry-client login` 写入），详见 [client/README.md](client/README.md)。
 
 ### 心跳保活（可选）
 
@@ -308,7 +308,10 @@ curl -X POST http://localhost:8000/api/datasets/my_ds/services/a2a \
 
 > 完整 API 文档见 [docs/backend_api.md](docs/backend_api.md)，各模块内部接口见对应设计文档。
 
-> 同时我们为 Agent Team 场景提供特化的 Python 客户端 SDK：[A2X-registry-client](https://github.com/Weizheng96/A2X-registry-client)。
+> 同时我们为 Agent Team 场景提供特化的 Python 客户端 SDK——与本仓**同库、同版本号、独立安装**（位于 [`client/`](client/README.md)）：
+> ```bash
+> pip install "a2x-registry-client @ git+https://github.com/Weizheng96/A2X-registry.git@v0.3.0#subdirectory=client"
+> ```
 
 #### 方式三：基于本地配置文档
 
