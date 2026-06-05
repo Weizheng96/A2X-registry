@@ -27,6 +27,7 @@ classifiers = [
 # behavior.
 dependencies = [
     "requests>=2.28",
+    "httpx>=0.24",                   # cluster inter-node sync + CLI client
     "fastapi>=0.104",
     "pydantic>=2.0",
     "python-multipart>=0.0.6",
