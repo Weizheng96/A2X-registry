@@ -36,27 +36,62 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_status(args: argparse.Namespace) -> int:
+def _client_call(server: str, method: str, path: str, **kw):
+    """Call the local server, returning (resp_or_None, error_str_or_None).
+
+    trust_env=False → ignore system proxies so localhost isn't intercepted
+    (Clash/VPN on Windows) — see CLAUDE.md gotcha.
+    """
     import httpx
 
-    url = args.server.rstrip("/") + "/api/cluster/state"
+    url = server.rstrip("/") + path
     try:
-        # trust_env=False → ignore system proxies so localhost isn't
-        # intercepted (Clash/VPN on Windows) — see CLAUDE.md gotcha.
-        with httpx.Client(trust_env=False, timeout=5.0) as client:
-            resp = client.get(url)
+        with httpx.Client(trust_env=False, timeout=10.0) as client:
+            return client.request(method, url, **kw), None
     except httpx.HTTPError as exc:
-        print(f"error: cannot reach server at {args.server}: {exc}")
-        return 1
+        return None, f"cannot reach server at {server}: {exc}"
+
+
+def _print_resp_or_404(resp) -> int:
     if resp.status_code == 404:
         print("Cluster module not initialized on the server "
               "(run 'a2x-registry cluster init', then restart the server).")
         return 1
-    if resp.status_code != 200:
+    if resp.status_code // 100 != 2:
         print(f"error: server returned {resp.status_code}: {resp.text}")
         return 1
     print(json.dumps(resp.json(), ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    resp, err = _client_call(args.server, "GET", "/api/cluster/state")
+    if err:
+        print(f"error: {err}")
+        return 1
+    return _print_resp_or_404(resp)
+
+
+def cmd_add_peer(args: argparse.Namespace) -> int:
+    namespaces = (
+        [n for n in args.namespaces.split(",") if n] if args.namespaces else None
+    )
+    body = {"address": args.address, "namespaces": namespaces, "token": args.token}
+    resp, err = _client_call(args.server, "POST", "/api/cluster/peers", json=body)
+    if err:
+        print(f"error: {err}")
+        return 1
+    return _print_resp_or_404(resp)
+
+
+def cmd_rm_peer(args: argparse.Namespace) -> int:
+    resp, err = _client_call(
+        args.server, "DELETE", f"/api/cluster/peers/{args.node_id}",
+    )
+    if err:
+        print(f"error: {err}")
+        return 1
+    return _print_resp_or_404(resp)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,6 +107,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--server", default=DEFAULT_SERVER,
                           help=f"Registry base URL (default: {DEFAULT_SERVER})")
     p_status.set_defaults(func=cmd_status)
+
+    p_add = sub.add_parser("add-peer", help="Connect to a peer and sync (primary trigger)")
+    p_add.add_argument("address", help="Peer base URL, e.g. http://10.0.0.2:8000")
+    p_add.add_argument("--namespaces", default=None,
+                       help="Comma-separated namespaces to sync (default: all)")
+    p_add.add_argument("--token", default=None,
+                       help="API key for the peer's per-namespace authorization")
+    p_add.add_argument("--server", default=DEFAULT_SERVER,
+                       help=f"This instance's base URL (default: {DEFAULT_SERVER})")
+    p_add.set_defaults(func=cmd_add_peer)
+
+    p_rm = sub.add_parser("rm-peer", help="Drop a peer session + its replicated records")
+    p_rm.add_argument("node_id", help="Peer node id to disconnect")
+    p_rm.add_argument("--server", default=DEFAULT_SERVER,
+                      help=f"This instance's base URL (default: {DEFAULT_SERVER})")
+    p_rm.set_defaults(func=cmd_rm_peer)
 
     return parser
 

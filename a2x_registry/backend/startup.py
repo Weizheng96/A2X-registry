@@ -119,9 +119,19 @@ def run_warmup() -> None:
         # otherwise stays None and the whole feature is dormant (endpoints
         # 404, read path unchanged). Failure is non-fatal.
         try:
+            import os as _os
             from a2x_registry.cluster.store import ClusterStore
             from a2x_registry.cluster.deps import set_cluster_store
-            cluster_store = ClusterStore.load_or_none(registry_svc=registry_svc)
+            from a2x_registry.auth.deps import get_auth_store
+            # Advertised base URL peers use to reach us. Defaults empty; set
+            # A2X_REGISTRY_CLUSTER_ADVERTISE (e.g. http://10.0.0.2:8000) in a
+            # multi-instance deployment so peers can call back.
+            advertise = _os.environ.get("A2X_REGISTRY_CLUSTER_ADVERTISE", "")
+            cluster_store = ClusterStore.load_or_none(
+                registry_svc=registry_svc,
+                advertise=advertise,
+                auth_store_getter=get_auth_store,
+            )
             set_cluster_store(cluster_store)
             if cluster_store is not None:
                 logger.info("  Cluster module loaded (node_id=%s)", cluster_store.node_id)
