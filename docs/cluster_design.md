@@ -189,12 +189,21 @@ a2x-registry cluster status   [--server URL]
 
 `add-peer` / `rm-peer` / `status` 是对本机 server `/api/cluster/*` 的**薄 HTTP 客户端**（跨平台，无 OS 专有 IPC；`trust_env=False` 避免系统代理拦截 localhost）。
 
-### 2.3 握手鉴权（复用 auth 模块）
+### 2.3 握手鉴权 + 会话令牌（复用 auth 模块）
 
 OPEN 时接收方逐"候选 namespace"（=对方提供的数据集 ∪ 自己的数据集）授权，语义与 auth 模块一致（`store is None` = 未启用鉴权 = 全放行）：
 
 - 接收方**没有**该 namespace → 需 `admin` token（建一个临时副本承载）；未启用鉴权则直接放行。
 - 接收方**有**该 namespace → 不要求鉴权则放行；否则需 scope 到它的 `provider`/`admin` token。
+
+**会话令牌（仅在接收方启用鉴权时生效）**：握手成功后，启用鉴权的接收方签发一个随机 session secret，随 OPEN 响应返回，双方留存（`Peer.token`）。之后每次 RPC（digest/pull/updates/beacon/keepalive）经 `X-Cluster-Session` 头携带它，接收方据此校验 `from_node` 声明：
+
+- **无鉴权集群**：不签发、不校验令牌（开放集群，逐调用无门槛）。
+- **启用鉴权**：令牌有效 → 享有该会话协商到的 namespace；令牌缺失/错误 → **降级为匿名**，只能访问公共（非 `auth_required`）namespace。
+
+由此，伪造 `from_node` 无法触达某特权节点的命名空间、也无法向 `auth_required` 命名空间推送数据。
+
+**安全假设**：节点身份与命名空间授权由握手 token + 会话令牌保证；本期未对 RPC 载荷做端到端加密（依赖部署层 TLS / 可信链路）。
 
 ### 2.4 与注册中心其余部分的集成
 
