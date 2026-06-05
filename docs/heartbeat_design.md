@@ -1,6 +1,6 @@
 # A2X 心跳保活模块设计
 
-> 适用 v0.1.8+。本文件面向运维 / 开发者。**基本用法**见 [README.md](../README.md) 与 [A2X-registry-client/README.md](../client/README.md) 的相关章节；本文聚焦设计原理、文件布局、模块依赖与状态机不变式。设计调研对照见 [reference/分析报告/心跳方案比对.md](../reference/分析报告/心跳方案比对.md)。
+> 适用 v0.1.8+。本文件面向运维 / 开发者。**基本用法**见 [README.md](../README.md) 与 [client/README.md](../client/README.md) 的相关章节；本文聚焦设计原理、文件布局、模块依赖与状态机不变式。设计调研对照见 [reference/分析报告/心跳方案比对.md](../reference/分析报告/心跳方案比对.md)。
 
 ## 1. 定位与设计原则
 
@@ -207,7 +207,7 @@ for (ds, sid) in to_hard_delete:
 
 ## 9. 客户端 SDK
 
-[A2X-registry-client/a2x_registry_client/heartbeat.py](../client/a2x_registry_client/heartbeat.py)：
+[client/a2x_registry_client/heartbeat.py](../client/a2x_registry_client/heartbeat.py)：
 
 - `HeartbeatRenewer` —— per-(ds, sid) daemon thread，每 `ttl/3` 秒发一次心跳，指数退避，daemon=True 不阻塞进程退出
 - `HeartbeatRegistry` —— per-client 管理器
@@ -254,6 +254,6 @@ A2X 现在有三类 TTL，**互不耦合**：
 ## 12. 进一步阅读
 
 - [reference/分析报告/心跳方案比对.md](../reference/分析报告/心跳方案比对.md) —— 8 大类心跳方案的调研与对照（Eureka / K8s probes / etcd lease / SWIM / 等）
-- [A2X-registry-client/README.md §2.6](../client/README.md) —— 客户端心跳基本用法
+- [client/README.md §2.6](../client/README.md) —— 客户端心跳基本用法
 - [tests/heartbeat/](../tests/heartbeat/) —— 40 个 server 测试，对照本文档每个不变式逐项验证
-- [A2X-registry-client/tests/test_heartbeat_renewer.py](../client/tests/test_heartbeat_renewer.py) —— 客户端 renewer 测试
+- [client/tests/test_heartbeat_renewer.py](../client/tests/test_heartbeat_renewer.py) —— 客户端 renewer 测试

@@ -1,6 +1,6 @@
 # A2X 鉴权模块设计
 
-> 适用 v0.1.7+。本文档面向运维 / 开发者。**基本用法**见 [README.md](../README.md) 与 [A2X-registry-client/README.md](../client/README.md) 的相关章节；本文聚焦设计原理、文件布局、模块依赖与安全不变式。
+> 适用 v0.1.7+。本文档面向运维 / 开发者。**基本用法**见 [README.md](../README.md) 与 [client/README.md](../client/README.md) 的相关章节；本文聚焦设计原理、文件布局、模块依赖与安全不变式。
 
 ## 1. 定位与设计原则
 
@@ -266,7 +266,7 @@ database/<namespace>/
 
 ## 9. 客户端凭据解析
 
-[A2X-registry-client](../client) SDK 的解析优先级（**有意省略环境变量路径**，避免凭据从父进程意外继承）：
+[client](../client) SDK 的解析优先级（**有意省略环境变量路径**，避免凭据从父进程意外继承）：
 
 ```
 1. A2XRegistryClient(api_key="...")     显式构造参数

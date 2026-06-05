@@ -1,4 +1,4 @@
-"""End-to-end test mirroring A2X-registry-client/README.md §2 closely.
+"""End-to-end test mirroring client/README.md §2 closely.
 
 Verifies the documented 3-role flow (admin → provider → user) works
 against current server + SDK code, exactly as a user would copy-paste

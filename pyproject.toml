@@ -74,7 +74,7 @@ include = ["a2x_registry*"]
 # packages anyway; this is belt-and-suspenders against an accidental ``pip
 # install .`` from a dev tree where the dir already exists.
 exclude = [
-    "reference*", "examples*", "tests*", "database*", "A2X-registry-client*",
+    "reference*", "examples*", "tests*", "database*", "client*", "backup*",
     "a2x_registry.auth.auth_data*",
 ]
 

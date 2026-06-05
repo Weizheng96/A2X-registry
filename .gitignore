@@ -1,8 +1,8 @@
 # Reference materials - ignore from version control
 reference/
 
-# Sibling client SDK repo (independent git repository, not tracked here)
-A2X-registry-client/
+# Backups (e.g. the archived standalone client repo) — not tracked here
+backup/
 
 # Python virtual environment
 .venv/
