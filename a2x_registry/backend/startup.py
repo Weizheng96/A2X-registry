@@ -114,6 +114,24 @@ def run_warmup() -> None:
             from a2x_registry.heartbeat.deps import set_heartbeat_store
             set_heartbeat_store(None)
 
+        # 1d. Cluster (distributed sync) module — opt-in. Loads only when
+        # cluster_state.json exists (created by 'a2x-registry cluster init');
+        # otherwise stays None and the whole feature is dormant (endpoints
+        # 404, read path unchanged). Failure is non-fatal.
+        try:
+            from a2x_registry.cluster.store import ClusterStore
+            from a2x_registry.cluster.deps import set_cluster_store
+            cluster_store = ClusterStore.load_or_none(registry_svc=registry_svc)
+            set_cluster_store(cluster_store)
+            if cluster_store is not None:
+                logger.info("  Cluster module loaded (node_id=%s)", cluster_store.node_id)
+            else:
+                logger.info("  Cluster module not initialized (standalone)")
+        except Exception as exc:
+            logger.error("  Cluster init failed: %s", exc, exc_info=True)
+            from a2x_registry.cluster.deps import set_cluster_store
+            set_cluster_store(None)
+
         # Only wire vector-sync side effects when the [vector] extras are
         # installed; otherwise every SDK register/deregister would spawn a
         # daemon thread that immediately ImportErrors on chromadb.

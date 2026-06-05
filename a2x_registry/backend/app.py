@@ -16,6 +16,7 @@ from a2x_registry.backend.startup import warmup_state, run_warmup
 from a2x_registry.common.errors import FeatureNotInstalledError, LLMNotConfiguredError
 from a2x_registry.auth.router import router as auth_router
 from a2x_registry.heartbeat.router import router as heartbeat_router
+from a2x_registry.cluster.router import router as cluster_router
 
 app = FastAPI(
     title="A2X Registry Demo",
@@ -41,6 +42,9 @@ app.include_router(auth_router)
 # Heartbeat endpoints. Same 404 fallback semantics when the heartbeat
 # module isn't initialized (e.g. lite mode without startup hook).
 app.include_router(heartbeat_router)
+# Cluster (distributed sync) endpoints. Opt-in: every route 404s until the
+# cluster module is initialized (cluster_state.json present at startup).
+app.include_router(cluster_router)
 
 
 @app.exception_handler(FeatureNotInstalledError)
