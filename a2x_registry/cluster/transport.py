@@ -39,6 +39,12 @@ class Transport:
     def updates(self, address: str, from_node: str, envelopes: List[dict]) -> dict:
         raise NotImplementedError
 
+    def beacon(self, address: str, from_node: str, beacon: dict) -> dict:
+        raise NotImplementedError
+
+    def keepalive(self, address: str, from_node: str) -> dict:
+        raise NotImplementedError
+
 
 class HttpTransport(Transport):
     """Production transport over the peer's REST endpoints."""
@@ -79,4 +85,16 @@ class HttpTransport(Transport):
         return self._call(
             address, "POST", "/api/cluster/updates",
             json={"from_node": from_node, "envelopes": envelopes},
+        )
+
+    def beacon(self, address: str, from_node: str, beacon: dict) -> dict:
+        return self._call(
+            address, "POST", "/api/cluster/beacons",
+            json={"from_node": from_node, "beacon": beacon},
+        )
+
+    def keepalive(self, address: str, from_node: str) -> dict:
+        return self._call(
+            address, "POST", "/api/cluster/keepalives",
+            json={"from_node": from_node},
         )

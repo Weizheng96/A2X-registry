@@ -48,6 +48,15 @@ class UpdatesRequest(BaseModel):
     envelopes: List[dict]
 
 
+class BeaconRequest(BaseModel):
+    from_node: str
+    beacon: dict
+
+
+class KeepaliveRequest(BaseModel):
+    from_node: str
+
+
 # ── trigger / session management ─────────────────────────────────────────
 
 @router.post("/peers")
@@ -99,6 +108,16 @@ async def post_pulls(req: PullRequest, store: ClusterStore = Depends(require_clu
 @router.post("/updates")
 async def post_updates(req: UpdatesRequest, store: ClusterStore = Depends(require_cluster_store)):
     return store.serve_updates(req.from_node, req.envelopes)
+
+
+@router.post("/beacons")
+async def post_beacon(req: BeaconRequest, store: ClusterStore = Depends(require_cluster_store)):
+    return store.handle_beacon(req.from_node, req.beacon)
+
+
+@router.post("/keepalives")
+async def post_keepalive(req: KeepaliveRequest, store: ClusterStore = Depends(require_cluster_store)):
+    return store.handle_keepalive(req.from_node)
 
 
 # ── observability ────────────────────────────────────────────────────────

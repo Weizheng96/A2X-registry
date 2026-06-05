@@ -62,3 +62,80 @@ class AntiEntropySweeper:
             except Exception as exc:  # noqa: BLE001 — defensive
                 logger.exception("cluster: anti-entropy tick raised: %s", exc)
             self._stop.wait(self._period)
+
+
+class BeaconSweeper:
+    """Broadcasts our liveness beacon and evicts origins whose beacons
+    stopped. One daemon thread; ``tick()`` is test-drivable."""
+
+    def __init__(self, store, period: float = 10.0) -> None:
+        self._store = store
+        self._period = float(period)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def tick(self) -> None:
+        self._store.emit_beacon()
+        self._store.sweep_origins()
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="ClusterBeacon", daemon=True,
+        )
+        self._thread.start()
+        logger.info("cluster: beacon sweeper started (period=%ss)", self._period)
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001 — defensive
+                logger.exception("cluster: beacon tick raised: %s", exc)
+            self._stop.wait(self._period)
+
+
+class KeepaliveMonitor:
+    """Sends direct-link keepalives and drops peers past their HOLD timer."""
+
+    def __init__(self, store, period: float = 10.0) -> None:
+        self._store = store
+        self._period = float(period)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def tick(self) -> None:
+        self._store.emit_keepalive()
+        self._store.check_hold()
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="ClusterKeepalive", daemon=True,
+        )
+        self._thread.start()
+        logger.info("cluster: keepalive monitor started (period=%ss)", self._period)
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001 — defensive
+                logger.exception("cluster: keepalive tick raised: %s", exc)
+            self._stop.wait(self._period)

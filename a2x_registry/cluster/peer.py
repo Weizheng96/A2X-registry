@@ -17,6 +17,9 @@ class Peer:
     node_id: str
     address: str
     namespaces: Set[str] = field(default_factory=set)
+    # monotonic timestamp of the last inbound contact from this peer; drives
+    # the direct-link HOLD timer.
+    last_seen: float = 0.0
 
     def to_summary(self) -> dict:
         return {

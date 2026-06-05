@@ -96,6 +96,12 @@ class InProcessTransport(Transport):
     def updates(self, address, from_node, envelopes):
         return self._target(from_node, address).serve_updates(from_node, envelopes)
 
+    def beacon(self, address, from_node, beacon):
+        return self._target(from_node, address).handle_beacon(from_node, beacon)
+
+    def keepalive(self, address, from_node):
+        return self._target(from_node, address).handle_keepalive(from_node)
+
 
 def build_store(tmp_path, name, registry, transport, *, auth_store=None,
                 config: Optional[ClusterConfig] = None) -> ClusterStore:

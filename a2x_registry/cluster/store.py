@@ -23,6 +23,8 @@ import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
+from a2x_registry.common.lease import LeaseTable
+
 from .auth_handshake import authorize_namespaces
 from .config import ClusterConfig
 from .envelope import SyncEnvelope, Version, version_newer
@@ -59,6 +61,12 @@ class ClusterStore:
         self._foreign: Dict[_Key, SyncEnvelope] = {}
         # peer node_id -> Peer
         self._sessions: Dict[str, Peer] = {}
+        # origin node_id -> liveness lease (refreshed by that node's beacons).
+        # Expiry evicts every record that originated at the node.
+        self._origin_leases: LeaseTable[str] = LeaseTable()
+        # origin node_id -> last beacon seq seen (flood dedup).
+        self._beacon_seen: Dict[str, int] = {}
+        self._my_beacon_seq = 0
 
     @classmethod
     def load_or_none(
@@ -218,7 +226,13 @@ class ClusterStore:
             if not version_newer(env.version, cur_v):
                 return False
             self._foreign[env.key] = env
-            return True
+        # Receiving a record is liveness evidence for its origin — start (or
+        # renew) the eviction lease so it's armed even before the first
+        # beacon arrives. Beacons keep renewing it; silence expires it.
+        self._origin_leases.install(
+            env.origin_id, self._config.beacon_ttl, self._config.beacon_grace,
+        )
+        return True
 
     # ── handlers (peer → us) ────────────────────────────────────────────
 
@@ -240,9 +254,18 @@ class ClusterStore:
             self._registry, self._auth_store_getter(), candidate, token,
         )
         with self._lock:
-            self._sessions[from_node] = Peer(from_node, address, set(accepted))
+            self._sessions[from_node] = Peer(
+                from_node, address, set(accepted), last_seen=time.monotonic(),
+            )
         logger.info("cluster: session opened with %s (ns=%s)", from_node, accepted)
         return {"node_id": self.node_id, "accepted": accepted, "ephemeral": ephemeral}
+
+    def _touch_peer(self, node_id: str) -> None:
+        """Refresh the direct-link HOLD timer for a peer we just heard from."""
+        with self._lock:
+            peer = self._sessions.get(node_id)
+            if peer is not None:
+                peer.last_seen = time.monotonic()
 
     def _public_namespaces(self) -> Set[str]:
         if self._registry is None:
@@ -264,6 +287,7 @@ class ClusterStore:
     def serve_digest(self, from_node: str, namespaces: Optional[List[str]]) -> list:
         """Return ``[dataset, origin_id, service_id, version]`` rows for the
         records visible to ``from_node`` (session-scoped)."""
+        self._touch_peer(from_node)
         allowed = self._allowed_for(from_node, namespaces)
         idx = self._full_index(sorted(allowed) if allowed else [])
         return [
@@ -274,6 +298,7 @@ class ClusterStore:
 
     def serve_pull(self, from_node: str, keys: List[list]) -> list:
         """Return full envelopes for the requested keys (session-scoped)."""
+        self._touch_peer(from_node)
         allowed = self._allowed_for(from_node, None)
         out = []
         for k in keys:
@@ -293,6 +318,7 @@ class ClusterStore:
         the same version is rejected by ``apply_inbound`` and therefore not
         relayed again, so the flood dies out after each node sees it once.
         """
+        self._touch_peer(from_node)
         accepted = 0
         to_relay: List[SyncEnvelope] = []
         for raw in envelopes:
@@ -321,6 +347,95 @@ class ClusterStore:
             except TransportError:
                 pass
 
+    # ── liveness: beacons (transitive) + keepalive (direct link) ────────
+
+    def emit_beacon(self) -> None:
+        """Broadcast our own liveness beacon. Floods the LAN like an UPDATE
+        (relayed with split-horizon, deduped by sequence) so every reachable
+        node refreshes our origin lease."""
+        with self._lock:
+            self._my_beacon_seq += 1
+            beacon = {"origin_id": self.node_id, "seq": self._my_beacon_seq}
+        self._broadcast_beacon(beacon, exclude=None)
+
+    def _broadcast_beacon(self, beacon: dict, exclude: Optional[str]) -> None:
+        with self._lock:
+            peers = list(self._sessions.values())
+        for peer in peers:
+            if peer.node_id == exclude:
+                continue
+            try:
+                self._transport.beacon(peer.address, self.node_id, beacon)
+            except TransportError:
+                pass
+
+    def handle_beacon(self, from_node: str, beacon: dict) -> dict:
+        """Receive a beacon: refresh the origin's lease and relay onward
+        (split-horizon + sequence dedup). Our own beacon echoed back is
+        ignored."""
+        self._touch_peer(from_node)
+        origin = beacon["origin_id"]
+        seq = int(beacon["seq"])
+        if origin == self.node_id:
+            return {"accepted": False}
+        with self._lock:
+            if seq <= self._beacon_seen.get(origin, -1):
+                return {"accepted": False}  # dedup → stops the flood
+            self._beacon_seen[origin] = seq
+        # install() resets the TTL each beacon → acts as renew.
+        self._origin_leases.install(
+            origin, self._config.beacon_ttl, self._config.beacon_grace,
+        )
+        self._broadcast_beacon(beacon, exclude=from_node)
+        return {"accepted": True}
+
+    def handle_keepalive(self, from_node: str) -> dict:
+        """Direct-link keepalive — refresh the HOLD timer."""
+        self._touch_peer(from_node)
+        return {"ok": True}
+
+    def emit_keepalive(self) -> None:
+        with self._lock:
+            peers = list(self._sessions.values())
+        for peer in peers:
+            try:
+                self._transport.keepalive(peer.address, self.node_id)
+            except TransportError:
+                pass
+
+    def check_hold(self, now: Optional[float] = None) -> List[str]:
+        """Drop sessions whose direct link has been silent past ``hold_timeout``.
+        Returns the dropped node ids."""
+        if now is None:
+            now = time.monotonic()
+        with self._lock:
+            stale = [
+                p.node_id for p in self._sessions.values()
+                if now - p.last_seen > self._config.hold_timeout
+            ]
+        for node_id in stale:
+            logger.info("cluster: peer %s HOLD expired; dropping session", node_id)
+            self.disconnect_peer(node_id)
+        return stale
+
+    def sweep_origins(self, now: Optional[float] = None) -> List[str]:
+        """Drive the origin-lease state machine; evict every record from an
+        origin whose beacons stopped (lease grace expired). Returns the
+        evicted origin ids."""
+        _newly_unhealthy, to_evict = self._origin_leases.sweep_tick(now)
+        for origin in to_evict:
+            self._evict_origin(origin)
+        return to_evict
+
+    def _evict_origin(self, origin: str) -> None:
+        """Remove all replicated records (and the session) for ``origin``."""
+        with self._lock:
+            for k in [k for k in self._foreign if k[1] == origin]:
+                del self._foreign[k]
+            self._beacon_seen.pop(origin, None)
+            self._sessions.pop(origin, None)
+        logger.info("cluster: evicted origin %s (beacons stopped)", origin)
+
     # ── orchestration (us → peer) ───────────────────────────────────────
 
     def connect_peer(
@@ -339,7 +454,8 @@ class ClusterStore:
             "token": token,
         }
         resp = self._transport.open(address, body)
-        peer = Peer(resp["node_id"], address, set(resp.get("accepted") or []))
+        peer = Peer(resp["node_id"], address, set(resp.get("accepted") or []),
+                    last_seen=time.monotonic())
         with self._lock:
             self._sessions[peer.node_id] = peer
         logger.info("cluster: connected to %s (ns=%s)", peer.node_id, sorted(peer.namespaces))
@@ -501,4 +617,5 @@ class ClusterStore:
                 "foreign_by_namespace": foreign_by_ns,
                 "local_records": len(self._state.local_versions),
                 "tombstones": len(self._state.tombstones),
+                "tracked_origins": len(self._origin_leases.items()),
             }
