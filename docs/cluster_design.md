@@ -91,12 +91,13 @@ sequenceDiagram
     participant B as 注册中心 B
     participant C as 注册中心 C
     Ag->>A: register / update / deregister
-    A-->>Ag: 200 OK（本地立即返回）
-    A->>B: POST /updates (增量 v)
-    Note over B: v 更新 → 接受、转发(水平分割，排除 A)
-    B->>C: POST /updates (增量 v)
-    Note over C: v 更新 → 接受、转发(排除 B → 无)
-    Note over A,B,C: v 的回音因"非更新"被丢弃 → 泛洪终止
+    A-->>Ag: 200 OK 本地立即返回
+    A->>B: POST /updates 增量 v
+    Note over B: v 更新 → 接受、转发<br/>水平分割：排除来源 A
+    B->>C: POST /updates 增量 v
+    Note over C: v 更新 → 接受、转发<br/>排除来源 B → 无下游
+    C-->>A: POST /updates 增量 v 回音
+    Note over A: v 非更新 → 丢弃且不转发<br/>泛洪终止，不鬼打墙
 ```
 
 **存活信标与失活驱逐（信号断开后删除非局域网内数据）**
@@ -136,20 +137,20 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    subgraph HA["注册中心 A 主机"]
-        AgA["智能体们"] -->|register/query| RA[("本地注册表<br/>service.json")]
-        RA --- CA["cluster 模块<br/>node_id=A<br/>foreign overlay"]
+    subgraph HA[注册中心 A 主机]
+        AgA[智能体们] -->|本地读写| RA[(本地注册表<br/>service.json)]
+        RA --- CA[cluster 模块<br/>node_id=A<br/>foreign overlay]
     end
-    subgraph HB["注册中心 B 主机"]
-        AgB["智能体们"] -->|register/query| RB[("本地注册表<br/>service.json")]
-        RB --- CB["cluster 模块<br/>node_id=B<br/>foreign overlay"]
+    subgraph HB[注册中心 B 主机]
+        AgB[智能体们] -->|本地读写| RB[(本地注册表<br/>service.json)]
+        RB --- CB[cluster 模块<br/>node_id=B<br/>foreign overlay]
     end
-    subgraph HC["注册中心 C 主机"]
-        AgC["智能体们"] -->|register/query| RC[("本地注册表<br/>service.json")]
-        RC --- CC["cluster 模块<br/>node_id=C<br/>foreign overlay"]
+    subgraph HC[注册中心 C 主机]
+        AgC[智能体们] -->|本地读写| RC[(本地注册表<br/>service.json)]
+        RC --- CC[cluster 模块<br/>node_id=C<br/>foreign overlay]
     end
-    CA <-->|"/api/cluster/* (HTTP)"| CB
-    CB <-->|"/api/cluster/* (HTTP)"| CC
+    CA <-->|HTTP 同步| CB
+    CB <-->|HTTP 同步| CC
 ```
 
 - 每台主机 = 一组智能体 + 一个注册中心 server（FastAPI）+ 一个 cluster 模块（持有 foreign overlay 与来源租约）。
