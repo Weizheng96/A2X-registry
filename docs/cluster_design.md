@@ -65,21 +65,23 @@ tombstones:     {dataset\0sid: {version, deleted_at_ms}}
 
 ### 1.2 时序图
 
-**建链 + 初始全量对账**
+每一步标注"做了什么【对应接口】"。
+
+**建链 + 初始全量对账**（A 主动连接 B）
 
 ```mermaid
 sequenceDiagram
     participant A as 注册中心 A
     participant B as 注册中心 B
-    A->>B: POST /sessions (node_id, address, namespaces, token)
-    B->>B: 逐 namespace 鉴权
-    B-->>A: {node_id, accepted}
-    A->>B: GET /digest
-    B-->>A: 版本摘要
-    A->>B: POST /pulls (A 缺/旧的键)
-    B-->>A: 记录信封 → 按 LWW 接受
-    A->>B: POST /updates (A 比 B 新的键)
-    Note over A,B: 双方收敛
+    A->>B: 发起同步会话：声明身份、要同步的命名空间、鉴权 token【POST /sessions】
+    B->>B: 逐命名空间鉴权；启用鉴权时签发会话令牌
+    B-->>A: 返回身份、接受的命名空间、会话令牌
+    A->>B: 请求版本摘要：看对端有哪些记录及版本【GET /digest】
+    B-->>A: 返回 {记录键: 版本} 摘要
+    A->>B: 拉取我方缺失/过时的记录【POST /pulls】
+    B-->>A: 返回完整记录信封；A 按 LWW 落库
+    A->>B: 推送我方比对端新的记录【POST /updates】
+    Note over A,B: 双方收敛，进入稳态
 ```
 
 **本地 CRUD 增量推送 + 链式转发（A–B–C）**
@@ -90,46 +92,46 @@ sequenceDiagram
     participant A as 注册中心 A
     participant B as 注册中心 B
     participant C as 注册中心 C
-    Ag->>A: register / update / deregister
-    A-->>Ag: 200 OK 本地立即返回
-    A->>B: POST /updates 增量 v
-    Note over B: v 更新 → 接受、转发<br/>水平分割：排除来源 A
-    B->>C: POST /updates 增量 v
-    Note over C: v 更新 → 接受、转发<br/>排除来源 B → 无下游
-    C-->>A: POST /updates 增量 v 回音
-    Note over A: v 非更新 → 丢弃且不转发<br/>泛洪终止，不鬼打墙
+    Ag->>A: 注册 / 更新 / 注销服务
+    A-->>Ag: 200 OK（本地写完立即返回，不等同步）
+    A->>B: 推送该变更增量【POST /updates】
+    Note over B: 版本更新→落库；转发给除来源 A 外的邻居（水平分割）
+    B->>C: 转发该增量【POST /updates】
+    Note over C: 版本更新→落库；无其他下游，停止
+    C-->>A: 若成环，回音转发回 A【POST /updates】
+    Note over A: 版本非更新→丢弃且不再转发，泛洪终止
 ```
 
-**存活信标与失活驱逐（信号断开后删除非局域网内数据）**
+**存活信标与失活驱逐**（信号断开后删除不在局域网内的数据）
 
 ```mermaid
 sequenceDiagram
     participant C as 注册中心 C
     participant B as 注册中心 B
     participant A as 注册中心 A
-    loop 每 beacon_interval=10s
-        C->>B: POST /beacons (origin=C, seq++)
-        B->>A: 转发 beacon (origin=C)（水平分割+去重）
-        Note over A: 续租 origin=C：expires=now+30s, evict=now+45s
+    loop 每 10s（beacon_interval）
+        C->>B: 广播自己的存活信标【POST /beacons】
+        B->>A: 转发信标（水平分割 + 按序号去重）【POST /beacons】
+        Note over A: 续租来源 C：到期=now+30s，驱逐=now+45s
     end
     Note over B,C: C 远离，链路断开
-    Note over A: 不再收到 origin=C 的信标
-    Note over A: 经过 ttl+grace(~45s) → 驱逐所有 origin=C 的记录
+    Note over A: 不再收到来源 C 的信标
+    Note over A: 经 ttl+grace（~45s）→ 一次性驱逐所有来源=C 的记录
 ```
 
 > 失活以**注册中心节点**为单位：一条来源租约管该节点的全部服务，不逐服务保活。直连邻居还有更快的 keepalive/HOLD（`hold_timeout=30s`）兜底断会话。从物理断开算起，默认约 **45 秒**（≈ ttl+grace，±信标间隔/巡检粒度）后该来源的服务从其它实例删除；可在 `ClusterConfig` 调小。
 
-**周期反熵兜底**
+**周期反熵兜底**（修复推送丢包，保证最终收敛）
 
 ```mermaid
 sequenceDiagram
     participant A as 注册中心 A
     participant B as 注册中心 B
-    loop 每 anti_entropy_interval=20s
-        A->>B: GET /digest
+    loop 每 20s（anti_entropy_interval）
+        A->>B: 交换版本摘要找差异【GET /digest】
         B-->>A: 版本摘要
-        A->>B: POST /pulls + POST /updates (差量)
-        Note over A: gc_tombstones()
+        A->>B: 补齐差量：拉缺失 + 推更新【POST /pulls · /updates】
+        Note over A: 顺带 GC 过期墓碑
     end
 ```
 
@@ -157,58 +159,191 @@ flowchart LR
 - 智能体只与**本地**注册中心交互（注册 / 查询）；查询时本地把"本地 entry + foreign 副本"合并返回。
 - 实例间只通过 HTTP `/api/cluster/*` 通信。拓扑可以是星形、链形或环形；节点移动导致拓扑变化时，新链路自动建链对账、旧来源按租约失活。
 
+### 1.4 类图
+
+`ClusterStore` 是核心，聚合"持久化状态 + 会话表 + foreign 副本 + 来源租约"，并通过 `Transport` 与对端通信；三个后台守护线程驱动它做周期任务。
+
+```mermaid
+classDiagram
+    class ClusterStore {
+        +node_id
+        +handle_open(body) 接收握手
+        +serve_digest/pull/updates() 应答对端
+        +handle_beacon/keepalive() 应答存活
+        +connect_peer(addr) 发起建链+对账
+        +reconcile(peer) 双向对账
+        +on_local_mutation() 本地CRUD钩子
+        +apply_inbound(env) 按LWW落库
+        +emit_beacon() 广播存活
+        +sweep_origins() 失活驱逐
+        +gc_tombstones() 墓碑回收
+        +foreign_rows(ds) 读路径合并
+    }
+    class ClusterState {
+        +node_id
+        +version_clock
+        +local_versions
+        +tombstones
+        +load/init/save()
+    }
+    class SyncEnvelope {
+        +dataset
+        +service_id
+        +origin_id
+        +version
+        +tombstone
+        +payload
+    }
+    class Peer {
+        +node_id
+        +address
+        +namespaces
+        +last_seen
+        +token
+    }
+    class LeaseTable~K~ {
+        +install/renew/revoke()
+        +sweep_tick(now)
+    }
+    class ClusterConfig {
+        +beacon_ttl
+        +beacon_grace
+        +hold_timeout
+        +anti_entropy_interval
+    }
+    class Transport {
+        <<interface>>
+        +open/digest/pull/updates()
+        +beacon/keepalive()
+    }
+    class HttpTransport
+    class AntiEntropySweeper
+    class BeaconSweeper
+    class KeepaliveMonitor
+
+    ClusterStore --> ClusterState : 持久化状态
+    ClusterStore --> "0..*" Peer : 会话表
+    ClusterStore --> "0..*" SyncEnvelope : foreign overlay
+    ClusterStore --> LeaseTable : 来源租约
+    ClusterStore --> ClusterConfig : 配置
+    ClusterStore --> Transport : 对端通信
+    Transport <|.. HttpTransport
+    AntiEntropySweeper --> ClusterStore : 周期对账+GC
+    BeaconSweeper --> ClusterStore : 周期广播+驱逐
+    KeepaliveMonitor --> ClusterStore : 周期保活+断链
+```
+
 ---
 
 ## 2. 对外接口
 
-### 2.1 REST（`/api/cluster/*`）
+### 2.1 整体介绍（所有接口一览）
 
-| 方法 + 路径 | 作用 |
-|-------------|------|
-| `POST /peers` | 触发：连接 `{address}` 并对账（CLI `add-peer` 在本机调它） |
-| `GET /peers` | 列出当前会话 |
-| `DELETE /peers/{node_id}` | 断开会话 + 删除该来源的副本 |
-| `POST /sessions` | 接收 OPEN 握手（逐 namespace 鉴权） |
-| `GET /digest?from_node=&namespaces=` | 返回 `[dataset, origin_id, service_id, version]` 行 |
-| `POST /pulls` | 按键返回完整信封 |
-| `POST /updates` | 接受入站信封（LWW 去重）+ 水平分割转发 |
-| `POST /beacons` | 续期来源租约 + 转发 |
-| `POST /keepalives` | 续期直链 HOLD 计时器 |
-| `GET /state` | 节点 id + 同步快照 |
+**用户 / 运维使用的接口**
 
-未初始化时每个路由返回 404。
+| 接口 | 作用 |
+|------|------|
+| `a2x-registry cluster init` | 生成本实例 node_id，启用集群（opt-in 开关） |
+| `a2x-registry cluster add-peer <addr>` | 连接一个对端并完成首次对账（**主用触发命令**） |
+| `a2x-registry cluster rm-peer <node_id>` | 主动断开某对端，并删除它的副本 |
+| `a2x-registry cluster status` | 查看本节点同步状态 |
+| `GET /api/cluster/state` | 同上，HTTP 形式的状态快照 |
+| `GET /api/cluster/peers` | 列出当前会话 |
+| `POST /api/cluster/peers` | `add-peer` 的底层 HTTP；外部系统 / 链路发现守护进程也可直接调 |
+| `DELETE /api/cluster/peers/{node_id}` | `rm-peer` 的底层 HTTP |
+| `GET /api/datasets/{ds}/services`（既有） | 查询服务列表，**自动合并对端同步来的副本** |
 
-### 2.2 CLI
+**节点间协议接口**（由其它注册中心自动调用，用户一般不直接使用）
 
+| 接口 | 作用 |
+|------|------|
+| `POST /api/cluster/sessions` | 接收握手，逐命名空间鉴权 + 签发会话令牌 |
+| `GET /api/cluster/digest` | 返回 `{记录键: 版本}` 摘要 |
+| `POST /api/cluster/pulls` | 按键返回完整记录信封 |
+| `POST /api/cluster/updates` | 接收增量（LWW 去重）并水平分割转发 |
+| `POST /api/cluster/beacons` | 接收存活信标，续租来源并转发 |
+| `POST /api/cluster/keepalives` | 直链保活，刷新 HOLD 计时 |
+
+> 未执行 `cluster init` 时，所有 `/api/cluster/*` 返回 404。
+
+### 2.2 用户接口详解（输入 / 输出示例）
+
+**`cluster init`** —— 离线生成身份，不经 HTTP。
+
+```bash
+a2x-registry cluster init
 ```
-a2x-registry cluster init                 # 生成 node id（opt-in 开关）
-a2x-registry cluster add-peer <addr> [--namespaces a,b] [--token T] [--server URL]
-a2x-registry cluster rm-peer  <node_id> [--server URL]
-a2x-registry cluster status   [--server URL]
+```
+Cluster initialized.
+  node_id : reg-99f79b5f9d04
+  state   : ~/.a2x_registry/cluster_state.json
 ```
 
-`add-peer` / `rm-peer` / `status` 是对本机 server `/api/cluster/*` 的**薄 HTTP 客户端**（跨平台，无 OS 专有 IPC；`trust_env=False` 避免系统代理拦截 localhost）。
+**`cluster add-peer`** —— 连接对端 + 首次对账（主用命令）。全部字段：
 
-### 2.3 握手鉴权 + 会话令牌（复用 auth 模块）
+```bash
+a2x-registry cluster add-peer <address> [--namespaces a,b] [--token T] [--server URL]
+```
 
-OPEN 时接收方逐"候选 namespace"（=对方提供的数据集 ∪ 自己的数据集）授权，语义与 auth 模块一致（`store is None` = 未启用鉴权 = 全放行）：
+| 字段 | 必填 | 不填时的效果 |
+|------|------|--------------|
+| `<address>` | ✅ | 对端 base URL，如 `http://10.0.0.2:8000` |
+| `--namespaces a,b` | 可选 | **同步两端命名空间的并集（全部）** |
+| `--token T` | 可选 | 只能同步对端**不要求鉴权**的命名空间；对端整体未启用鉴权时本就无需此项 |
+| `--server URL` | 可选 | 默认本机 `http://127.0.0.1:8000` |
 
-- 接收方**没有**该 namespace → 需 `admin` token（建一个临时副本承载）；未启用鉴权则直接放行。
-- 接收方**有**该 namespace → 不要求鉴权则放行；否则需 scope 到它的 `provider`/`admin` token。
+底层等价 HTTP `POST /api/cluster/peers`，请求体（`namespaces`、`token` 可省略，语义同上）：
 
-**会话令牌（仅在接收方启用鉴权时生效）**：握手成功后，启用鉴权的接收方签发一个随机 session secret，随 OPEN 响应返回，双方留存（`Peer.token`）。之后每次 RPC（digest/pull/updates/beacon/keepalive）经 `X-Cluster-Session` 头携带它，接收方据此校验 `from_node` 声明：
+```json
+{ "address": "http://10.0.0.2:8000", "namespaces": ["translators"], "token": "a2x_pat_xxx" }
+```
 
-- **无鉴权集群**：不签发、不校验令牌（开放集群，逐调用无门槛）。
-- **启用鉴权**：令牌有效 → 享有该会话协商到的 namespace；令牌缺失/错误 → **降级为匿名**，只能访问公共（非 `auth_required`）namespace。
+返回：
 
-由此，伪造 `from_node` 无法触达某特权节点的命名空间、也无法向 `auth_required` 命名空间推送数据。
+```json
+{ "peer": { "node_id": "reg-b1c2d3", "address": "http://10.0.0.2:8000",
+            "namespaces": ["translators", "default"] } }
+```
 
-**安全假设**：节点身份与命名空间授权由握手 token + 会话令牌保证；本期未对 RPC 载荷做端到端加密（依赖部署层 TLS / 可信链路）。
+**`cluster rm-peer`** —— 断开并清除该对端副本。
 
-### 2.4 与注册中心其余部分的集成
+```bash
+a2x-registry cluster rm-peer reg-b1c2d3
+```
+```json
+{ "node_id": "reg-b1c2d3", "removed": true }
+```
 
-- `RegistryService.set_on_mutation(cb)` —— additive、默认 no-op 的钩子，在每次本地 CRUD 成功后触发；cluster 用它打版本并推送增量。
-- 数据集 list/get 端点合并 `ClusterStore.foreign_rows` / `foreign_entry`：foreign 行走**相同**的过滤管线，带命名空间化 id（`origin_id:service_id`）、`origin_id` 与 `source="cluster"`。本地 entry、持久化、taxonomy hash 均不受影响，A2X 搜索仍只覆盖本地服务。
+**`cluster status` / `GET /api/cluster/state`** —— 同步状态快照。
+
+```json
+{ "node_id": "reg-a1b2c3", "advertise": "http://10.0.0.1:8000",
+  "peers": [ { "node_id": "reg-b1c2d3", "address": "http://10.0.0.2:8000",
+               "namespaces": ["translators"] } ],
+  "foreign_records": 12, "foreign_by_namespace": { "translators": 12 },
+  "local_records": 5, "tombstones": 0, "tracked_origins": 1 }
+```
+
+**`GET /api/datasets/{ds}/services`** —— 普通查询，集群启用后自动合并对端副本（客户端无需改动）。
+
+```bash
+curl http://127.0.0.1:8000/api/datasets/translators/services
+```
+```json
+[
+  { "id": "generic_8f3c", "name": "EN-ZH Translator", "source": "api_config" },
+  { "id": "reg-b1c2d3:generic_1a2b", "name": "ZH-EN Translator",
+    "origin_id": "reg-b1c2d3", "source": "cluster" }
+]
+```
+
+> 带 `origin_id` 且 `source=cluster` 的是对端同步来的**只读副本**，id 形如 `对端node_id:服务id`，可直接传给 `GET /api/datasets/{ds}/services/{id}` 取详情。要修改它须到来源实例操作（origin-only）。
+
+### 2.3 鉴权与会话令牌（仅在启用鉴权时生效）
+
+- 握手时逐命名空间授权（复用 auth 模块；对端整体未启用鉴权 = 全放行）：对端**没有**的命名空间需 `admin` token 才创建临时副本；对端**有**的命名空间，不要求鉴权则放行，否则需该命名空间的 `provider`/`admin` token。即 `add-peer` 的 `--token`。
+- 握手成功且对端启用鉴权时，对端签发一个会话令牌，双方留存；之后每次内部 RPC 经 `X-Cluster-Session` 头携带，对端据此校验 `from_node`。令牌无效 → 降级为匿名（只能访问非 `auth_required` 命名空间），从而伪造身份无法触达特权命名空间。
+- **安全假设**：身份与授权由握手 token + 会话令牌保证；不对载荷做端到端加密，依赖部署层 TLS / 可信链路。
 
 ---
 
@@ -254,56 +389,34 @@ a2x-registry --host 0.0.0.0 --port 8000
 
 ### 3.3 [A 主机] 建立连接
 
-在 A 上把 B 接进来（"先发现方"发起，一条命令即建链 + 首次对账）：
+在任一台上把对端接进来即可（"先发现方"发起，一条命令完成建链 + 双向首次对账，两端随即收敛）：
 
 ```bash
-a2x-registry cluster add-peer http://<B 的IP>:8000 --server http://127.0.0.1:8000
+a2x-registry cluster add-peer http://<B 的IP>:8000
 ```
 
-```jsonc
-{ "peer": { "node_id": "reg-...(B)", "address": "http://<B 的IP>:8000",
-            "namespaces": ["translators", "default"] } }
-```
+- 默认同步两端命名空间的并集；要限定加 `--namespaces a,b`。
+- 若对端某命名空间要求鉴权，加 `--token <provider/admin token>`（整体无鉴权则无需）。
+- 三台及以上：对每条要建立的链路各跑一次 `add-peer`（链形 A-B、B-C 即可，A 经 B 间接学到 C）。
 
-> 只需单向 `add-peer` 一次：发起方会与对端做**双向**对账（拉取对方更新、推送自己更新），两端随即收敛。带鉴权的 namespace 用 `--token <provider/admin token>`；用 `--namespaces a,b` 限定要同步的命名空间（默认同步两端命名空间的并集）。
+返回示例见 [§2.2](#22-用户接口详解输入--输出示例)。
 
-### 3.4 [任一主机] 查询合并视图
-
-集群启用后，**普通的数据集查询接口就会自动合并对端的服务**，无需改动客户端。foreign 行带命名空间化 id 与 `origin_id`：
+### 3.4 验证
 
 ```bash
-# 在 A 上查 translators，既看到 A 本地的，也看到从 B 同步来的
+a2x-registry cluster status        # 应看到 peers 里有对端、foreign_records > 0
 curl http://127.0.0.1:8000/api/datasets/translators/services
 ```
 
-```jsonc
-[
-  { "id": "generic_8f3c…",          "name": "EN-ZH Translator", "source": "api_config" },
-  { "id": "reg-…(B):generic_1a2b…", "name": "ZH-EN Translator",
-    "origin_id": "reg-…(B)", "source": "cluster" }      // ← 从 B 同步来的副本
-]
-```
+查询结果里 `source=cluster`、带 `origin_id` 的行即对端同步来的**只读副本**（id 形如 `对端node_id:服务id`）。客户端 SDK 的 `list_agents`/`get_agent` 也会自动看到这些副本，无需改代码。要修改某副本须到它的来源实例操作（origin-only），改动会增量同步回来。
 
-用客户端 SDK 也一样（`list_agents` 返回里多出 foreign 行，命名空间化 id 可直接传给 `get_agent`）：
-
-```python
-from a2x_registry_client import A2XRegistryClient
-c = A2XRegistryClient()
-for a in c.list_agents("translators"):          # 本地 + 全网可达副本
-    print(a["id"], a.get("origin_id", "(local)"))
-detail = c.get_agent("translators", "reg-…(B):generic_1a2b…")   # 按命名空间化 id 取副本详情
-```
-
-> foreign 记录是**只读副本**：只能在它的来源实例修改 / 注销（origin-only）。要改 B 的服务，到 B 上操作；改动会经增量同步回到 A。
-
-### 3.5 查看状态 / 断开
+### 3.5 断开
 
 ```bash
-a2x-registry cluster status                  # 本节点 id、当前会话、各命名空间副本数
-a2x-registry cluster rm-peer  reg-...(B)     # 主动断开 B + 删除 B 的副本
+a2x-registry cluster rm-peer reg-b1c2d3     # 主动断开 + 删除该对端副本
 ```
 
-被动断开（B 漂走 / 宕机）无需任何操作：A 在 ~45s（`beacon_ttl + beacon_grace`）内不再收到 B 的信标后，自动失活删除 B 的全部副本；B 恢复可达后再 `add-peer` 重新对账补齐。
+被动断开（对端漂走 / 宕机）**无需任何操作**：本端约 45s（`beacon_ttl + beacon_grace`）内收不到对端信标后自动失活删除其全部副本；对端恢复可达后再 `add-peer` 重新对账补齐。
 
 ---
 
