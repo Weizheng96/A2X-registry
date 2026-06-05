@@ -1,6 +1,6 @@
 # A2X Registry — Agent Team 场景快速启动
 
-**v0.3.0**
+**v0.3.1**
 
 本文档是针对 **Agent Team 动态组队** 场景的简化版本，仅包含启动一个空白后端所需的最少步骤。后续所有服务注册、查询、预订锁等操作均通过客户端SDK完成，服务端无需任何预置数据或 LLM 配置。
 
@@ -13,7 +13,7 @@
 从 GitHub 标签直接安装（推荐，无需源码）：
 
 ```bash
-pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.3.0
+pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.3.1
 ```
 
 或克隆源码后可编辑安装：

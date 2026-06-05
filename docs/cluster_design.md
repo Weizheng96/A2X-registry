@@ -356,7 +356,7 @@ curl http://127.0.0.1:8000/api/datasets/translators/services
 ### 3.1 [每个注册中心主机] 安装 + 启用集群
 
 ```bash
-pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.3.0
+pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.3.1
 
 # 启用集群：生成本实例的 node_id（写入 <A2X_REGISTRY_HOME>/cluster_state.json）
 a2x-registry cluster init

@@ -1,6 +1,18 @@
 # A2X 版本说明
 
-## 当前版本: v0.3.0
+## 当前版本: v0.3.1
+
+---
+
+## v0.3.1 (2026-06-05)
+
+### 概述
+仓库结构调整：把客户端 SDK（原独立仓 `A2X-registry-client`）并入主仓 `client/`，成为**第二个独立可安装的发行包**，与服务端**同库、同版本号**。两者依旧各自 `pip install`、互不依赖、不互相 import（SDK 仍只通过 HTTP 调服务端）。算法/服务端行为无变更。
+
+### 变化
+- 新增 `client/`（`a2x-registry-client`，依赖仅 `httpx`，dynamic 版本）；安装：`pip install "a2x-registry-client @ git+...A2X-registry.git@v0.3.1#subdirectory=client"`。
+- 新增根 `VERSION` + `scripts/bump_version.py`，一条命令把服务端与客户端版本号同步 bump（`--check` 校验一致）。
+- 原独立客户端仓归档停更，README 指向新位置。
 
 ---
 
