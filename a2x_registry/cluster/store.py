@@ -328,6 +328,26 @@ class ClusterStore:
                 out.append(env.model_dump(mode="json"))
         return out
 
+    def _may_accept(self, from_node: str, dataset: str) -> bool:
+        """Inbound authorization for a record's namespace.
+
+        Mirrors the handshake gate so a peer can't bypass it by POSTing
+        straight to /updates:
+          - no auth configured here → open cluster, accept anything;
+          - otherwise accept only namespaces this peer's session negotiated
+            (includes ephemeral ones), or existing non-auth-required ones;
+          - reject protected / unknown namespaces without a session.
+        """
+        if self._auth_store_getter() is None:
+            return True
+        with self._lock:
+            sess = self._sessions.get(from_node)
+        if sess is not None and dataset in sess.namespaces:
+            return True
+        if self._registry is not None and dataset in self._registry.list_datasets():
+            return not self._registry.is_auth_required(dataset)
+        return False
+
     def serve_updates(self, from_node: str, envelopes: List[dict]) -> dict:
         """Apply a batch of inbound envelopes (LWW dedup) and relay the
         accepted ones onward with split-horizon (everyone except the sender).
@@ -338,15 +358,19 @@ class ClusterStore:
         """
         self._touch_peer(from_node)
         accepted = 0
+        rejected = 0
         to_relay: List[SyncEnvelope] = []
         for raw in envelopes:
             env = SyncEnvelope.model_validate(raw)
+            if not self._may_accept(from_node, env.dataset):
+                rejected += 1
+                continue
             if self.apply_inbound(env):
                 accepted += 1
                 to_relay.append(env)
         for env in to_relay:
             self._broadcast(env, exclude=from_node)
-        return {"accepted": accepted, "received": len(envelopes)}
+        return {"accepted": accepted, "received": len(envelopes), "rejected": rejected}
 
     # ── outbound replication ────────────────────────────────────────────
 

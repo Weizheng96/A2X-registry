@@ -131,6 +131,49 @@ def test_anon_namespace_syncs_on_auth_enabled_registry(tmp_path):
     assert _foreign_names(B, "open") == {"a-open"}
 
 
+def _env(dataset, name="x", origin="X", ver=1):
+    sid = "generic_" + name
+    return {
+        "dataset": dataset, "service_id": sid, "origin_id": origin,
+        "version": [ver, origin], "tombstone": False,
+        "payload": {"entry": {"service_id": sid, "type": "generic", "source": "api_config",
+                              "service_data": {"name": name, "description": "d",
+                                               "inputSchema": {}, "url": None}},
+                    "wrapped": {"id": sid, "type": "generic", "name": name,
+                                "description": "d", "metadata": {}}},
+    }
+
+
+def test_updates_push_rejected_for_protected_namespace_without_session(tmp_path):
+    """Direct /updates can't bypass the handshake: a record for an
+    auth_required namespace from a peer with no session is rejected, while a
+    public namespace is accepted."""
+    t = InProcessTransport()
+    rB = FakeRegistry()
+    rB.add_generic("secure", "b-sec")
+    rB.set_auth_required("secure", True)
+    rB.add_generic("open", "b-open")
+    B = build_store(tmp_path, "B", rB, t, auth_store=_Auth({"p": _Ctx(namespaces={"secure"})}))
+
+    res = B.serve_updates("X", [_env("secure", "evil")])      # no session for X
+    assert res["accepted"] == 0 and res["rejected"] == 1
+    assert _foreign_names(B, "secure") == set()
+
+    res = B.serve_updates("X", [_env("open", "ok")])          # public ns
+    assert res["accepted"] == 1
+    assert "ok" in _foreign_names(B, "open")
+
+
+def test_updates_push_open_when_no_auth_anywhere(tmp_path):
+    """With no auth configured, /updates accepts any namespace (open cluster),
+    including one the receiver doesn't have locally."""
+    t = InProcessTransport()
+    B = build_store(tmp_path, "B", FakeRegistry(), t, auth_store=None)
+    res = B.serve_updates("X", [_env("brand_new_ns", "y")])
+    assert res["accepted"] == 1
+    assert "y" in _foreign_names(B, "brand_new_ns")
+
+
 def test_admin_token_creates_ephemeral_namespace(tmp_path):
     """A namespace the receiver doesn't have requires an admin token; the
     receiver then hosts the replicas (ephemeral)."""
