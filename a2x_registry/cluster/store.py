@@ -559,6 +559,29 @@ class ClusterStore:
                 out.append(row)
         return out
 
+    def foreign_rows(self, dataset: str) -> List[dict]:
+        """Replicated live records in ``dataset`` as ``{"entry", "wrapped"}``
+        pairs for the list endpoint: ``entry`` (a RegistryEntry) feeds the
+        existing filter pipeline; ``wrapped`` is the output row with a
+        namespaced id + ``origin_id``."""
+        from a2x_registry.register.models import RegistryEntry
+        with self._lock:
+            items = [
+                (k, env) for k, env in self._foreign.items()
+                if k[0] == dataset and not env.tombstone and env.payload
+            ]
+        out: List[dict] = []
+        for (ds, origin, sid), env in items:
+            try:
+                entry = RegistryEntry.model_validate(env.payload["entry"])
+            except Exception:  # noqa: BLE001 — skip a malformed replica
+                continue
+            wrapped = dict(env.payload["wrapped"])
+            wrapped["id"] = f"{origin}:{sid}"
+            wrapped["origin_id"] = origin
+            out.append({"entry": entry, "wrapped": wrapped})
+        return out
+
     def foreign_entry(self, dataset: str, display_id: str):
         """Resolve a namespaced ``origin_id:service_id`` to its replicated
         wrapped record, or None. Used by the single-get endpoint."""
