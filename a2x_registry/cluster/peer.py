@@ -9,7 +9,7 @@ re-handshaking the same peer updates (rather than duplicates) the session.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Set
+from typing import Optional, Set
 
 
 @dataclass
@@ -20,6 +20,11 @@ class Peer:
     # monotonic timestamp of the last inbound contact from this peer; drives
     # the direct-link HOLD timer.
     last_seen: float = 0.0
+    # Shared per-session secret, established at handshake ONLY when the
+    # receiver has auth enabled. Both sides store it; every RPC carries it so
+    # the receiver can authenticate the ``from_node`` claim. ``None`` on
+    # no-auth clusters (no token system).
+    token: Optional[str] = None
 
     def to_summary(self) -> dict:
         return {

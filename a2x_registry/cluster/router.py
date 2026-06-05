@@ -11,12 +11,15 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from .deps import require_cluster_store
 from .store import ClusterStore
-from .transport import TransportError
+from .transport import SESSION_HEADER, TransportError
+
+# FastAPI maps the X-Cluster-Session header to this dependency name.
+_SessionToken = Header(default=None, alias=SESSION_HEADER)
 
 logger = logging.getLogger(__name__)
 
@@ -94,30 +97,43 @@ async def open_session(req: OpenRequest, store: ClusterStore = Depends(require_c
 async def get_digest(
     from_node: str = Query(...),
     namespaces: str = Query(""),
+    session: str = _SessionToken,
     store: ClusterStore = Depends(require_cluster_store),
 ):
     ns = [n for n in namespaces.split(",") if n] if namespaces else None
-    return store.serve_digest(from_node, ns)
+    return store.serve_digest(from_node, ns, session)
 
 
 @router.post("/pulls")
-async def post_pulls(req: PullRequest, store: ClusterStore = Depends(require_cluster_store)):
-    return store.serve_pull(req.from_node, req.keys)
+async def post_pulls(
+    req: PullRequest, session: str = _SessionToken,
+    store: ClusterStore = Depends(require_cluster_store),
+):
+    return store.serve_pull(req.from_node, req.keys, session)
 
 
 @router.post("/updates")
-async def post_updates(req: UpdatesRequest, store: ClusterStore = Depends(require_cluster_store)):
-    return store.serve_updates(req.from_node, req.envelopes)
+async def post_updates(
+    req: UpdatesRequest, session: str = _SessionToken,
+    store: ClusterStore = Depends(require_cluster_store),
+):
+    return store.serve_updates(req.from_node, req.envelopes, session)
 
 
 @router.post("/beacons")
-async def post_beacon(req: BeaconRequest, store: ClusterStore = Depends(require_cluster_store)):
-    return store.handle_beacon(req.from_node, req.beacon)
+async def post_beacon(
+    req: BeaconRequest, session: str = _SessionToken,
+    store: ClusterStore = Depends(require_cluster_store),
+):
+    return store.handle_beacon(req.from_node, req.beacon, session)
 
 
 @router.post("/keepalives")
-async def post_keepalive(req: KeepaliveRequest, store: ClusterStore = Depends(require_cluster_store)):
-    return store.handle_keepalive(req.from_node)
+async def post_keepalive(
+    req: KeepaliveRequest, session: str = _SessionToken,
+    store: ClusterStore = Depends(require_cluster_store),
+):
+    return store.handle_keepalive(req.from_node, session)
 
 
 # ── observability ────────────────────────────────────────────────────────

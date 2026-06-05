@@ -19,6 +19,7 @@ versions of the same record. Foreign records are read-only and memory-only.
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
@@ -268,15 +269,24 @@ class ClusterStore:
         token = body.get("token")
         local_ns = set(self._registry.list_datasets()) if self._registry else set()
         candidate = sorted(offered | local_ns)
+        auth_store = self._auth_store_getter()
         accepted, ephemeral = authorize_namespaces(
-            self._registry, self._auth_store_getter(), candidate, token,
+            self._registry, auth_store, candidate, token,
         )
+        # Issue a per-session secret ONLY when this registry has auth on, so
+        # subsequent RPCs from this peer can be authenticated. No auth → no
+        # token system (open cluster).
+        session_token = secrets.token_hex(16) if auth_store is not None else None
         with self._lock:
             self._sessions[from_node] = Peer(
-                from_node, address, set(accepted), last_seen=self._clock(),
+                from_node, address, set(accepted),
+                last_seen=self._clock(), token=session_token,
             )
         logger.info("cluster: session opened with %s (ns=%s)", from_node, accepted)
-        return {"node_id": self.node_id, "accepted": accepted, "ephemeral": ephemeral}
+        return {
+            "node_id": self.node_id, "accepted": accepted,
+            "ephemeral": ephemeral, "session_token": session_token,
+        }
 
     def _touch_peer(self, node_id: str) -> None:
         """Refresh the direct-link HOLD timer for a peer we just heard from."""
@@ -294,19 +304,40 @@ class ClusterStore:
             if auth_store is None or not self._registry.is_auth_required(ds)
         }
 
-    def _allowed_for(self, from_node: str, requested: Optional[List[str]]) -> Set[str]:
+    def _authed(self, from_node: str, token: Optional[str]) -> bool:
+        """Is the ``from_node`` claim authenticated for this call?
+
+        - No auth configured → True (open cluster; no token system).
+        - Auth configured → a session must exist for ``from_node`` and the
+          presented ``token`` must equal its established session secret.
+        """
+        if self._auth_store_getter() is None:
+            return True
         with self._lock:
             sess = self._sessions.get(from_node)
-        base = set(sess.namespaces) if sess is not None else self._public_namespaces()
+        return sess is not None and sess.token is not None and token == sess.token
+
+    def _allowed_for(self, from_node: str, requested: Optional[List[str]],
+                     token: Optional[str] = None) -> Set[str]:
+        authed = self._authed(from_node, token)
+        with self._lock:
+            sess = self._sessions.get(from_node)
+        # Authenticated session → its negotiated namespaces; otherwise fall
+        # back to only the publicly-syncable (non-auth-required) namespaces.
+        if authed and sess is not None:
+            base = set(sess.namespaces)
+        else:
+            base = self._public_namespaces()
         if requested:
             base &= set(requested)
         return base
 
-    def serve_digest(self, from_node: str, namespaces: Optional[List[str]]) -> list:
+    def serve_digest(self, from_node: str, namespaces: Optional[List[str]],
+                     token: Optional[str] = None) -> list:
         """Return ``[dataset, origin_id, service_id, version]`` rows for the
-        records visible to ``from_node`` (session-scoped)."""
+        records visible to ``from_node`` (session-scoped, authenticated)."""
         self._touch_peer(from_node)
-        allowed = self._allowed_for(from_node, namespaces)
+        allowed = self._allowed_for(from_node, namespaces, token)
         idx = self._full_index(sorted(allowed) if allowed else [])
         return [
             [ds, origin, sid, list(ver)]
@@ -314,10 +345,11 @@ class ClusterStore:
             if ds in allowed
         ]
 
-    def serve_pull(self, from_node: str, keys: List[list]) -> list:
+    def serve_pull(self, from_node: str, keys: List[list],
+                   token: Optional[str] = None) -> list:
         """Return full envelopes for the requested keys (session-scoped)."""
         self._touch_peer(from_node)
-        allowed = self._allowed_for(from_node, None)
+        allowed = self._allowed_for(from_node, None, token)
         out = []
         for k in keys:
             ds, origin, sid = k[0], k[1], k[2]
@@ -328,27 +360,30 @@ class ClusterStore:
                 out.append(env.model_dump(mode="json"))
         return out
 
-    def _may_accept(self, from_node: str, dataset: str) -> bool:
+    def _may_accept(self, from_node: str, dataset: str, token: Optional[str]) -> bool:
         """Inbound authorization for a record's namespace.
 
         Mirrors the handshake gate so a peer can't bypass it by POSTing
         straight to /updates:
           - no auth configured here → open cluster, accept anything;
-          - otherwise accept only namespaces this peer's session negotiated
-            (includes ephemeral ones), or existing non-auth-required ones;
-          - reject protected / unknown namespaces without a session.
+          - an authenticated session (valid token) → its negotiated
+            namespaces (includes ephemeral ones);
+          - otherwise only existing non-auth-required namespaces;
+          - reject protected / unknown namespaces.
         """
         if self._auth_store_getter() is None:
             return True
-        with self._lock:
-            sess = self._sessions.get(from_node)
-        if sess is not None and dataset in sess.namespaces:
-            return True
+        if self._authed(from_node, token):
+            with self._lock:
+                sess = self._sessions.get(from_node)
+            if sess is not None and dataset in sess.namespaces:
+                return True
         if self._registry is not None and dataset in self._registry.list_datasets():
             return not self._registry.is_auth_required(dataset)
         return False
 
-    def serve_updates(self, from_node: str, envelopes: List[dict]) -> dict:
+    def serve_updates(self, from_node: str, envelopes: List[dict],
+                      token: Optional[str] = None) -> dict:
         """Apply a batch of inbound envelopes (LWW dedup) and relay the
         accepted ones onward with split-horizon (everyone except the sender).
 
@@ -362,7 +397,7 @@ class ClusterStore:
         to_relay: List[SyncEnvelope] = []
         for raw in envelopes:
             env = SyncEnvelope.model_validate(raw)
-            if not self._may_accept(from_node, env.dataset):
+            if not self._may_accept(from_node, env.dataset, token):
                 rejected += 1
                 continue
             if self.apply_inbound(env):
@@ -385,7 +420,7 @@ class ClusterStore:
             if peer.node_id == exclude or env.dataset not in peer.namespaces:
                 continue
             try:
-                self._transport.updates(peer.address, self.node_id, payload)
+                self._transport.updates(peer.address, self.node_id, payload, peer.token)
             except TransportError:
                 pass
 
@@ -407,14 +442,18 @@ class ClusterStore:
             if peer.node_id == exclude:
                 continue
             try:
-                self._transport.beacon(peer.address, self.node_id, beacon)
+                self._transport.beacon(peer.address, self.node_id, beacon, peer.token)
             except TransportError:
                 pass
 
-    def handle_beacon(self, from_node: str, beacon: dict) -> dict:
+    def handle_beacon(self, from_node: str, beacon: dict,
+                      token: Optional[str] = None) -> dict:
         """Receive a beacon: refresh the origin's lease and relay onward
         (split-horizon + sequence dedup). Our own beacon echoed back is
-        ignored."""
+        ignored. When auth is on, an unauthenticated sender is ignored so a
+        spoofer can't manipulate liveness."""
+        if not self._authed(from_node, token):
+            return {"accepted": False}
         self._touch_peer(from_node)
         origin = beacon["origin_id"]
         seq = int(beacon["seq"])
@@ -435,8 +474,11 @@ class ClusterStore:
         self._broadcast_beacon(beacon, exclude=from_node)
         return {"accepted": True}
 
-    def handle_keepalive(self, from_node: str) -> dict:
-        """Direct-link keepalive — refresh the HOLD timer."""
+    def handle_keepalive(self, from_node: str, token: Optional[str] = None) -> dict:
+        """Direct-link keepalive — refresh the HOLD timer (authenticated when
+        auth is on)."""
+        if not self._authed(from_node, token):
+            return {"ok": False}
         self._touch_peer(from_node)
         return {"ok": True}
 
@@ -445,7 +487,7 @@ class ClusterStore:
             peers = list(self._sessions.values())
         for peer in peers:
             try:
-                self._transport.keepalive(peer.address, self.node_id)
+                self._transport.keepalive(peer.address, self.node_id, peer.token)
             except TransportError:
                 pass
 
@@ -513,7 +555,7 @@ class ClusterStore:
         }
         resp = self._transport.open(address, body)
         peer = Peer(resp["node_id"], address, set(resp.get("accepted") or []),
-                    last_seen=self._clock())
+                    last_seen=self._clock(), token=resp.get("session_token"))
         with self._lock:
             self._sessions[peer.node_id] = peer
         logger.info("cluster: connected to %s (ns=%s)", peer.node_id, sorted(peer.namespaces))
@@ -525,7 +567,7 @@ class ClusterStore:
         newer/we lack, push what we have newer/it lacks. Best-effort —
         transport errors propagate to the caller."""
         ns = sorted(peer.namespaces)
-        remote_rows = self._transport.digest(peer.address, self.node_id, ns)
+        remote_rows = self._transport.digest(peer.address, self.node_id, ns, peer.token)
         remote_index: Dict[_Key, Version] = {
             (r[0], r[1], r[2]): tuple(r[3]) for r in remote_rows
         }
@@ -537,7 +579,7 @@ class ClusterStore:
         ]
         pulled = 0
         if to_pull:
-            for raw in self._transport.pull(peer.address, self.node_id, to_pull):
+            for raw in self._transport.pull(peer.address, self.node_id, to_pull, peer.token):
                 if self.apply_inbound(SyncEnvelope.model_validate(raw)):
                     pulled += 1
 
@@ -549,7 +591,7 @@ class ClusterStore:
                     push_envs.append(env.model_dump(mode="json"))
         pushed = 0
         if push_envs:
-            res = self._transport.updates(peer.address, self.node_id, push_envs)
+            res = self._transport.updates(peer.address, self.node_id, push_envs, peer.token)
             pushed = res.get("accepted", 0)
 
         logger.info("cluster: reconciled with %s (pulled=%d pushed=%d)",

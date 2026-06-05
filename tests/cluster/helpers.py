@@ -87,20 +87,20 @@ class InProcessTransport(Transport):
     def open(self, address: str, body: dict) -> dict:
         return self._stores[address].handle_open(body)
 
-    def digest(self, address, from_node, namespaces):
-        return self._target(from_node, address).serve_digest(from_node, namespaces or None)
+    def digest(self, address, from_node, namespaces, token=None):
+        return self._target(from_node, address).serve_digest(from_node, namespaces or None, token)
 
-    def pull(self, address, from_node, keys):
-        return self._target(from_node, address).serve_pull(from_node, keys)
+    def pull(self, address, from_node, keys, token=None):
+        return self._target(from_node, address).serve_pull(from_node, keys, token)
 
-    def updates(self, address, from_node, envelopes):
-        return self._target(from_node, address).serve_updates(from_node, envelopes)
+    def updates(self, address, from_node, envelopes, token=None):
+        return self._target(from_node, address).serve_updates(from_node, envelopes, token)
 
-    def beacon(self, address, from_node, beacon):
-        return self._target(from_node, address).handle_beacon(from_node, beacon)
+    def beacon(self, address, from_node, beacon, token=None):
+        return self._target(from_node, address).handle_beacon(from_node, beacon, token)
 
-    def keepalive(self, address, from_node):
-        return self._target(from_node, address).handle_keepalive(from_node)
+    def keepalive(self, address, from_node, token=None):
+        return self._target(from_node, address).handle_keepalive(from_node, token)
 
 
 def converge(stores, rounds: int = 4) -> None:

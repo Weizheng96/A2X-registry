@@ -51,6 +51,22 @@ def cluster_app(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def cluster_auth_app(cluster_app, tmp_path):
+    """cluster_app + a bootstrapped AuthStore, so the cluster module sees
+    auth as ON (it reads get_auth_store dynamically). Yields (client,
+    admin_token)."""
+    from a2x_registry.auth.store import AuthStore
+    from a2x_registry.auth.deps import set_auth_store
+
+    store, token = AuthStore.bootstrap(data_dir=tmp_path / "auth_data")
+    set_auth_store(store)
+    try:
+        yield cluster_app, token
+    finally:
+        set_auth_store(None)
+
+
+@pytest.fixture
 def cluster_pair(tmp_path):
     """Two wired instances A and B with fresh fake registries.
 
