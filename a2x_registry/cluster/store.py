@@ -382,6 +382,36 @@ class ClusterStore:
                     peer.node_id, pulled, pushed)
         return {"pulled": pulled, "pushed": pushed}
 
+    def list_peers(self) -> List[Peer]:
+        with self._lock:
+            return list(self._sessions.values())
+
+    def gc_tombstones(self, now_ms: Optional[int] = None) -> int:
+        """Drop tombstones older than the retention window (``beacon_ttl +
+        beacon_grace``) — local (persisted) and foreign (overlay). Returns
+        the number removed.
+
+        Retention ≥ the foreign-replica eviction window guarantees any peer
+        that could still hold a stale copy has already evicted it before we
+        forget the deletion, so GC can't cause a resurrection.
+        """
+        if now_ms is None:
+            now_ms = time.time_ns() // 1_000_000
+        retention_ms = int(self._config.tombstone_retention * 1000)
+        removed = 0
+        with self._lock:
+            for k, t in list(self._state.tombstones.items()):
+                if now_ms - t.deleted_at_ms > retention_ms:
+                    del self._state.tombstones[k]
+                    removed += 1
+            if removed:
+                self._state.save()
+            for key, env in list(self._foreign.items()):
+                if env.tombstone and now_ms - env.version[0] > retention_ms:
+                    del self._foreign[key]
+                    removed += 1
+        return removed
+
     def disconnect_peer(self, node_id: str) -> bool:
         """Drop the session and evict records that originated at that peer.
 

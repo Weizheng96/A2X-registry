@@ -136,6 +136,13 @@ def run_warmup() -> None:
             if cluster_store is not None:
                 # Replicate every local CRUD to peers (default no-op when off).
                 registry_svc.set_on_mutation(cluster_store.on_local_mutation)
+                # Periodic anti-entropy reconcile + tombstone GC (daemon).
+                from a2x_registry.cluster.sweepers import AntiEntropySweeper
+                ae = AntiEntropySweeper(
+                    cluster_store, period=cluster_store.config.anti_entropy_interval,
+                )
+                ae.start()
+                warmup_state["_cluster_anti_entropy"] = ae
                 logger.info("  Cluster module loaded (node_id=%s)", cluster_store.node_id)
             else:
                 logger.info("  Cluster module not initialized (standalone)")
