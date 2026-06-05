@@ -9,105 +9,11 @@ This exercises the full sync logic without real servers.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
-
 import pytest
 
-from a2x_registry.cluster.config import ClusterConfig
 from a2x_registry.cluster.state import ClusterState
-from a2x_registry.cluster.store import ClusterStore
-from a2x_registry.cluster.transport import Transport
-from a2x_registry.register.models import GenericServiceData, RegistryEntry
 
-
-# ── fakes ────────────────────────────────────────────────────────────────
-
-class FakeRegistry:
-    """Minimal RegistryService surface the ClusterStore depends on."""
-
-    def __init__(self) -> None:
-        # dataset -> {sid: (RegistryEntry, wrapped_dict)}
-        self._data: Dict[str, Dict[str, Tuple[RegistryEntry, dict]]] = {}
-        self._auth_required: set[str] = set()
-
-    def add_generic(self, dataset: str, name: str, description: str = "d",
-                    source: str = "api_config") -> str:
-        from a2x_registry.register.store import generate_service_id
-        sid = generate_service_id("generic", name)
-        entry = RegistryEntry(
-            service_id=sid, type="generic", source=source,
-            service_data=GenericServiceData(name=name, description=description),
-        )
-        wrapped = {
-            "id": sid, "type": "generic", "name": name,
-            "description": description, "metadata": {},
-        }
-        self._data.setdefault(dataset, {})[sid] = (entry, wrapped)
-        return sid
-
-    def remove(self, dataset: str, sid: str) -> None:
-        self._data.get(dataset, {}).pop(sid, None)
-
-    def set_auth_required(self, dataset: str, required: bool) -> None:
-        if required:
-            self._auth_required.add(dataset)
-        else:
-            self._auth_required.discard(dataset)
-
-    # RegistryService-compatible read surface
-    def list_datasets(self) -> List[str]:
-        return list(self._data)
-
-    def list_entries(self, dataset: str) -> List[RegistryEntry]:
-        return [e for e, _ in self._data.get(dataset, {}).values()]
-
-    def list_services(self, dataset: str) -> List[dict]:
-        return [w for _, w in self._data.get(dataset, {}).values()]
-
-    def get_entry(self, dataset: str, sid: str) -> Optional[RegistryEntry]:
-        rec = self._data.get(dataset, {}).get(sid)
-        return rec[0] if rec else None
-
-    def is_auth_required(self, dataset: str) -> bool:
-        return dataset in self._auth_required
-
-
-class InProcessTransport(Transport):
-    """Routes peer calls to the target store's handlers in-process."""
-
-    def __init__(self) -> None:
-        self._stores: Dict[str, ClusterStore] = {}
-
-    def register(self, address: str, store: ClusterStore) -> None:
-        self._stores[address] = store
-
-    def open(self, address: str, body: dict) -> dict:
-        return self._stores[address].handle_open(body)
-
-    def digest(self, address, from_node, namespaces):
-        return self._stores[address].serve_digest(from_node, namespaces or None)
-
-    def pull(self, address, from_node, keys):
-        return self._stores[address].serve_pull(from_node, keys)
-
-    def updates(self, address, from_node, envelopes):
-        return self._stores[address].serve_updates(from_node, envelopes)
-
-
-# ── fixtures ─────────────────────────────────────────────────────────────
-
-def build_store(tmp_path, name, registry, transport, *, auth_store=None) -> ClusterStore:
-    state = ClusterState.init(node_id=name, path=tmp_path / f"{name}.json")
-    store = ClusterStore(
-        state,
-        config=ClusterConfig(),
-        registry_svc=registry,
-        transport=transport,
-        advertise=name,  # use the node name as its address in-process
-        auth_store_getter=(lambda: auth_store),
-    )
-    transport.register(name, store)
-    return store
+from .helpers import FakeRegistry, InProcessTransport, build_store
 
 
 @pytest.fixture

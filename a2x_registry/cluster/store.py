@@ -28,7 +28,7 @@ from .config import ClusterConfig
 from .envelope import SyncEnvelope, Version, version_newer
 from .peer import Peer
 from .state import ClusterState, Tombstone, make_key, split_key
-from .transport import HttpTransport, Transport
+from .transport import HttpTransport, Transport, TransportError
 
 logger = logging.getLogger(__name__)
 
@@ -286,13 +286,40 @@ class ClusterStore:
         return out
 
     def serve_updates(self, from_node: str, envelopes: List[dict]) -> dict:
-        """Apply a batch of inbound envelopes (LWW dedup). Returns the
-        accepted count."""
+        """Apply a batch of inbound envelopes (LWW dedup) and relay the
+        accepted ones onward with split-horizon (everyone except the sender).
+
+        Loops can't run away: a relayed envelope that a node already has at
+        the same version is rejected by ``apply_inbound`` and therefore not
+        relayed again, so the flood dies out after each node sees it once.
+        """
         accepted = 0
+        to_relay: List[SyncEnvelope] = []
         for raw in envelopes:
-            if self.apply_inbound(SyncEnvelope.model_validate(raw)):
+            env = SyncEnvelope.model_validate(raw)
+            if self.apply_inbound(env):
                 accepted += 1
+                to_relay.append(env)
+        for env in to_relay:
+            self._broadcast(env, exclude=from_node)
         return {"accepted": accepted, "received": len(envelopes)}
+
+    # ── outbound replication ────────────────────────────────────────────
+
+    def _broadcast(self, env: SyncEnvelope, exclude: Optional[str] = None) -> None:
+        """Send ``env`` to every session that syncs its dataset, except
+        ``exclude`` (split-horizon). Best-effort: a peer that's unreachable
+        is skipped — periodic anti-entropy (M3) will reconcile it."""
+        payload = [env.model_dump(mode="json")]
+        with self._lock:
+            peers = list(self._sessions.values())
+        for peer in peers:
+            if peer.node_id == exclude or env.dataset not in peer.namespaces:
+                continue
+            try:
+                self._transport.updates(peer.address, self.node_id, payload)
+            except TransportError:
+                pass
 
     # ── orchestration (us → peer) ───────────────────────────────────────
 
@@ -404,9 +431,29 @@ class ClusterStore:
     # ── local mutation hook (wired via RegistryService.set_on_mutation) ──
 
     def on_local_mutation(self, dataset: str, service_id: str, op: str, entry) -> None:
-        """Called after every successful local CRUD. No-op until M2 wires
-        in outbound replication."""
-        return None
+        """Called after every successful local CRUD. Stamps a new version on
+        the record (a tombstone on deregister), persists, and pushes the
+        delta to all peers that sync this namespace.
+
+        origin-only: we only ever stamp records we own, so versions stay
+        monotonic per record and there's no write-write conflict.
+        """
+        with self._lock:
+            ts = self._next_ts()
+            k = make_key(dataset, service_id)
+            if op == "deregister":
+                self._state.tombstones[k] = Tombstone(
+                    version=(ts, self.node_id), deleted_at_ms=ts,
+                )
+                self._state.local_versions.pop(k, None)
+            else:  # register | update
+                self._state.local_versions[k] = [ts, self.node_id]
+                self._state.tombstones.pop(k, None)  # un-tombstone on re-register
+            self._state.save()
+
+        env = self._build_local_envelope(dataset, service_id)
+        if env is not None:
+            self._broadcast(env, exclude=None)
 
     # ── observability ───────────────────────────────────────────────────
 

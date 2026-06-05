@@ -134,6 +134,8 @@ def run_warmup() -> None:
             )
             set_cluster_store(cluster_store)
             if cluster_store is not None:
+                # Replicate every local CRUD to peers (default no-op when off).
+                registry_svc.set_on_mutation(cluster_store.on_local_mutation)
                 logger.info("  Cluster module loaded (node_id=%s)", cluster_store.node_id)
             else:
                 logger.info("  Cluster module not initialized (standalone)")
