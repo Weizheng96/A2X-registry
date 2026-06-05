@@ -1,6 +1,6 @@
 # A2X Registry — Agent Team 场景快速启动
 
-**v0.2.0**
+**v0.3.0**
 
 本文档是针对 **Agent Team 动态组队** 场景的简化版本，仅包含启动一个空白后端所需的最少步骤。后续所有服务注册、查询、预订锁等操作均通过客户端SDK完成，服务端无需任何预置数据或 LLM 配置。
 
@@ -8,12 +8,12 @@
 
 ### 精简安装（默认）
 
-`pip install` **默认就是 Agent Team 精简版**——只装 SDK 必需的 5 个轻量包（`requests` / `fastapi` / `pydantic` / `python-multipart` / `uvicorn[standard]`），不附带 `numpy` / `sentence-transformers` / `chromadb` 等数百 MB 的搜索/索引依赖。
+`pip install` **默认就是 Agent Team 精简版**——只装 SDK 必需的轻量包（`requests` / `httpx` / `fastapi` / `pydantic` / `python-multipart` / `uvicorn[standard]`），不附带 `numpy` / `sentence-transformers` / `chromadb` 等数百 MB 的搜索/索引依赖。
 
 从 GitHub 标签直接安装（推荐，无需源码）：
 
 ```bash
-pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.2.0
+pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.3.0
 ```
 
 或克隆源码后可编辑安装：

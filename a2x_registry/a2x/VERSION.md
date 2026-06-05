@@ -1,6 +1,29 @@
 # A2X 版本说明
 
-## 当前版本: v0.2.0
+## 当前版本: v0.3.0
+
+---
+
+## v0.3.0 (2026-06-05)
+
+### 概述
+新增分布式同步模块 `a2x_registry/cluster/`：多个注册中心实例在彼此可达时自动同步注册表（AP / 最终一致，gossip + LWW 版本判新），查询任一节点即可获得全网可达节点的服务；节点失联后靠存活信标失活删除其数据。opt-in，默认关闭 —— 未启用时 `/api/cluster/*` 返回 404，读写行为与单机完全一致。
+
+### 新功能
+- **`a2x_registry/cluster/`**：会话握手 + 逐 namespace 鉴权 + 会话令牌；本地 CRUD 增量推送 + 水平分割转发 + LWW 版本去重（防回音）；周期反熵兜底 + 墓碑 GC（防删除复活）；BEACON 存活租约 + 失活驱逐（按来源节点）；keepalive/HOLD 直链探测。RESTful `/api/cluster/*` + CLI `a2x-registry cluster {init, add-peer, rm-peer, status}`。
+- **读路径合并**：数据集 `GET /services`、`GET /services/{id}` 自动合并对端同步来的只读副本（命名空间化 id `origin_id:service_id` + `source=cluster`），客户端无需改动；A2X 搜索与 taxonomy 不受影响（foreign 记录不进 hash）。
+- **`RegistryService.set_on_mutation(callback)`**：本地 CRUD 钩子（additive、默认 no-op），cluster 用它推送增量；register/ 对 cluster/ 零 import 依赖。
+
+### 重构
+- 心跳租约状态机提取为共享 `a2x_registry/common/lease.py`（泛型 `LeaseTable[K]`），heartbeat 与 cluster 复用，无重复逻辑。
+- 新增 `a2x_registry/common/atomic.py`（跨平台原子写）。
+- 运行时依赖新增 `httpx`（节点间通信 + `cluster` CLI）。
+
+### 测试
+- 新增 `tests/cluster/`（83，含进程内多拓扑集成 + 真实双进程 HTTP 冒烟）；全量非 query 套件 222 测试全绿，heartbeat 提取零回归。
+
+### 文档
+- `docs/cluster_design.md`（设计 / 接口 / 时序图 / 类图）、`README_forDistributed.md`（两节点部署指南）。
 
 ---
 

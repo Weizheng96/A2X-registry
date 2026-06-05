@@ -9,6 +9,7 @@
 - [incremental_design.md](incremental_design.md) — 增量构建
 - [auth_design.md](auth_design.md) — 鉴权模块（静态 API Key + 三档角色 + namespace 作用域，**默认关闭，向前兼容**）
 - [heartbeat_design.md](heartbeat_design.md) — 心跳保活模块（per-namespace opt-in 租约 + 软驱逐 / 硬删两段式，**默认关闭，向前兼容**）
+- [cluster_design.md](cluster_design.md) — 分布式同步模块（多注册中心 gossip 复制 + 失活驱逐，**默认关闭，向前兼容**）；部署见 [README_forDistributed.md](../README_forDistributed.md)
 - [backend_api.md](backend_api.md) — 后端 HTTP API
 - [frontend_design.md](frontend_design.md) — Web UI
 - [a2x_design.md](a2x_design.md) — 系统整体视图（更深入）
@@ -21,6 +22,8 @@ a2x_registry/                      # pip 包根
 │   ├── llm_client.py              #   多 provider LLM 客户端（requests）
 │   ├── feature_flags.py           #   has() / require() — 检测可选 extras
 │   ├── auth_context.py            #   中立 AuthContext dataclass（register/auth 共用）
+│   ├── lease.py                   #   泛型 LeaseTable[K] 租约状态机（heartbeat / cluster 共用）
+│   ├── atomic.py                  #   跨平台原子 JSON 写
 │   └── errors.py                  #   FeatureNotInstalledError 等
 ├── register/                      # 注册中心核心
 │   ├── service.py                 #   RegistryService（多数据集 CRUD + 预订锁）
@@ -34,10 +37,18 @@ a2x_registry/                      # pip 包根
 │   ├── cli.py                     #   `a2x-registry auth init / reset-admin`
 │   └── auth_data/                 #   运行时数据，.gitignore，不进 wheel
 ├── heartbeat/                     # 心跳保活（per-namespace opt-in；不 import register/）
-│   ├── store.py                   #   HeartbeatStore：lease 状态机 + sweep_tick
+│   ├── store.py                   #   HeartbeatStore：复用 common/lease 的 LeaseTable
 │   ├── sweeper.py                 #   后台 daemon 线程，mark unhealthy / 硬删
 │   ├── router.py                  #   /api/datasets/{ds}/services/{sid}/heartbeat
 │   └── system_ctx.py              #   合成 admin context 给 sweeper 走 deregister
+├── cluster/                       # 分布式同步（opt-in，需 cluster init；不 import register/ 业务）
+│   ├── store.py                   #   ClusterStore：foreign overlay + 会话表 + 来源租约 + 复制/驱逐
+│   ├── envelope.py                #   SyncEnvelope + LWW 版本判新
+│   ├── state.py                   #   cluster_state.json：node_id / 版本 / 本地墓碑
+│   ├── peer.py / auth_handshake.py #  会话模型 / 逐 namespace 握手鉴权（复用 auth）
+│   ├── replication / liveness / sweepers.py # 推送+反熵 / 信标租约 / 后台守护线程
+│   ├── transport.py / router.py    #  httpx 节点间传输 / RESTful /api/cluster/*
+│   └── cli.py                     #   `a2x-registry cluster init/add-peer/rm-peer/status`
 ├── backend/                       # FastAPI 应用
 │   ├── app.py                     #   入口、CORS、503 异常 handler
 │   ├── startup.py                 #   warmup（按 has("vector") 分阶段；加载 AuthStore）
@@ -160,6 +171,20 @@ a2x_registry/                      # pip 包根
 
 三档租约状态：HEALTHY → UNHEALTHY（TTL 过期，软驱逐 + grace window 可恢复）→ HARD-DELETED（grace 过期）。`list_services` 默认过滤 UNHEALTHY，`?include_unhealthy=true` 可查全部。完整状态机 / 矩阵 / 重启恢复设计见 [heartbeat_design.md](heartbeat_design.md)。
 
+### 2.9 `cluster/` — 分布式同步（默认关闭）
+
+**opt-in**：注册中心默认单机；执行 `a2x-registry cluster init` 生成 `cluster_state.json` 后才启用。未启用时所有 `/api/cluster/*` 返回 404、读写与单机 byte-equal。多实例彼此可达时自动同步注册表（**AP / 最终一致**，gossip + LWW），查询任一节点即得全网可达节点的服务；节点失联后靠存活信标失活删除其数据。
+
+| 接口 | 说明 |
+|---|---|
+| `cluster.store.ClusterStore` | 核心：foreign overlay（只读、仅内存）+ 会话表 + 来源租约（`LeaseTable[node_id]`）+ 复制/驱逐 |
+| `cluster.router` — `/api/cluster/{peers,sessions,digest,pulls,updates,beacons,keepalives,state}` | 触发/会话/同步/存活的 RESTful 端点；未初始化 404 |
+| `cluster.cli` — `a2x-registry cluster {init,add-peer,rm-peer,status}` | 用户主用入口（薄 HTTP 客户端） |
+| `RegistryService.set_on_mutation(callback)` | 注入点 —— `register/` 不 import `cluster/`，本地 CRUD 经回调推送增量 |
+| 数据集 `GET /services`、`GET /services/{id}` | 读路径合并 foreign 副本（命名空间化 id `origin_id:sid` + `source=cluster`）；本地 entry / 持久化 / taxonomy hash 不受影响 |
+
+写入 origin-only（外部副本只读）、版本 `(updated_at_ms, node_id)` LWW；防回音=水平分割+版本去重；失活按来源节点的 BEACON 租约（默认 ttl 30s+grace 15s≈45s）。启用鉴权时握手签发会话令牌认证逐次调用。完整设计 / 时序图 / 类图见 [cluster_design.md](cluster_design.md)，部署见 [README_forDistributed.md](../README_forDistributed.md)。
+
 ## 3. 主要数据流
 
 ```
@@ -188,7 +213,7 @@ a2x/search ←──┬──→ vector/search ←──┬──→ traditional
 
 | 安装命令 | 包含 | 可用范围 |
 |---|---|---|
-| `pip install a2x-registry` | requests / fastapi / pydantic / python-multipart / uvicorn[standard] | 注册中心 + SDK 全部接口（Agent Team 默认） |
+| `pip install a2x-registry` | requests / httpx / fastapi / pydantic / python-multipart / uvicorn[standard] | 注册中心 + SDK 全部接口 + 分布式同步（Agent Team 默认） |
 | `pip install 'a2x-registry[vector]'` | + numpy / sentence-transformers / chromadb | + A2X 分类构建 / 向量检索 / traditional 检索 |
 | `pip install 'a2x-registry[evaluation]'` | + tqdm | + `a2x-evaluate-*` CLI 进度条 |
 | `pip install 'a2x-registry[full]'` | 上述全部 | 等价 ≤0.1.5 默认安装 |

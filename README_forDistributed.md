@@ -16,7 +16,7 @@
 - **网络**：两节点要能互相访问对方的 HTTP 端口（防火墙/安全组放行）。
 - 安装（两台都装）：
   ```bash
-  pip install git+https://github.com/Weizheng96/A2X-registry.git@test_0.2.1
+  pip install git+https://github.com/Weizheng96/A2X-registry.git@v0.3.0
   ```
 
 ---
