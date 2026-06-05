@@ -121,6 +121,7 @@ def run_warmup() -> None:
         try:
             import os as _os
             from a2x_registry.cluster.store import ClusterStore
+            from a2x_registry.cluster.config import ClusterConfig
             from a2x_registry.cluster.deps import set_cluster_store
             from a2x_registry.auth.deps import get_auth_store
             # Advertised base URL peers use to reach us. Defaults empty; set
@@ -128,6 +129,7 @@ def run_warmup() -> None:
             # multi-instance deployment so peers can call back.
             advertise = _os.environ.get("A2X_REGISTRY_CLUSTER_ADVERTISE", "")
             cluster_store = ClusterStore.load_or_none(
+                config=ClusterConfig.from_env(),   # A2X_REGISTRY_CLUSTER_* overrides
                 registry_svc=registry_svc,
                 advertise=advertise,
                 auth_store_getter=get_auth_store,

@@ -61,7 +61,7 @@ tombstones:     {dataset\0sid: {version, deleted_at_ms}}
 | `anti_entropy_interval` | 20s | 反熵对账 + GC 周期 |
 | `http_timeout` | 5s | 单次对端调用超时 |
 
-`A2X_REGISTRY_CLUSTER_ADVERTISE` 设置对端访问本实例所用的 base URL。
+以上每项都可在启动 server 前用 `A2X_REGISTRY_CLUSTER_<字段大写>` 环境变量覆盖（如 `A2X_REGISTRY_CLUSTER_BEACON_TTL=10`，由 `ClusterConfig.from_env` 读取；非法值回退默认）。`A2X_REGISTRY_CLUSTER_ADVERTISE` 则设置对端访问本实例所用的 base URL。
 
 ### 1.2 时序图
 

@@ -97,6 +97,28 @@ curl -s http://<B_IP>:8000/api/datasets/default/services
 ## 6. 失活与运维注意
 
 - **自动失活**：某节点漂走/宕机后，其它节点在约 **45 秒**（`beacon_ttl 30s + grace 15s`）内收不到它的存活信标，就自动删除它的全部副本，无需人工干预。它恢复可达后重新 `add-peer` 即可补齐。
+
+  **可人工配置失活时间窗**：失活耗时 ≈ `beacon_ttl + beacon_grace`，通过环境变量在**启动 server 前**设置（与 `A2X_REGISTRY_CLUSTER_ADVERTISE` 一样，server 启动时读取）。无需改代码；墓碑保留时间会自动跟随这两个值。
+
+  ```bash
+  # 例：把失活窗口从默认 45s 收紧到 ~15s（更快剔除离线节点）
+  export A2X_REGISTRY_CLUSTER_BEACON_TTL=10      # 来源租约有效期(秒)，默认 30
+  export A2X_REGISTRY_CLUSTER_BEACON_GRACE=5     # 宽限期(秒)，默认 15
+  a2x-registry --host 0.0.0.0 --port 8000
+  ```
+  > Windows PowerShell：`$env:A2X_REGISTRY_CLUSTER_BEACON_TTL="10"` 等。
+
+  | 环境变量 | 默认 | 作用 |
+  |---|---|---|
+  | `A2X_REGISTRY_CLUSTER_BEACON_TTL` | 30 | 来源租约有效期(秒) |
+  | `A2X_REGISTRY_CLUSTER_BEACON_GRACE` | 15 | 过期后的宽限期(秒)；**失活 ≈ ttl + grace**，墓碑保留同此值 |
+  | `A2X_REGISTRY_CLUSTER_BEACON_INTERVAL` | 10 | 信标广播 / 巡检周期(秒) |
+  | `A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT` | 30 | 直链静默多久断会话(秒) |
+  | `A2X_REGISTRY_CLUSTER_ANTI_ENTROPY_INTERVAL` | 20 | 反熵对账 + GC 周期(秒) |
+  | `A2X_REGISTRY_CLUSTER_HTTP_TIMEOUT` | 5 | 单次对端调用超时(秒) |
+
+  > 建议**各节点设成一致**；不一致只会导致各节点驱逐时刻略有先后（已由内部抑制机制兜底，不会误删）。`ttl/grace` 填整数；非法值会被忽略并回退默认。
+
 - **advertise 必须可达**：`A2X_REGISTRY_CLUSTER_ADVERTISE` 要填**对端访问得到**的地址（局域网 IP / 域名），不能是 `127.0.0.1`（除非同机调试）。填错会导致对端无法回连本节点，反向同步失效。
 - **重启后需重新建链**：同步来的副本只在内存、不落盘；server 重启后会话丢失，需重新 `add-peer`（本节点自有数据已持久化，不会丢）。
 - **新建命名空间**：建链后新创建的 dataset 不会自动纳入已有会话，需再 `add-peer` 一次刷新（已有命名空间内的服务增删改实时同步，无需重连）。
