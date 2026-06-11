@@ -24,8 +24,6 @@ import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
-from a2x_registry.common.lease import LeaseTable
-
 from .auth_handshake import authorize_namespaces
 from .config import ClusterConfig
 from .envelope import SyncEnvelope, Version, version_newer
@@ -67,17 +65,11 @@ class ClusterStore:
         self._foreign: Dict[_Key, SyncEnvelope] = {}
         # peer node_id -> Peer
         self._sessions: Dict[str, Peer] = {}
-        # origin node_id -> liveness lease (refreshed by that node's beacons).
-        # Expiry evicts every record that originated at the node.
-        self._origin_leases: LeaseTable[str] = LeaseTable()
-        # origin node_id -> last beacon seq seen (flood dedup).
-        self._beacon_seen: Dict[str, int] = {}
-        self._my_beacon_seq = 0
-        # origin node_id -> monotonic deadline until which records from that
-        # origin are suppressed (rejected) after eviction. Prevents a just-
-        # evicted origin's records from being re-pulled via gossip from a
-        # peer that hasn't evicted yet (which would otherwise ping-pong and
-        # never converge). A genuine beacon from the origin clears it.
+        # node_id -> monotonic deadline until which records from that origin
+        # are suppressed (rejected) after eviction. Full-mesh: a peer evicted
+        # via HOLD on one node could otherwise be re-pulled by anti-entropy
+        # from a peer that hasn't evicted it yet (ping-pong). The cooldown
+        # blocks that; (re)establishing a session with the node clears it.
         self._evicted_until: Dict[str, float] = {}
 
     @classmethod
@@ -234,8 +226,8 @@ class ClusterStore:
             return False
         with self._lock:
             # Suppress re-learning a just-evicted origin until the cooldown
-            # elapses (or a real beacon proves it's back). Without this, a
-            # peer that hasn't evicted yet would resurrect it via gossip.
+            # elapses (or it reconnects). Without this, a peer that hasn't
+            # evicted yet would resurrect it via anti-entropy.
             until = self._evicted_until.get(env.origin_id)
             if until is not None and self._clock() < until:
                 return False
@@ -244,13 +236,6 @@ class ClusterStore:
             if not version_newer(env.version, cur_v):
                 return False
             self._foreign[env.key] = env
-        # Receiving a record is liveness evidence for its origin — start (or
-        # renew) the eviction lease so it's armed even before the first
-        # beacon arrives. Beacons keep renewing it; silence expires it.
-        self._origin_leases.install(
-            env.origin_id, self._config.beacon_ttl, self._config.beacon_grace,
-            now=self._clock(),
-        )
         return True
 
     # ── handlers (peer → us) ────────────────────────────────────────────
@@ -282,6 +267,7 @@ class ClusterStore:
                 from_node, address, set(accepted),
                 last_seen=self._clock(), token=session_token,
             )
+            self._evicted_until.pop(from_node, None)  # it's back → lift suppression
         logger.info("cluster: session opened with %s (ns=%s)", from_node, accepted)
         return {
             "node_id": self.node_id, "accepted": accepted,
@@ -384,17 +370,15 @@ class ClusterStore:
 
     def serve_updates(self, from_node: str, envelopes: List[dict],
                       token: Optional[str] = None) -> dict:
-        """Apply a batch of inbound envelopes (LWW dedup) and relay the
-        accepted ones onward with split-horizon (everyone except the sender).
+        """Apply a batch of inbound envelopes (LWW dedup, namespace-gated).
 
-        Loops can't run away: a relayed envelope that a node already has at
-        the same version is rejected by ``apply_inbound`` and therefore not
-        relayed again, so the flood dies out after each node sees it once.
+        Full-mesh: every member is a direct peer of the origin, so there is
+        no relay — each node receives a record directly from its origin's
+        broadcast and simply stores the newer version.
         """
         self._touch_peer(from_node)
         accepted = 0
         rejected = 0
-        to_relay: List[SyncEnvelope] = []
         for raw in envelopes:
             env = SyncEnvelope.model_validate(raw)
             if not self._may_accept(from_node, env.dataset, token):
@@ -402,77 +386,27 @@ class ClusterStore:
                 continue
             if self.apply_inbound(env):
                 accepted += 1
-                to_relay.append(env)
-        for env in to_relay:
-            self._broadcast(env, exclude=from_node)
         return {"accepted": accepted, "received": len(envelopes), "rejected": rejected}
 
     # ── outbound replication ────────────────────────────────────────────
 
-    def _broadcast(self, env: SyncEnvelope, exclude: Optional[str] = None) -> None:
-        """Send ``env`` to every session that syncs its dataset, except
-        ``exclude`` (split-horizon). Best-effort: a peer that's unreachable
-        is skipped — periodic anti-entropy (M3) will reconcile it."""
+    def _broadcast(self, env: SyncEnvelope) -> None:
+        """Send ``env`` to every session that syncs its dataset. Best-effort:
+        a peer that's unreachable is skipped — periodic anti-entropy will
+        reconcile it. Full-mesh means this reaches the whole cluster directly,
+        with no onward relay."""
         payload = [env.model_dump(mode="json")]
         with self._lock:
             peers = list(self._sessions.values())
         for peer in peers:
-            if peer.node_id == exclude or env.dataset not in peer.namespaces:
+            if env.dataset not in peer.namespaces:
                 continue
             try:
                 self._transport.updates(peer.address, self.node_id, payload, peer.token)
             except TransportError:
                 pass
 
-    # ── liveness: beacons (transitive) + keepalive (direct link) ────────
-
-    def emit_beacon(self) -> None:
-        """Broadcast our own liveness beacon. Floods the LAN like an UPDATE
-        (relayed with split-horizon, deduped by sequence) so every reachable
-        node refreshes our origin lease."""
-        with self._lock:
-            self._my_beacon_seq += 1
-            beacon = {"origin_id": self.node_id, "seq": self._my_beacon_seq}
-        self._broadcast_beacon(beacon, exclude=None)
-
-    def _broadcast_beacon(self, beacon: dict, exclude: Optional[str]) -> None:
-        with self._lock:
-            peers = list(self._sessions.values())
-        for peer in peers:
-            if peer.node_id == exclude:
-                continue
-            try:
-                self._transport.beacon(peer.address, self.node_id, beacon, peer.token)
-            except TransportError:
-                pass
-
-    def handle_beacon(self, from_node: str, beacon: dict,
-                      token: Optional[str] = None) -> dict:
-        """Receive a beacon: refresh the origin's lease and relay onward
-        (split-horizon + sequence dedup). Our own beacon echoed back is
-        ignored. When auth is on, an unauthenticated sender is ignored so a
-        spoofer can't manipulate liveness."""
-        if not self._authed(from_node, token):
-            return {"accepted": False}
-        self._touch_peer(from_node)
-        origin = beacon["origin_id"]
-        seq = int(beacon["seq"])
-        if origin == self.node_id:
-            return {"accepted": False}
-        with self._lock:
-            if seq <= self._beacon_seen.get(origin, -1):
-                return {"accepted": False}  # dedup → stops the flood
-            self._beacon_seen[origin] = seq
-            # A genuine beacon proves the origin is alive again → lift any
-            # post-eviction suppression so its records can re-sync.
-            self._evicted_until.pop(origin, None)
-        # install() resets the TTL each beacon → acts as renew.
-        self._origin_leases.install(
-            origin, self._config.beacon_ttl, self._config.beacon_grace,
-            now=self._clock(),
-        )
-        self._broadcast_beacon(beacon, exclude=from_node)
-        return {"accepted": True}
+    # ── liveness: direct-link keepalive / HOLD ──────────────────────────
 
     def handle_keepalive(self, from_node: str, token: Optional[str] = None) -> dict:
         """Direct-link keepalive — refresh the HOLD timer (authenticated when
@@ -506,35 +440,16 @@ class ClusterStore:
             self.disconnect_peer(node_id)
         return stale
 
-    def sweep_origins(self, now: Optional[float] = None) -> List[str]:
-        """Drive the origin-lease state machine; evict every record from an
-        origin whose beacons stopped (lease grace expired). Returns the
-        evicted origin ids."""
+    def prune_suppression(self, now: Optional[float] = None) -> None:
+        """Drop expired post-eviction suppression entries (memory hygiene).
+        An expired entry is already inert in ``apply_inbound``; this just
+        keeps the dict from growing unbounded. Called by the anti-entropy
+        sweeper alongside tombstone GC."""
         if now is None:
             now = self._clock()
-        _newly_unhealthy, to_evict = self._origin_leases.sweep_tick(now)
-        for origin in to_evict:
-            self._evict_origin(origin)
-        # Prune expired suppression entries.
-        mono = self._clock()
         with self._lock:
-            for o in [o for o, t in self._evicted_until.items() if mono >= t]:
+            for o in [o for o, t in self._evicted_until.items() if now >= t]:
                 del self._evicted_until[o]
-        return to_evict
-
-    def _evict_origin(self, origin: str) -> None:
-        """Remove all replicated records (and the session) for ``origin``,
-        and start a suppression cooldown so gossip can't resurrect them
-        before every node has evicted."""
-        with self._lock:
-            for k in [k for k in self._foreign if k[1] == origin]:
-                del self._foreign[k]
-            self._beacon_seen.pop(origin, None)
-            self._sessions.pop(origin, None)
-            self._evicted_until[origin] = (
-                self._clock() + self._config.beacon_ttl + self._config.beacon_grace
-            )
-        logger.info("cluster: evicted origin %s (beacons stopped)", origin)
 
     # ── orchestration (us → peer) ───────────────────────────────────────
 
@@ -558,6 +473,7 @@ class ClusterStore:
                     last_seen=self._clock(), token=resp.get("session_token"))
         with self._lock:
             self._sessions[peer.node_id] = peer
+            self._evicted_until.pop(peer.node_id, None)  # it's back → lift suppression
         logger.info("cluster: connected to %s (ns=%s)", peer.node_id, sorted(peer.namespaces))
         self.reconcile(peer)
         return peer
@@ -603,13 +519,13 @@ class ClusterStore:
             return list(self._sessions.values())
 
     def gc_tombstones(self, now_ms: Optional[int] = None) -> int:
-        """Drop tombstones older than the retention window (``beacon_ttl +
-        beacon_grace``) — local (persisted) and foreign (overlay). Returns
-        the number removed.
+        """Drop tombstones older than the retention window
+        (``tombstone_retention``) — local (persisted) and foreign (overlay).
+        Returns the number removed.
 
-        Retention ≥ the foreign-replica eviction window guarantees any peer
-        that could still hold a stale copy has already evicted it before we
-        forget the deletion, so GC can't cause a resurrection.
+        Retention ≥ the HOLD eviction window guarantees any peer that could
+        still hold a stale copy has already evicted it before we forget the
+        deletion, so GC can't cause a resurrection.
         """
         if now_ms is None:
             now_ms = time.time_ns() // 1_000_000
@@ -629,15 +545,23 @@ class ClusterStore:
         return removed
 
     def disconnect_peer(self, node_id: str) -> bool:
-        """Drop the session and evict records that originated at that peer.
+        """The single eviction path. Drop the session, evict every record
+        that originated at that peer, and start a suppression cooldown.
 
-        (Records learned transitively *through* this peer but originating
-        elsewhere are evicted by beacon-lease expiry in M4.)
+        Full-mesh: a peer's origin is always a direct session, so losing the
+        link (explicit ``rm-peer`` or HOLD timeout) is exactly the signal to
+        evict its records. The cooldown stops anti-entropy from re-pulling
+        them from another node that hasn't evicted yet (which would ping-pong
+        and never converge); a fresh session (``handle_open`` / ``connect_peer``)
+        lifts it.
         """
         with self._lock:
             existed = self._sessions.pop(node_id, None) is not None
             for k in [k for k in self._foreign if k[1] == node_id]:
                 del self._foreign[k]
+            self._evicted_until[node_id] = (
+                self._clock() + self._config.tombstone_retention
+            )
         return existed
 
     # ── read seams (dataset router merge calls these; wired in M5) ───────
@@ -722,7 +646,7 @@ class ClusterStore:
 
         env = self._build_local_envelope(dataset, service_id)
         if env is not None:
-            self._broadcast(env, exclude=None)
+            self._broadcast(env)
 
     # ── observability ───────────────────────────────────────────────────
 
@@ -740,5 +664,4 @@ class ClusterStore:
                 "foreign_by_namespace": foreign_by_ns,
                 "local_records": len(self._state.local_versions),
                 "tombstones": len(self._state.tombstones),
-                "tracked_origins": len(self._origin_leases.items()),
             }

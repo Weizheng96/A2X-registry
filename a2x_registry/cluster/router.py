@@ -51,11 +51,6 @@ class UpdatesRequest(BaseModel):
     envelopes: List[dict]
 
 
-class BeaconRequest(BaseModel):
-    from_node: str
-    beacon: dict
-
-
 class KeepaliveRequest(BaseModel):
     from_node: str
 
@@ -118,14 +113,6 @@ async def post_updates(
     store: ClusterStore = Depends(require_cluster_store),
 ):
     return store.serve_updates(req.from_node, req.envelopes, session)
-
-
-@router.post("/beacons")
-async def post_beacon(
-    req: BeaconRequest, session: str = _SessionToken,
-    store: ClusterStore = Depends(require_cluster_store),
-):
-    return store.handle_beacon(req.from_node, req.beacon, session)
 
 
 @router.post("/keepalives")

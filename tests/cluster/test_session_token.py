@@ -98,11 +98,11 @@ def test_spoofed_push_to_protected_namespace_rejected(tmp_path):
     assert any(r["wrapped"]["name"] == "good" for r in B.foreign_rows("secure"))
 
 
-def test_beacon_requires_token_when_auth_on(tmp_path):
+def test_keepalive_requires_token_when_auth_on(tmp_path):
     t = InProcessTransport()
     B, sess = _setup_authed_receiver(tmp_path, t)
-    assert B.handle_beacon("P", {"origin_id": "P", "seq": 1}, "WRONG")["accepted"] is False
-    assert B.handle_beacon("P", {"origin_id": "P", "seq": 1}, sess)["accepted"] is True
+    assert B.handle_keepalive("P", "WRONG")["ok"] is False
+    assert B.handle_keepalive("P", sess)["ok"] is True
 
 
 def test_session_token_over_http_with_auth(cluster_auth_app):

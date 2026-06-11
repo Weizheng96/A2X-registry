@@ -1,4 +1,4 @@
-"""Incremental push, split-horizon relay, version dedup, no echo."""
+"""Incremental push, full-mesh direct broadcast, version dedup, no echo."""
 
 from __future__ import annotations
 
@@ -23,29 +23,9 @@ def test_incremental_push_to_existing_namespace(tmp_path):
     assert "later" in names
 
 
-def test_split_horizon_chain_relays_without_echo(tmp_path):
-    """A–B–C chain: A's record reaches C via B; A never stores its own."""
-    t = InProcessTransport()
-    rA, rB, rC = FakeRegistry(), FakeRegistry(), FakeRegistry()
-    for r in (rA, rB, rC):
-        r.add_generic("ds", "seed")
-    A = build_store(tmp_path, "A", rA, t)
-    B = build_store(tmp_path, "B", rB, t)
-    C = build_store(tmp_path, "C", rC, t)
-    B.connect_peer("A")
-    B.connect_peer("C")
-
-    sid = rA.add_generic("ds", "from-A")
-    A.on_local_mutation("ds", sid, "register", rA.get_entry("ds", sid))
-
-    assert any(r["origin_id"] == "A" and r["name"] == "from-A"
-               for r in C.foreign_wrapped("ds"))
-    # Self-origin is never stored as foreign on A.
-    assert all(r["origin_id"] != "A" for r in A.foreign_wrapped("ds"))
-
-
-def test_ring_topology_terminates(tmp_path):
-    """A–B–C–A ring: a mutation floods once and the dedup stops the echo."""
+def test_full_mesh_direct_broadcast_reaches_all_peers(tmp_path):
+    """Full mesh: A's record reaches every direct peer (B and C) by a single
+    broadcast — no relay. A never stores its own record as foreign."""
     t = InProcessTransport()
     rA, rB, rC = FakeRegistry(), FakeRegistry(), FakeRegistry()
     for r in (rA, rB, rC):
@@ -54,15 +34,41 @@ def test_ring_topology_terminates(tmp_path):
     B = build_store(tmp_path, "B", rB, t)
     C = build_store(tmp_path, "C", rC, t)
     A.connect_peer("B")
-    B.connect_peer("C")
-    C.connect_peer("A")
+    A.connect_peer("C")
 
-    sid = rA.add_generic("ds", "ring-rec")
-    # Completes without infinite recursion.
+    sid = rA.add_generic("ds", "from-A")
     A.on_local_mutation("ds", sid, "register", rA.get_entry("ds", sid))
 
-    assert any(r["name"] == "ring-rec" for r in B.foreign_wrapped("ds"))
-    assert any(r["name"] == "ring-rec" for r in C.foreign_wrapped("ds"))
+    for node in (B, C):
+        assert any(r["origin_id"] == "A" and r["name"] == "from-A"
+                   for r in node.foreign_wrapped("ds"))
+    # Self-origin is never stored as foreign on A.
+    assert all(r["origin_id"] != "A" for r in A.foreign_wrapped("ds"))
+
+
+def test_inbound_updates_are_not_relayed(tmp_path):
+    """No relay: a record A receives from B is stored but NOT forwarded to
+    A's other peer C. Full-mesh reachability comes from the origin's own
+    broadcast, not from intermediaries re-flooding. Here B and C are NOT
+    directly connected, so without relay C never learns B's record."""
+    t = InProcessTransport()
+    rA, rB, rC = FakeRegistry(), FakeRegistry(), FakeRegistry()
+    for r in (rA, rB, rC):
+        r.add_generic("ds", "seed")
+    A = build_store(tmp_path, "A", rA, t)
+    B = build_store(tmp_path, "B", rB, t)
+    C = build_store(tmp_path, "C", rC, t)
+    # A is connected to both B and C; B and C are NOT connected to each other.
+    A.connect_peer("B")
+    A.connect_peer("C")
+
+    # B originates a record → broadcasts only to its direct peer A.
+    sid = rB.add_generic("ds", "from-B")
+    B.on_local_mutation("ds", sid, "register", rB.get_entry("ds", sid))
+
+    assert any(r["name"] == "from-B" for r in A.foreign_wrapped("ds"))
+    # A must not relay it onward to C (no relay) → C never sees it.
+    assert all(r["name"] != "from-B" for r in C.foreign_wrapped("ds"))
 
 
 def test_self_origin_inbound_ignored(tmp_path):

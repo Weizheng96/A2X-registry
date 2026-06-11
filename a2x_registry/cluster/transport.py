@@ -46,10 +46,6 @@ class Transport:
                 token: Optional[str] = None) -> dict:
         raise NotImplementedError
 
-    def beacon(self, address: str, from_node: str, beacon: dict,
-               token: Optional[str] = None) -> dict:
-        raise NotImplementedError
-
     def keepalive(self, address: str, from_node: str,
                   token: Optional[str] = None) -> dict:
         raise NotImplementedError
@@ -97,12 +93,6 @@ class HttpTransport(Transport):
         return self._call(
             address, "POST", "/api/cluster/updates", token=token,
             json={"from_node": from_node, "envelopes": envelopes},
-        )
-
-    def beacon(self, address, from_node, beacon, token=None) -> dict:
-        return self._call(
-            address, "POST", "/api/cluster/beacons", token=token,
-            json={"from_node": from_node, "beacon": beacon},
         )
 
     def keepalive(self, address, from_node, token=None) -> dict:

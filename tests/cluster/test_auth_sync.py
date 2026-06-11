@@ -1,7 +1,7 @@
 """End-to-end sync under various auth states.
 
 Handshake authorization gates which namespaces a session syncs; everything
-downstream (digest/pull/push/relay) is scoped to that accepted set. These
+downstream (digest/pull/push) is scoped to that accepted set. These
 tests drive real connect+reconcile to confirm the gating end-to-end — with
 special attention to the no-auth-anywhere case.
 """

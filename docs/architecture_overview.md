@@ -42,11 +42,11 @@ a2x_registry/                      # pip 包根
 │   ├── router.py                  #   /api/datasets/{ds}/services/{sid}/heartbeat
 │   └── system_ctx.py              #   合成 admin context 给 sweeper 走 deregister
 ├── cluster/                       # 分布式同步（opt-in，需 cluster init；不 import register/ 业务）
-│   ├── store.py                   #   ClusterStore：foreign overlay + 会话表 + 来源租约 + 复制/驱逐
+│   ├── store.py                   #   ClusterStore：foreign overlay + 会话表 + 全连接复制/HOLD 驱逐
 │   ├── envelope.py                #   SyncEnvelope + LWW 版本判新
 │   ├── state.py                   #   cluster_state.json：node_id / 版本 / 本地墓碑
 │   ├── peer.py / auth_handshake.py #  会话模型 / 逐 namespace 握手鉴权（复用 auth）
-│   ├── replication / liveness / sweepers.py # 推送+反熵 / 信标租约 / 后台守护线程
+│   ├── sweepers.py                #   后台守护线程：反熵对账+GC / keepalive·HOLD
 │   ├── transport.py / router.py    #  httpx 节点间传输 / RESTful /api/cluster/*
 │   └── cli.py                     #   `a2x-registry cluster init/add-peer/rm-peer/status`
 ├── backend/                       # FastAPI 应用
@@ -173,17 +173,17 @@ a2x_registry/                      # pip 包根
 
 ### 2.9 `cluster/` — 分布式同步（默认关闭）
 
-**opt-in**：注册中心默认单机；执行 `a2x-registry cluster init` 生成 `cluster_state.json` 后才启用。未启用时所有 `/api/cluster/*` 返回 404、读写与单机 byte-equal。多实例彼此可达时自动同步注册表（**AP / 最终一致**，gossip + LWW），查询任一节点即得全网可达节点的服务；节点失联后靠存活信标失活删除其数据。
+**opt-in**：注册中心默认单机；执行 `a2x-registry cluster init` 生成 `cluster_state.json` 后才启用。未启用时所有 `/api/cluster/*` 返回 404、读写与单机 byte-equal。启用后多实例组成**全连接**集群自动同步注册表（**AP / 最终一致**，直接广播 + LWW），查询任一节点即得全网节点的服务；节点失联后靠直链 HOLD 失活删除其数据。
 
 | 接口 | 说明 |
 |---|---|
-| `cluster.store.ClusterStore` | 核心：foreign overlay（只读、仅内存）+ 会话表 + 来源租约（`LeaseTable[node_id]`）+ 复制/驱逐 |
-| `cluster.router` — `/api/cluster/{peers,sessions,digest,pulls,updates,beacons,keepalives,state}` | 触发/会话/同步/存活的 RESTful 端点；未初始化 404 |
+| `cluster.store.ClusterStore` | 核心：foreign overlay（只读、仅内存）+ 会话表 + 全连接复制 / HOLD 驱逐 |
+| `cluster.router` — `/api/cluster/{peers,sessions,digest,pulls,updates,keepalives,state}` | 触发/会话/同步/存活的 RESTful 端点；未初始化 404 |
 | `cluster.cli` — `a2x-registry cluster {init,add-peer,rm-peer,status}` | 用户主用入口（薄 HTTP 客户端） |
 | `RegistryService.set_on_mutation(callback)` | 注入点 —— `register/` 不 import `cluster/`，本地 CRUD 经回调推送增量 |
 | 数据集 `GET /services`、`GET /services/{id}` | 读路径合并 foreign 副本（命名空间化 id `origin_id:sid` + `source=cluster`）；本地 entry / 持久化 / taxonomy hash 不受影响 |
 
-写入 origin-only（外部副本只读）、版本 `(updated_at_ms, node_id)` LWW；防回音=水平分割+版本去重；失活按来源节点的 BEACON 租约（默认 ttl 30s+grace 15s≈45s）。启用鉴权时握手签发会话令牌认证逐次调用。完整设计 / 时序图 / 类图见 [cluster_design.md](cluster_design.md)，部署见 [README_forDistributed.md](../README_forDistributed.md)。
+写入 origin-only（外部副本只读）、版本 `(updated_at_ms, node_id)` LWW。**全连接、直接广播、不转发**：来源直发所有 peer，入站只按 LWW 落库，天然无环。失活统一走直链 keepalive/HOLD（默认 `hold_timeout` 30s）+ 驱逐后抑制冷却（防反熵复活）。启用鉴权时握手签发会话令牌认证逐次调用。完整设计 / 时序图 / 类图见 [cluster_design.md](cluster_design.md)，部署见 [README_forDistributed.md](../README_forDistributed.md)。
 
 ## 3. 主要数据流
 

@@ -138,20 +138,17 @@ def run_warmup() -> None:
             if cluster_store is not None:
                 # Replicate every local CRUD to peers (default no-op when off).
                 registry_svc.set_on_mutation(cluster_store.on_local_mutation)
-                # Background daemons: anti-entropy reconcile + GC, beacon
-                # liveness + origin eviction, and direct-link keepalive/HOLD.
+                # Background daemons (full-mesh): anti-entropy reconcile + GC,
+                # and direct-link keepalive/HOLD (the sole liveness path).
                 from a2x_registry.cluster.sweepers import (
-                    AntiEntropySweeper, BeaconSweeper, KeepaliveMonitor,
+                    AntiEntropySweeper, KeepaliveMonitor,
                 )
                 cfg = cluster_store.config
                 ae = AntiEntropySweeper(cluster_store, period=cfg.anti_entropy_interval)
-                bs = BeaconSweeper(cluster_store, period=cfg.beacon_interval)
                 km = KeepaliveMonitor(cluster_store, period=cfg.keepalive_interval)
                 ae.start()
-                bs.start()
                 km.start()
                 warmup_state["_cluster_anti_entropy"] = ae
-                warmup_state["_cluster_beacon"] = bs
                 warmup_state["_cluster_keepalive"] = km
                 logger.info("  Cluster module loaded (node_id=%s)", cluster_store.node_id)
             else:

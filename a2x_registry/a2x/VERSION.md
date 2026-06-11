@@ -4,6 +4,22 @@
 
 ---
 
+## Unreleased
+
+### 概述
+`cluster/` 模块瘦身为**全连接（full-mesh）直接广播**模型：每个成员与其它每个成员直连，记录由来源直发所有 peer、入站不再转发。删除为支持链式/稀疏拓扑而存在的 BEACON 存活泛洪、relay 转发、按来源的租约驱逐三块死代码；失活统一到直链 **HOLD + 抑制冷却**一条路径。确定性、无随机。
+
+> **部署契约变化**：删 relay 后部署**必须全连接**（每对成员两两 `add-peer`）；旧的链式部署不再传播。`add-peer`/`rm-peer` 用户接口保留为建链原语。
+
+### 变化
+- 删除：`emit_beacon`/`handle_beacon`/`_broadcast_beacon`、`sweep_origins`/`_evict_origin`、`serve_updates` 的转发、`BeaconSweeper`、`POST /api/cluster/beacons` 与 `Transport.beacon`。
+- 失活：`disconnect_peer` 成为唯一驱逐路径（删会话 + 删该来源 foreign 记录 + 设抑制冷却）；会话(重)建解除抑制；`KeepaliveMonitor` 的 HOLD 超时触发它。
+- 配置：移除 `beacon_ttl`/`beacon_grace`/`beacon_interval`；`tombstone_retention` 改为 `hold_timeout + keepalive_interval`。
+- 测试：`tests/cluster` 改写为全连接 + HOLD（87 测试全绿，新增 HOLD 驱逐 / 不复活 / 全连接直达用例）。
+- 文档：`docs/cluster_design.md` 全面改写为全连接 + HOLD。
+
+---
+
 ## v0.3.1 (2026-06-05)
 
 ### 概述

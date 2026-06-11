@@ -96,28 +96,26 @@ curl -s http://<B_IP>:8000/api/datasets/default/services
 
 ## 6. 失活与运维注意
 
-- **自动失活**：某节点漂走/宕机后，其它节点在约 **45 秒**（`beacon_ttl 30s + grace 15s`）内收不到它的存活信标，就自动删除它的全部副本，无需人工干预。它恢复可达后重新 `add-peer` 即可补齐。
+- **自动失活**：某节点漂走/宕机后，其直连 peer 在约 **30 秒**（`hold_timeout`）内收不到它的直链保活，就断会话并自动删除它的全部副本，无需人工干预。它恢复可达后重新 `add-peer` 即可补齐。
 
-  **可人工配置失活时间窗**：失活耗时 ≈ `beacon_ttl + beacon_grace`，通过环境变量在**启动 server 前**设置（与 `A2X_REGISTRY_CLUSTER_ADVERTISE` 一样，server 启动时读取）。无需改代码；墓碑保留时间会自动跟随这两个值。
+  **可人工配置失活时间窗**：失活耗时 ≈ `hold_timeout`，通过环境变量在**启动 server 前**设置（与 `A2X_REGISTRY_CLUSTER_ADVERTISE` 一样，server 启动时读取）。无需改代码；墓碑保留与驱逐后抑制时长（`tombstone_retention = hold_timeout + keepalive_interval`）会自动跟随。
 
   ```bash
-  # 例：把失活窗口从默认 45s 收紧到 ~15s（更快剔除离线节点）
-  export A2X_REGISTRY_CLUSTER_BEACON_TTL=10      # 来源租约有效期(秒)，默认 30
-  export A2X_REGISTRY_CLUSTER_BEACON_GRACE=5     # 宽限期(秒)，默认 15
+  # 例：把失活窗口从默认 30s 收紧到 ~10s（更快剔除离线节点）
+  export A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT=10        # 直链静默多久断会话(秒)，默认 30
+  export A2X_REGISTRY_CLUSTER_KEEPALIVE_INTERVAL=5   # 保活周期(秒)，默认 10
   a2x-registry --host 0.0.0.0 --port 8000
   ```
-  > Windows PowerShell：`$env:A2X_REGISTRY_CLUSTER_BEACON_TTL="10"` 等。
+  > Windows PowerShell：`$env:A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT="10"` 等。
 
   | 环境变量 | 默认 | 作用 |
   |---|---|---|
-  | `A2X_REGISTRY_CLUSTER_BEACON_TTL` | 30 | 来源租约有效期(秒) |
-  | `A2X_REGISTRY_CLUSTER_BEACON_GRACE` | 15 | 过期后的宽限期(秒)；**失活 ≈ ttl + grace**，墓碑保留同此值 |
-  | `A2X_REGISTRY_CLUSTER_BEACON_INTERVAL` | 10 | 信标广播 / 巡检周期(秒) |
-  | `A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT` | 30 | 直链静默多久断会话(秒) |
+  | `A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT` | 30 | 直链静默多久断会话并驱逐其记录(秒)；**失活 ≈ 此值** |
+  | `A2X_REGISTRY_CLUSTER_KEEPALIVE_INTERVAL` | 10 | 直链保活广播周期(秒)；墓碑/抑制保留 = hold + keepalive |
   | `A2X_REGISTRY_CLUSTER_ANTI_ENTROPY_INTERVAL` | 20 | 反熵对账 + GC 周期(秒) |
   | `A2X_REGISTRY_CLUSTER_HTTP_TIMEOUT` | 5 | 单次对端调用超时(秒) |
 
-  > 建议**各节点设成一致**；不一致只会导致各节点驱逐时刻略有先后（已由内部抑制机制兜底，不会误删）。`ttl/grace` 填整数；非法值会被忽略并回退默认。
+  > 建议**各节点设成一致**；不一致只会导致各节点驱逐时刻略有先后（已由内部抑制机制兜底，不会误删）。非法值会被忽略并回退默认。
 
 - **advertise 必须可达**：`A2X_REGISTRY_CLUSTER_ADVERTISE` 要填**对端访问得到**的地址（局域网 IP / 域名），不能是 `127.0.0.1`（除非同机调试）。填错会导致对端无法回连本节点，反向同步失效。
 - **重启后需重新建链**：同步来的副本只在内存、不落盘；server 重启后会话丢失，需重新 `add-peer`（本节点自有数据已持久化，不会丢）。
@@ -128,12 +126,12 @@ curl -s http://<B_IP>:8000/api/datasets/default/services
 
 ## 7. 扩展到更多节点
 
-拓扑可任意（星形 / 链形 / 环形），**对每条要建立的链路各 `add-peer` 一次**即可：
+**拓扑必须是全连接**（每对成员都直连）：本模块直接广播、**不做转发**，未直连的两个节点学不到对方的数据。**对每一对成员各 `add-peer` 一次**即可：
 
-- **链形 A—B—C**：在 A 上 `add-peer B`，在 B 上 `add-peer C`。A 不直连 C，但会经 B 自动学到 C 的服务（链式转发）。
-- **星形（B 为中心）**：在 B 上分别 `add-peer A`、`add-peer C`、`add-peer D`。
-- **节点移动 / 拓扑变化**：注册中心**自身不做发现、不会自动连接新邻居**——"两节点进入彼此可达范围"这一事件由**外部**（链路层发现守护进程或人工）感知，并调用一次 `add-peer`（或 `POST /api/cluster/peers`）来建链。一旦触发，握手 + 双向对账全自动；与此同时，已失联的旧来源数据按失活规则（~45s）自动清除。
-  > 例：原 A—B—C—D，A 漂离 B 又进入 D 范围 —— A 会先自动失活清除 B/C/D 的数据；待外部对 A、D 触发一次 `add-peer` 后，A↔D 自动对账、并经 D→C→B 链式补齐，收敛成 B—C—D—A。**"连上 D" 这一步需要外部触发，不会自动发生。**
+- **3 节点 A、B、C**：建 A—B、B—C、A—C 三条边（任一端发起一次即建好双向会话）。
+- **N 节点**：共 `N×(N−1)/2` 条边，对每对各建一次。
+- **节点移动 / 拓扑变化**：注册中心**自身不做发现、不会自动连接新邻居**——"两节点进入彼此可达范围"这一事件由**外部**（链路层发现守护进程或人工）感知，并对**新成员与每个现有成员**各调用一次 `add-peer`（或 `POST /api/cluster/peers`）补齐全连接。一旦触发，握手 + 双向对账全自动；与此同时，已失联的旧来源数据按失活规则（~30s HOLD）自动清除。
+  > 例：A 漂离原集群进入新集群 {D, E} —— A 会先自动失活清除旧集群副本；待外部对 A↔D、A↔E 各触发一次 `add-peer` 后，A 与新集群全连接并自动对账补齐。**建链这一步需要外部触发，不会自动发生。**
 
 ---
 

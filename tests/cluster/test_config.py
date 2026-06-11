@@ -10,29 +10,30 @@ def test_defaults_when_no_env(monkeypatch):
         if k.startswith("A2X_REGISTRY_CLUSTER_"):
             monkeypatch.delenv(k, raising=False)
     cfg = ClusterConfig.from_env()
-    assert cfg.beacon_ttl == 30 and cfg.beacon_grace == 15
-    assert cfg.tombstone_retention == 45.0
+    assert cfg.hold_timeout == 30.0 and cfg.keepalive_interval == 10.0
+    # tombstone_retention = hold_timeout + keepalive_interval
+    assert cfg.tombstone_retention == 40.0
 
 
-def test_override_beacon_ttl_and_grace(monkeypatch):
-    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_BEACON_TTL", "10")
-    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_BEACON_GRACE", "5")
+def test_override_hold_and_keepalive(monkeypatch):
+    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT", "60")
+    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_KEEPALIVE_INTERVAL", "20")
     monkeypatch.setenv("A2X_REGISTRY_CLUSTER_ANTI_ENTROPY_INTERVAL", "7.5")
     cfg = ClusterConfig.from_env()
-    assert cfg.beacon_ttl == 10
-    assert cfg.beacon_grace == 5
-    assert cfg.tombstone_retention == 15.0       # derived, follows the overrides
+    assert cfg.hold_timeout == 60.0
+    assert cfg.keepalive_interval == 20.0
+    assert cfg.tombstone_retention == 80.0       # derived, follows the overrides
     assert cfg.anti_entropy_interval == 7.5
-    # Untouched knobs keep defaults.
-    assert cfg.hold_timeout == 30.0
+    # Untouched knob keeps its default.
+    assert cfg.http_timeout == 5.0
 
 
-def test_int_field_tolerates_float_string(monkeypatch):
-    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_BEACON_TTL", "20.0")
-    assert ClusterConfig.from_env().beacon_ttl == 20
+def test_float_field_accepts_int_string(monkeypatch):
+    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT", "20")
+    assert ClusterConfig.from_env().hold_timeout == 20.0
 
 
 def test_invalid_value_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_BEACON_TTL", "abc")
+    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT", "abc")
     cfg = ClusterConfig.from_env()
-    assert cfg.beacon_ttl == 30                   # default, not a crash
+    assert cfg.hold_timeout == 30.0              # default, not a crash

@@ -96,9 +96,6 @@ class InProcessTransport(Transport):
     def updates(self, address, from_node, envelopes, token=None):
         return self._target(from_node, address).serve_updates(from_node, envelopes, token)
 
-    def beacon(self, address, from_node, beacon, token=None):
-        return self._target(from_node, address).handle_beacon(from_node, beacon, token)
-
     def keepalive(self, address, from_node, token=None):
         return self._target(from_node, address).handle_keepalive(from_node, token)
 
@@ -114,14 +111,6 @@ def converge(stores, rounds: int = 4) -> None:
                     s.reconcile(p)
                 except TransportError:
                     pass
-
-
-def beacon_flood(stores, rounds: int = 2) -> None:
-    """Each node emits its beacon (floods + relays) so every reachable node
-    arms/renews that origin's liveness lease."""
-    for _ in range(rounds):
-        for s in stores:
-            s.emit_beacon()
 
 
 def visible(store, registry, dataset: str) -> set:

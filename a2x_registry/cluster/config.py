@@ -21,17 +21,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ClusterConfig:
-    # Liveness (BEACON) — origin lease TTL + grace before a peer's records
-    # are evicted. Tombstone retention is derived as ttl + grace.
-    beacon_ttl: int = 30
-    beacon_grace: int = 15
-    beacon_interval: float = 10.0      # how often we broadcast our own beacon
-
-    # Direct-link keepalive / hold timer.
+    # Direct-link keepalive / HOLD timer. In a full mesh every member is a
+    # direct peer, so liveness is just this: we keepalive each peer every
+    # ``keepalive_interval``; a peer silent past ``hold_timeout`` is dropped
+    # and its records evicted.
     keepalive_interval: float = 10.0
     hold_timeout: float = 30.0
 
-    # Periodic anti-entropy reconciliation with a random peer.
+    # Periodic anti-entropy reconciliation with each peer.
     anti_entropy_interval: float = 20.0
 
     # Per-request HTTP timeout for peer calls (seconds).
@@ -39,10 +36,12 @@ class ClusterConfig:
 
     @property
     def tombstone_retention(self) -> float:
-        """Local tombstones are kept at least this long (seconds) before GC,
-        so a peer that was partitioned has already evicted its stale replica
-        (via the same beacon lease) before we forget the deletion."""
-        return float(self.beacon_ttl + self.beacon_grace)
+        """Local tombstones (and the post-eviction suppression cooldown) are
+        kept at least this long (seconds) before GC. Derived from the HOLD
+        window (``hold_timeout + keepalive_interval``) so every peer has had
+        time to detect the loss and evict its stale replica before we forget
+        the deletion — preventing resurrection."""
+        return float(self.hold_timeout + self.keepalive_interval)
 
     # ── env-var overrides ────────────────────────────────────────────────
 
@@ -50,7 +49,7 @@ class ClusterConfig:
     def from_env(cls) -> "ClusterConfig":
         """Build a config from defaults, overriding any knob present as an
         ``A2X_REGISTRY_CLUSTER_<FIELD>`` env var (e.g.
-        ``A2X_REGISTRY_CLUSTER_BEACON_TTL=10``). Unknown/blank vars keep the
+        ``A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT=60``). Unknown/blank vars keep the
         default; a non-numeric value logs a warning and keeps the default.
         """
         defaults = cls()
