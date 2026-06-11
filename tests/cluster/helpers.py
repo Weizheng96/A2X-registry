@@ -190,6 +190,6 @@ def build_store(tmp_path, name, registry, transport, *, auth_store=None,
         clock=clock,
     )
     if membership:
-        store.membership = MembershipStore(store, state)
+        store.membership = MembershipStore(store)
     transport.register(name, store)
     return store

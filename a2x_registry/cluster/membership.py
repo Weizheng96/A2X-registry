@@ -88,9 +88,9 @@ class MembershipStore:
     those primitives + the membership RPCs on the transport.
     """
 
-    def __init__(self, store, state) -> None:
+    def __init__(self, store) -> None:
         self._store = store
-        self._state = state
+        self._state = store.state
         self._lock = threading.RLock()
         # node_id -> MembershipRecord (own record + peers; may be tombstones)
         self._roster: Dict[str, MembershipRecord] = {}
@@ -204,20 +204,20 @@ class MembershipStore:
     # ── serve side (peer → us) ──────────────────────────────────────────
 
     def serve_set_digest(self, from_node: str, token: Optional[str] = None) -> dict:
-        if not self._store._authed(from_node, token):
+        if not self._store.authed(from_node, token):
             return {}
         return self.version_map()
 
     def serve_set_pull(self, from_node: str, node_ids: List[str],
                        token: Optional[str] = None) -> list:
-        if not self._store._authed(from_node, token):
+        if not self._store.authed(from_node, token):
             return []
         return self.records_for(node_ids)
 
     def serve_set_sync(self, from_node: str, records: List[dict],
                        token: Optional[str] = None) -> dict:
         """Receive a pushed batch (immediate-push path) and LWW-merge it."""
-        if not self._store._authed(from_node, token):
+        if not self._store.authed(from_node, token):
             return {"accepted": False}
         self.merge(records)
         return {"accepted": True}
@@ -284,7 +284,7 @@ class MembershipStore:
                 self._roster[nid] = MembershipRecord(nid, cid, addr, ver, False)
             results.append({"address": addr, "node_id": nid, "ok": True})
         self._persist()
-        self._connect_roster()
+        self.reconcile_connections()
         # Propagate the grown roster to everyone (new members already have it).
         with self._lock:
             full = [r.to_dict() for r in self._roster.values()]
@@ -358,7 +358,7 @@ class MembershipStore:
             )
         self.merge(roster)
         self._persist()
-        self._connect_roster()
+        self.reconcile_connections()
         self.push_to_roster()
         return {"node_id": self.node_id, "cluster_id": cluster_id,
                 "version": list(ver), "accepted": True}
@@ -458,15 +458,6 @@ class MembershipStore:
 
     # ── internals ───────────────────────────────────────────────────────
 
-    def _connect_roster(self) -> None:
-        live = {p.node_id for p in self._store.list_peers()}
-        for nid, addr in self.desired_peers().items():
-            if nid not in live:
-                try:
-                    self._store.connect_peer(addr)
-                except TransportError:
-                    pass
-
     def _become_standalone(self) -> None:
         with self._lock:
             members = [r.node_id for r in self._roster.values() if r.node_id != self.node_id]
@@ -476,7 +467,7 @@ class MembershipStore:
         self._persist()
 
     def _join_authorized(self, token: Optional[str]) -> bool:
-        auth = self._store._auth_store_getter()
+        auth = self._store.auth_store
         if auth is None:
             return True
         if not token:

@@ -137,6 +137,21 @@ class ClusterStore:
     def transport(self) -> Transport:
         return self._transport
 
+    @property
+    def state(self) -> ClusterState:
+        """Persisted cluster state (shared with the membership control plane)."""
+        return self._state
+
+    @property
+    def auth_store(self):
+        """The active auth store, or None on an open cluster."""
+        return self._auth_store_getter()
+
+    def authed(self, from_node: str, token: Optional[str] = None) -> bool:
+        """Public wrapper over the session-auth check, for the membership
+        control plane's RPC handlers."""
+        return self._authed(from_node, token)
+
     def next_version(self) -> Tuple[int, str]:
         """A fresh LWW version ``(updated_at_ms, node_id)`` drawn from the
         shared monotonic clock. Used by the membership control plane so its

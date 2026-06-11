@@ -154,7 +154,7 @@ def test_restart_rejoin_from_persisted_state(tmp_path):
     assert state.cluster_id == cid
     assert {m["node_id"] for m in state.last_roster} == {"B"}
     A2 = ClusterStoreFromState(state, t)
-    A2.membership = MembershipStore(A2, state)
+    A2.membership = MembershipStore(A2)
     t.register("A", A2)  # re-register the address → replaces old A
     assert A2.membership.cluster_id == cid
     assert A2.list_peers() == []           # sessions are memory-only, lost

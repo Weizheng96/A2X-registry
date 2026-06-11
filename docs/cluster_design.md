@@ -4,7 +4,7 @@
 
 模块是 **opt-in**：注册中心默认单机运行，直到执行 `a2x-registry cluster init` 生成 `cluster_state.json` 才启用。未启用时所有 `/api/cluster/*` 返回 404，读路径与单机完全一致。
 
-> **部署前提：全连接。** 本模块采用直接广播、**不做转发（no relay）**：一条记录由它的来源实例直接发给所有 peer。因此每个成员必须与其它每个成员都建立会话。这由 **§5 声明式成员控制面**自动维护——用户只在任一节点执行 `cluster set add`，系统据成员名册（roster）自动把全连接建好；不必再手动两两 `add-peer`。规模化（并发广播 / 连接池 / Merkle 反熵）见 §6，目标 ~1000 节点。
+> **部署前提：全连接。** 本模块采用直接广播、**不做转发（no relay）**：一条记录由它的来源实例直接发给所有 peer。因此每个成员与其它每个成员都建立会话。这由 **§5 声明式成员控制面**自动维护——用户在任一节点执行 `cluster set add`，系统据成员名册（roster）自动把全连接建好。规模化（并发广播 / 连接池 / Merkle 反熵）见 §6，目标 ~1000 节点。
 
 ---
 
@@ -100,8 +100,8 @@ sequenceDiagram
     A-->>Ag: 200 OK（本地写完立即返回，不等同步）
     A->>B: 直接推送该变更增量【POST /updates】
     A->>C: 直接推送该变更增量【POST /updates】
-    Note over B: 版本更新→落库；不再转发
-    Note over C: 版本更新→落库；不再转发
+    Note over B: 版本更新→落库；不转发
+    Note over C: 版本更新→落库；不转发
 ```
 
 **失活驱逐（直链 HOLD）**——成员离开 / 宕机后删除它的数据
@@ -160,11 +160,11 @@ flowchart LR
 
 - 每台主机 = 一组智能体 + 一个注册中心 server（FastAPI）+ 一个 cluster 模块（持有 foreign overlay 与会话表）。
 - 智能体只与**本地**注册中心交互（注册 / 查询）；查询时本地把“本地 entry + foreign 副本”合并返回。
-- 实例间只通过 HTTP `/api/cluster/*` 通信，**拓扑必须是全连接**（每对成员都两两建会话）。注册中心**自身不做邻居发现/自动连接**：每条链路由外部（链路层发现或人工）触发一次 `add-peer`（`POST /api/cluster/peers`），触发后握手 + 对账全自动；成员离开后其数据按 HOLD 自动失活清除。
+- 实例间只通过 HTTP `/api/cluster/*` 通信，**拓扑是全连接**（每对成员都建会话），由成员控制面（§5）据名册自动维护。注册中心**自身不做邻居发现**：成员的加入/移除由用户 `set add/remove`（或外部发现守护进程）触发一次，其余（建链、对账、失活清理）全自动。
 
 ### 1.4 类图
 
-`ClusterStore` 是核心，聚合“持久化状态 + 会话表 + foreign 副本”，并通过 `Transport` 与对端通信；两个后台守护线程驱动它做周期任务。
+`ClusterStore` 是核心，聚合"持久化状态 + 会话表 + foreign 副本"，并通过 `Transport` 与对端通信；`MembershipStore` 是附着其上的成员控制面（决定连谁），两个后台守护线程驱动周期任务。
 
 ```mermaid
 classDiagram
@@ -216,6 +216,14 @@ classDiagram
         +open/digest/pull/updates()
         +keepalive()
     }
+    class MembershipStore {
+        +cluster_id
+        +set_add/set_remove() 用户控制面
+        +adopt/leave_old() 入群/退老群
+        +merge(records) 名册LWW
+        +reconcile_connections() 名册→会话
+        +desired_peers()
+    }
     class HttpTransport
     class AntiEntropySweeper
     class KeepaliveMonitor
@@ -225,8 +233,10 @@ classDiagram
     ClusterStore --> "0..*" SyncEnvelope : foreign overlay
     ClusterStore --> ClusterConfig : 配置
     ClusterStore --> Transport : 对端通信
+    ClusterStore --> "0..1" MembershipStore : 成员控制面
+    MembershipStore --> ClusterStore : connect/disconnect 原语
     Transport <|.. HttpTransport
-    AntiEntropySweeper --> ClusterStore : 周期对账+GC
+    AntiEntropySweeper --> ClusterStore : 成员对账+周期对账+GC
     KeepaliveMonitor --> ClusterStore : 周期保活+HOLD驱逐
 ```
 
@@ -249,7 +259,7 @@ classDiagram
 | `GET /api/cluster/state` | HTTP 形式的状态快照 |
 | `GET /api/datasets/{ds}/services`（既有） | 查询服务列表，**自动合并对端同步来的副本** |
 
-> `add-peer`/`rm-peer`（`POST`/`DELETE /api/cluster/peers`）**降级为内部建连原语**：成员控制面据 roster 自动调用它们。仍保留可用于调试，但日常运维只用 `set`。
+> `add-peer`/`rm-peer`（`POST`/`DELETE /api/cluster/peers`）是**内部建连原语**：成员控制面据 roster 自动调用它们；也可手动用于调试。日常运维用 `set`。
 
 **节点间协议接口**（由其它注册中心自动调用，用户一般不直接使用）
 
@@ -417,7 +427,7 @@ curl http://127.0.0.1:8000/api/datasets/translators/services
 a2x-registry cluster set remove reg-b1c2d3   # 确定性移除：全网名册删除 + 该成员退回单机
 ```
 
-被动断开（成员离开 / 宕机但未 `set remove`）**无需任何操作**：其直连 peer 约 30s（`hold_timeout`）内收不到保活后自动断会话、删除其全部副本（并设抑制冷却防反熵复活）；成员恢复可达后，反熵 + 对账自动补齐（若曾持久化同一 cluster，则重启即自动重连）。
+被动断开（成员离开 / 宕机但未 `set remove`）**无需任何操作**：其直连 peer 约 30s（`hold_timeout`）内收不到保活后自动断会话、删除其全部副本（并设抑制冷却防反熵复活）；成员恢复可达后，反熵 + 对账自动补齐。成员的 `cluster_id` 已落盘，重启即据持久化名册自动重连。
 
 ---
 
@@ -433,7 +443,7 @@ a2x-registry cluster set remove reg-b1c2d3   # 确定性移除：全网名册删
 
 ## 5. 声明式成员控制面（`cluster/membership.py`）
 
-把"手动逐条 add-peer"升级为"声明式集群成员管理"：用户只在任一节点 `set add`，系统据名册自动维护全连接。成员面与数据面**解耦**——成员面决定"谁在 cluster、连谁"，数据面（§1）负责广播/失活/反熵。
+声明式集群成员管理：用户在任一节点 `set add/remove`，系统据成员名册（roster）自动维护全连接。成员面与数据面**解耦**——成员面决定"谁在 cluster、连谁"，数据面（§1）负责广播/失活/反熵。
 
 ### 5.1 成员记录（origin-only + LWW）
 
@@ -475,7 +485,7 @@ MembershipRecord { node_id, cluster_id|None, address, version=(ms,node_id), remo
 
 全连接直接广播稳态心跳是 O(N²)（用户已接受、确定性、无随机）。撑到 ~1000 的关键实现优化：
 
-- **并发非阻塞广播**：`_broadcast`/`emit_keepalive`/成员即时推走有界线程池（`broadcast_workers`，默认 32）并发发全员并等齐，把一次广播从 N 个串行超时压到 ~一个超时窗——单个死节点不再拖垮本地 CRUD。
+- **并发非阻塞广播**：`_broadcast`/`emit_keepalive`/成员即时推走有界线程池（`broadcast_workers`，默认 32）并发发全员并等齐，一次广播耗时 ~一个超时窗（而非 N 个串行超时之和）——单个死节点不会拖垮本地 CRUD。
 - **连接池 / keep-alive**：`HttpTransport` 持有长生命周期 `httpx.Client`（`trust_env=False` + keep-alive 池），跨调用复用 TCP，免每调用握手；大集群需把 `ulimit -n` 调到 ≥ 2×N。
 - **Merkle 反熵**：`reconcile` 先比 `merkle_buckets`（默认 256）个桶哈希（O(桶)），相等即收场；只有差异桶才传其记录行——稳态无变更时反熵几乎零传输。桶数须全网一致（不一致只是退化为更全的传输，仍正确）。
 - **调大心跳周期**：最有效的杠杆。大集群把 `keepalive_interval`/`hold_timeout`/`anti_entropy_interval` 调到 30~60s，以可接受的失活延迟换数量级更低的稳态流量。

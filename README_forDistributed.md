@@ -61,7 +61,7 @@ a2x-registry cluster set add http://<B_IP>:8000
 
 > **声明式**：A 首次 `set add` 会自动铸一个 `cluster_id`，把列出的成员拉进来并全连接；之后系统据名册自动维护连接、增量同步、失活清理。每个注册中心只属一个 cluster（并发声明由版本号 LWW 收敛）。
 > 链路层若有"发现对方"的自动化，也可直接调底层 HTTP：`POST http://<A_IP>:8000/api/cluster/set/add`，body `{"members":[{"address":"http://<B_IP>:8000"}]}`。
-> （`add-peer`/`rm-peer` 仍保留为内部建连原语，用于调试；日常运维只用 `set`。）
+> （`add-peer`/`rm-peer` 是内部建连原语，可用于调试；日常运维用 `set`。）
 
 ## 4. 验证
 
@@ -98,7 +98,7 @@ curl -s http://<B_IP>:8000/api/datasets/default/services
 ## 6. 失活与运维注意
 
 - **主动移除**：`a2x-registry cluster set remove <node_id>` 把成员从 cluster 确定性移除——全网名册立即删除它、该成员退回单机，不依赖失活超时。
-- **自动失活（兜底非优雅退出）**：某节点漂走/宕机但未 `set remove` 时，其直连 peer 在约 **30 秒**（`hold_timeout`）内收不到保活就断会话并删除它的全部副本。它恢复可达后，反熵自动补齐；若曾持久化同一 cluster，**重启即自动重连**（无需再次 `set add`）。
+- **自动失活（兜底非优雅退出）**：某节点漂走/宕机但未 `set remove` 时，其直连 peer 在约 **30 秒**（`hold_timeout`）内收不到保活就断会话并删除它的全部副本。它恢复可达后，反熵自动补齐；该节点的 `cluster_id` 已落盘，**重启即据持久化名册自动重连**（无需再次 `set add`）。
 
   **可人工配置失活时间窗**：失活耗时 ≈ `hold_timeout`，通过环境变量在**启动 server 前**设置（与 `A2X_REGISTRY_CLUSTER_ADVERTISE` 一样，server 启动时读取）。无需改代码；墓碑保留与驱逐后抑制时长（`tombstone_retention = hold_timeout + keepalive_interval`）会自动跟随。
 

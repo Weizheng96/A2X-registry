@@ -141,7 +141,7 @@ def run_warmup() -> None:
                 # (driven by the AntiEntropySweeper's first tick). Absent
                 # cluster_id → no peers desired → behaves like today.
                 from a2x_registry.cluster.membership import MembershipStore
-                cluster_store.membership = MembershipStore(cluster_store, cluster_store._state)
+                cluster_store.membership = MembershipStore(cluster_store)
                 # Replicate every local CRUD to peers (default no-op when off).
                 registry_svc.set_on_mutation(cluster_store.on_local_mutation)
                 # Background daemons (full-mesh): anti-entropy reconcile + GC,
