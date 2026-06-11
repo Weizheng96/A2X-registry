@@ -104,6 +104,17 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
+    # Stop background daemons BEFORE releasing the pool/transport, so a
+    # sweeper tick can't submit to an already-shut-down pool or use a closed
+    # HTTP client.
+    from a2x_registry.backend.startup import warmup_state
+    for key in ("_cluster_anti_entropy", "_cluster_keepalive", "_heartbeat_sweeper"):
+        sweeper = warmup_state.get(key)
+        if sweeper is not None:
+            try:
+                sweeper.stop()
+            except Exception:  # noqa: BLE001 — shutdown must not raise
+                pass
     # Release the cluster fan-out pool + pooled HTTP connections, if loaded.
     try:
         from a2x_registry.cluster.deps import get_cluster_store

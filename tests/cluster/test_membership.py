@@ -210,6 +210,74 @@ def test_join_requires_admin_token_when_auth_on(tmp_path):
     assert B.membership.cluster_id == A.membership.cluster_id
 
 
+def test_evict_and_leave_require_auth(tmp_path):
+    """On an auth cluster, /evicted and /leave can't be spoofed by an
+    unauthenticated caller (forced-partition / forged-removal DoS)."""
+    t = InProcessTransport()
+    admin = "adm"
+    auth = _Auth({admin: _Ctx(is_admin=True)})  # uniform auth across the cluster
+    A = build_store(tmp_path, "A", FakeRegistry(), t, auth_store=auth)
+    B = build_store(tmp_path, "B", FakeRegistry(), t, auth_store=auth)
+    A.membership.set_add([{"address": "B"}], token=admin)
+    assert B.membership.cluster_id is not None
+
+    # Unauthenticated / wrong-token control RPCs are rejected; B stays in.
+    assert B.membership.handle_evicted({"from_node": "A"})["ok"] is False
+    assert B.membership.handle_evicted({"from_node": "A", "token": "WRONG"})["ok"] is False
+    assert B.membership.handle_evict_self({"from_node": "A", "token": "WRONG"})["ok"] is False
+    assert B.membership.cluster_id is not None
+
+    # The legitimate removal path (proper session token) still works.
+    A.membership.set_remove([{"node_id": "B"}])
+    assert B.membership.cluster_id is None
+
+
+def test_membership_tombstone_gc(tmp_path):
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    A.membership.set_add([{"address": "B"}])
+    settle([A, B])
+    A.membership.set_remove([{"node_id": "B"}])
+    tomb = A.membership._roster["B"]
+    assert tomb.removed
+    ret = int(A.config.tombstone_retention * 1000)
+    # Within retention: kept (so peers/restarts can't resurrect B).
+    assert A.membership.gc_membership(now_ms=tomb.version[0] + ret - 1) == 0
+    assert "B" in A.membership._roster
+    # Past retention: pruned (bounded memory).
+    assert A.membership.gc_membership(now_ms=tomb.version[0] + ret + 1) == 1
+    assert "B" not in A.membership._roster
+
+
+def test_restart_keeps_tombstone_no_resurrection(tmp_path):
+    """A node removed while a peer was down stays removed after that peer
+    restarts: the tombstone survives restart and wins LWW over a stale live
+    record."""
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    C = build_store(tmp_path, "C", FakeRegistry(), t)
+    A.membership.set_add([{"address": "B"}, {"address": "C"}])
+    settle([A, B, C])
+    A.membership.set_remove([{"node_id": "C"}])
+    settle([A, B, C])
+
+    # "Restart" A from disk → the C tombstone is still there.
+    state = ClusterState.load(path=tmp_path / "A.json")
+    A2 = ClusterStoreFromState(state, t)
+    A2.membership = MembershipStore(A2)
+    t.register("A", A2)
+    assert A2.membership._roster["C"].removed
+
+    # A stale LIVE record for C (older version) cannot resurrect it.
+    A2.membership.merge([{
+        "node_id": "C", "cluster_id": A2.membership.cluster_id,
+        "address": "C", "version": [1, "C"], "removed": False,
+    }])
+    assert "C" not in {m["node_id"] for m in A2.membership.show()["roster"]}
+
+
 # ── helper: rebuild a ClusterStore from an existing state (restart sim) ──
 
 def ClusterStoreFromState(state, transport):

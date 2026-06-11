@@ -85,9 +85,10 @@ class ClusterState:
     # The cluster this node belongs to (None = standalone). Survives restart
     # so the node rejoins its cluster automatically.
     cluster_id: Optional[str] = None
-    # Last-known roster as [{node_id, address}, ...] — seeds auto-reconnect on
-    # restart (foreign roster overlay is memory-only). Best-effort; the live
-    # set re-converges via membership anti-entropy once peers reconnect.
+    # Last-known roster as membership-record dicts (live members + recent
+    # removal tombstones) — seeds auto-reconnect on restart and preserves the
+    # removal window so a node removed while offline isn't resurrected. The
+    # live set re-converges via membership anti-entropy once peers reconnect.
     last_roster: List[dict] = field(default_factory=list)
     # Version (updated_at_ms, node_id) of THIS node's own membership record,
     # so a re-adopt after restart stays monotonic under LWW.

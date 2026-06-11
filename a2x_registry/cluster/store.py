@@ -172,6 +172,22 @@ class ClusterStore:
             self._state.version_clock = ts
             return (ts, self.node_id)
 
+    def observe_version(self, ms: int) -> None:
+        """Advance the version clock to at least ``ms`` (e.g. a membership
+        version restored from disk) so future local mints stay monotonic
+        against it."""
+        with self._lock:
+            if ms > self._state.version_clock:
+                self._state.version_clock = ms
+
+    def save_state(self) -> None:
+        """Persist cluster state under the store lock. All writers go through
+        here (or ``_state.save`` while already holding the lock), so a
+        membership persist can't race a service-side ``to_dict`` mid-mutation
+        and two writers can't lose each other's snapshot."""
+        with self._lock:
+            self._state.save()
+
     # ── versioning (monotonic, survives clock step-back) ────────────────
 
     def _next_ts(self) -> int:

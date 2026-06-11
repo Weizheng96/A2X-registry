@@ -42,8 +42,14 @@ class AntiEntropySweeper:
             except Exception as exc:  # noqa: BLE001 — never kill the loop
                 logger.warning("cluster: anti-entropy reconcile with %s failed: %s",
                                peer.node_id, exc)
-        self._store.gc_tombstones()
-        self._store.prune_suppression()
+        # Memory hygiene — guarded so a blip here can't skip the rest.
+        try:
+            self._store.gc_tombstones()
+            self._store.prune_suppression()
+            if self._store.membership is not None:
+                self._store.membership.gc_membership()
+        except Exception as exc:  # noqa: BLE001 — never kill the loop
+            logger.warning("cluster: GC pass failed: %s", exc)
 
     def _reconcile_membership(self) -> None:
         """Drive the session set toward the declarative roster (membership

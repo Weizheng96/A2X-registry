@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -121,24 +122,35 @@ class MembershipStore:
 
     def _init_from_state(self) -> None:
         """Seed the overlay from persisted state so a restart rejoins the
-        same cluster and auto-reconnects the mesh (last_roster addresses)."""
+        same cluster, auto-reconnects the mesh, and still remembers recent
+        removals (tombstones) for the retention window."""
         cid = self._state.cluster_id
         if cid is None:
             return
-        ver = (
-            tuple(self._state.my_membership_version)
-            if self._state.my_membership_version
-            else self._store.next_version()
-        )
+        mmv = self._state.my_membership_version
+        if mmv:
+            # Keep the shared version clock monotonic against our restored
+            # membership version, so the next local mint can't regress.
+            self._store.observe_version(mmv[0])
+        ver = tuple(mmv) if mmv else self._store.next_version()
         self._roster[self.node_id] = MembershipRecord(
             self.node_id, cid, self._store.advertise, ver, False,
         )
-        # Placeholder (0, nid) versions — any genuine record supersedes them;
-        # they exist only to drive the first auto-reconnect.
-        for m in self._state.last_roster or []:
-            nid, addr = m.get("node_id"), m.get("address", "")
-            if nid and nid != self.node_id and nid not in self._roster:
-                self._roster[nid] = MembershipRecord(nid, cid, addr, (0, nid), False)
+        for d in self._state.last_roster or []:
+            try:
+                if "version" in d:
+                    rec = MembershipRecord.from_dict(d)
+                else:  # legacy {node_id, address} hint
+                    nid = d.get("node_id")
+                    if not nid:
+                        continue
+                    rec = MembershipRecord(nid, cid, d.get("address", ""), (0, nid), False)
+            except Exception:  # noqa: BLE001 — skip a malformed record
+                continue
+            if rec.node_id != self.node_id and rec.node_id not in self._roster:
+                self._roster[rec.node_id] = rec
+        # Forget removals already past the retention window.
+        self.gc_membership()
 
     # ── LWW merge (inbound) ─────────────────────────────────────────────
 
@@ -383,14 +395,22 @@ class MembershipStore:
                 pass
         for nid, _ in members:
             self._store.disconnect_peer(nid)
+        # Drop only the old cluster's records — keep ourselves and anything a
+        # concurrent inbound merge learned about the new cluster during the
+        # network window above (a blind reset would lose those).
         with self._lock:
-            own = self._roster.get(self.node_id)
-            self._roster = {self.node_id: own} if own else {}
+            self._roster = {
+                n: r for n, r in self._roster.items()
+                if n == self.node_id or r.cluster_id != old_cluster_id
+            }
 
     def handle_evict_self(self, body: dict) -> dict:
-        """A peer is gracefully leaving our cluster → tombstone it + drop it."""
+        """A peer is gracefully leaving our cluster → tombstone it + drop it.
+        Authenticated: the leaver proves its session, so a spoofer can't forge
+        a removal tombstone for an arbitrary victim (open cluster → no-op
+        gate, consistent with the rest of the open-cluster trust model)."""
         nid = body.get("from_node")
-        if not nid:
+        if not nid or not self._store.authed(nid, body.get("token")):
             return {"ok": False}
         with self._lock:
             cur = self._roster.get(nid)
@@ -406,7 +426,12 @@ class MembershipStore:
         return {"ok": True}
 
     def handle_evicted(self, body: dict) -> dict:
-        """We were removed from our cluster → revert to standalone."""
+        """We were removed from our cluster → revert to standalone.
+        Authenticated: only a peer with a valid session (i.e. the removing
+        coordinator) can force this, so an unauthenticated caller can't
+        partition us off the cluster (open cluster → no-op gate)."""
+        if not self._store.authed(body.get("from_node", ""), body.get("token")):
+            return {"ok": False}
         self._become_standalone()
         return {"ok": True}
 
@@ -484,17 +509,37 @@ class MembershipStore:
                 return p.token
         return None
 
+    def gc_membership(self, now_ms: Optional[int] = None) -> int:
+        """Drop removal tombstones older than the retention window so the
+        roster overlay stays bounded. Retention ≥ the HOLD/eviction window, so
+        every peer has seen the removal before we forget it (preventing a
+        late-returning node from being resurrected). Returns the count pruned.
+        Mirrors ``ClusterStore.gc_tombstones`` for the membership plane."""
+        if now_ms is None:
+            now_ms = time.time_ns() // 1_000_000
+        retention_ms = int(self._store.config.tombstone_retention * 1000)
+        with self._lock:
+            stale = [
+                nid for nid, r in self._roster.items()
+                if r.removed and now_ms - r.version[0] > retention_ms
+            ]
+            for nid in stale:
+                del self._roster[nid]
+        return len(stale)
+
     def _persist(self) -> None:
         with self._lock:
             own = self._roster.get(self.node_id)
             cid = own.cluster_id if own else None
-            live = [
-                {"node_id": r.node_id, "address": r.address}
-                for r in self._roster.values()
-                if not r.removed and r.node_id != self.node_id and r.cluster_id == cid
+            # Persist live members AND recent tombstones (so a restart keeps
+            # the removal window — a node removed while offline can't be
+            # resurrected by a peer that restarted and forgot the tombstone).
+            records = [
+                r.to_dict() for r in self._roster.values()
+                if r.node_id != self.node_id and r.cluster_id == cid
             ]
             mmv = list(own.version) if own else None
         self._state.cluster_id = cid
-        self._state.last_roster = live
+        self._state.last_roster = records
         self._state.my_membership_version = mmv
-        self._state.save()
+        self._store.save_state()

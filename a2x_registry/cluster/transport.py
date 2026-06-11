@@ -104,11 +104,14 @@ class HttpTransport(Transport):
         self._timeout = timeout
         self._client = None
         self._client_lock = threading.Lock()
+        self._closed = False
 
     def _get_client(self):
         client = self._client
         if client is None:
             with self._client_lock:
+                if self._closed:
+                    raise TransportError("transport closed")
                 if self._client is None:
                     import httpx
                     # trust_env=False → ignore system proxies (localhost
@@ -139,10 +142,13 @@ class HttpTransport(Transport):
         return resp.json()
 
     def close(self) -> None:
-        """Close the pooled client (server shutdown). Idempotent."""
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        """Close the pooled client (server shutdown). Idempotent; blocks a
+        post-close lazy re-init via the ``_closed`` flag."""
+        with self._client_lock:
+            self._closed = True
+            if self._client is not None:
+                self._client.close()
+                self._client = None
 
     def open(self, address: str, body: dict) -> dict:
         return self._call(address, "POST", "/api/cluster/sessions", json=body)
