@@ -8,7 +8,7 @@ loop (connect/disconnect + record/membership deltas) to a fixed point.
 from __future__ import annotations
 
 from a2x_registry.cluster.state import ClusterState
-from a2x_registry.cluster.membership import MembershipStore
+from a2x_registry.cluster.membership import MembershipStore, MembershipRecord
 
 from .helpers import (
     FakeRegistry, InProcessTransport, build_store, converge, settle, visible,
@@ -276,6 +276,121 @@ def test_restart_keeps_tombstone_no_resurrection(tmp_path):
         "address": "C", "version": [1, "C"], "removed": False,
     }])
     assert "C" not in {m["node_id"] for m in A2.membership.show()["roster"]}
+
+
+def test_set_add_unreachable_member_reports_failure(tmp_path):
+    """An unreachable member is reported ok:false (no silent half-join); the
+    coordinator doesn't gain a phantom roster entry for it."""
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    res = A.membership.set_add([{"address": "B"}, {"address": "GHOST"}])
+    by_addr = {r["address"]: r for r in res["results"]}
+    assert by_addr["B"]["ok"] is True
+    assert by_addr["GHOST"]["ok"] is False
+    # Only the reachable member is in the roster.
+    assert _ids(A.membership.show()) == {"A", "B"}
+
+
+def test_set_add_to_existing_cluster_keeps_id(tmp_path):
+    """Adding a member to an existing cluster reuses the cluster_id."""
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    C = build_store(tmp_path, "C", FakeRegistry(), t)
+    A.membership.set_add([{"address": "B"}])
+    settle([A, B])
+    cid = A.membership.cluster_id
+    A.membership.set_add([{"address": "C"}])
+    settle([A, B, C])
+    assert A.membership.cluster_id == cid
+    for s in (A, B, C):
+        assert s.membership.cluster_id == cid
+        assert _ids(s.membership.show()) == {"A", "B", "C"}
+
+
+def test_set_remove_then_re_add_rejoins(tmp_path):
+    """A removed member can be added back (the tombstone is superseded)."""
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    A.membership.set_add([{"address": "B"}])
+    settle([A, B])
+    A.membership.set_remove([{"node_id": "B"}])
+    settle([A, B])
+    assert "B" not in _ids(A.membership.show())
+    assert B.membership.cluster_id is None
+
+    # Re-add B → it rejoins the same cluster (re-add out-versions the tombstone).
+    A.membership.set_add([{"address": "B"}])
+    settle([A, B])
+    assert "B" in _ids(A.membership.show())
+    assert not A.membership._roster["B"].removed
+    assert B.membership.cluster_id == A.membership.cluster_id
+
+
+def test_leave_old_preserves_other_cluster_records(tmp_path):
+    """leave_old drops only the old cluster's records, keeping ourselves and
+    any record from another cluster a concurrent merge may have learned."""
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    A.membership.set_add([{"address": "B"}])
+    settle([A, B])
+    old = A.membership.cluster_id
+    # Simulate a record from a different cluster already in the overlay.
+    A.membership._roster["Z"] = MembershipRecord("Z", "clu-other", "Z", (99, "Z"), False)
+
+    A.membership.leave_old(old)
+
+    assert "B" not in A.membership._roster          # old-cluster member dropped
+    assert "A" in A.membership._roster              # self kept
+    assert "Z" in A.membership._roster              # other-cluster record kept
+
+
+def test_node_learns_removal_via_anti_entropy(tmp_path):
+    """Even if the direct /evicted notify is lost, a removed node that pulls a
+    peer's tombstone via anti-entropy reverts to standalone."""
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    A.membership.set_add([{"address": "B"}])
+    settle([A, B])
+    cid = B.membership.cluster_id
+
+    # Simulate B receiving its own removal tombstone via merge (anti-entropy)
+    # rather than the direct notify.
+    tomb_ver = [B.membership._roster["B"].version[0] + 1000, "A"]
+    changed = B.membership.merge([{
+        "node_id": "B", "cluster_id": cid, "address": "B",
+        "version": tomb_ver, "removed": True,
+    }])
+    assert changed is True
+    assert B.membership.cluster_id is None             # reverted to standalone
+    assert B.list_peers() == []                        # dropped its sessions
+
+
+def test_reconcile_keeps_unreachable_member_drops_removed(tmp_path):
+    """reconcile_connections must not disconnect a transiently-unreachable but
+    still-wanted member; it must disconnect a removed one."""
+    t = InProcessTransport()
+    A = build_store(tmp_path, "A", FakeRegistry(), t)
+    B = build_store(tmp_path, "B", FakeRegistry(), t)
+    C = build_store(tmp_path, "C", FakeRegistry(), t)
+    A.membership.set_add([{"address": "B"}, {"address": "C"}])
+    settle([A, B, C])
+    assert {"B", "C"} <= {p.node_id for p in A.list_peers()}
+
+    # C becomes unreachable but stays in the roster → must NOT be dropped.
+    t.cut("A", "C")
+    A.membership.reconcile_connections()
+    assert "C" in {p.node_id for p in A.list_peers()}
+
+    # After an explicit removal it IS dropped.
+    t.dropped.clear()
+    A.membership.set_remove([{"node_id": "C"}])
+    A.membership.reconcile_connections()
+    assert "C" not in {p.node_id for p in A.list_peers()}
 
 
 # ── helper: rebuild a ClusterStore from an existing state (restart sim) ──

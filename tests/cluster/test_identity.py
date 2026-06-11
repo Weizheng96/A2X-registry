@@ -79,6 +79,28 @@ def test_save_load_roundtrip(tmp_path):
     assert tomb.deleted_at_ms == 2000
 
 
+def test_membership_fields_roundtrip(tmp_path):
+    """cluster_id / last_roster / my_membership_version survive save+load."""
+    p = tmp_path / "cluster_state.json"
+    state = ClusterState.init(node_id="reg-m", path=p)
+    state.cluster_id = "clu-abc123"
+    state.last_roster = [
+        {"node_id": "B", "cluster_id": "clu-abc123", "address": "http://b:8000",
+         "version": [10, "B"], "removed": False},
+        {"node_id": "C", "cluster_id": "clu-abc123", "address": "http://c:8000",
+         "version": [20, "A"], "removed": True},  # a tombstone must persist
+    ]
+    state.my_membership_version = [5, "reg-m"]
+    state.save()
+
+    loaded = ClusterState.load(path=p)
+    assert loaded.cluster_id == "clu-abc123"
+    assert loaded.my_membership_version == [5, "reg-m"]
+    by_id = {r["node_id"]: r for r in loaded.last_roster}
+    assert by_id["B"]["removed"] is False and by_id["B"]["version"] == [10, "B"]
+    assert by_id["C"]["removed"] is True  # removal tombstone preserved
+
+
 def test_load_or_none_corrupt_file_is_defensive(tmp_path, monkeypatch):
     """A corrupt cluster_state.json must not crash startup — load_or_none
     logs and returns None (registry stays standalone)."""

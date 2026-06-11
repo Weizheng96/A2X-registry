@@ -103,17 +103,24 @@ class InProcessTransport(Transport):
     def keepalive(self, address, from_node, token=None):
         return self._target(from_node, address).handle_keepalive(from_node, token)
 
+    def _reg(self, address: str) -> ClusterStore:
+        """Resolve an address; an unregistered one models an unreachable peer."""
+        from a2x_registry.cluster.transport import TransportError
+        if address not in self._stores:
+            raise TransportError(f"unreachable: {address}")
+        return self._stores[address]
+
     # ── membership control plane ────────────────────────────────────────
-    # join/evict/evict_self are control ops (never partition-tested, like
-    # open); set_digest/pull/sync ride the partition-able link.
+    # join/evict/evict_self are control ops (an unknown address = unreachable);
+    # set_digest/pull/sync ride the partition-able link.
     def join(self, address, body):
-        return self._stores[address].membership.handle_join(body)
+        return self._reg(address).membership.handle_join(body)
 
     def evict(self, address, body):
-        return self._stores[address].membership.handle_evicted(body)
+        return self._reg(address).membership.handle_evicted(body)
 
     def evict_self(self, address, body):
-        return self._stores[address].membership.handle_evict_self(body)
+        return self._reg(address).membership.handle_evict_self(body)
 
     def set_digest(self, address, from_node, token=None):
         return self._target(from_node, address).membership.serve_set_digest(from_node, token)

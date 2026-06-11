@@ -28,6 +28,14 @@ def test_override_hold_and_keepalive(monkeypatch):
     assert cfg.http_timeout == 5.0
 
 
+def test_override_scale_knobs(monkeypatch):
+    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_BROADCAST_WORKERS", "64")
+    monkeypatch.setenv("A2X_REGISTRY_CLUSTER_MERKLE_BUCKETS", "512")
+    cfg = ClusterConfig.from_env()
+    assert cfg.broadcast_workers == 64 and isinstance(cfg.broadcast_workers, int)
+    assert cfg.merkle_buckets == 512 and isinstance(cfg.merkle_buckets, int)
+
+
 def test_float_field_accepts_int_string(monkeypatch):
     monkeypatch.setenv("A2X_REGISTRY_CLUSTER_HOLD_TIMEOUT", "20")
     assert ClusterConfig.from_env().hold_timeout == 20.0

@@ -112,3 +112,32 @@ def test_merkle_transfers_only_on_change(tmp_path):
     assert t.n_digest == d0 + 1          # a bucket differed → one row fetch
     assert res["pulled"] == 1            # pulled the new record
     assert any(r["name"] == "b-new" for r in A.foreign_wrapped("ds"))
+
+
+def test_http_transport_pools_and_close_guard(tmp_path):
+    import pytest
+    httpx = pytest.importorskip("httpx")
+    from a2x_registry.cluster.transport import HttpTransport, TransportError
+
+    tr = HttpTransport(timeout=1.0)
+    c1 = tr._get_client()
+    c2 = tr._get_client()
+    assert c1 is c2                      # one pooled client reused across calls
+    assert isinstance(c1, httpx.Client)
+
+    tr.close()
+    tr.close()                           # idempotent
+    with pytest.raises(TransportError):  # no lazy re-init after close
+        tr._get_client()
+
+
+def test_store_close_idempotent(tmp_path):
+    store = ClusterStore(
+        ClusterState.init(node_id="A", path=tmp_path / "A.json"),
+        config=ClusterConfig(), registry_svc=FakeRegistry(),
+        transport=_SleepTransport(0.0), advertise="A",
+        auth_store_getter=(lambda: None),
+    )
+    store.fan_out([lambda: None])        # spin up the pool
+    store.close()
+    store.close()                        # second close must not raise
