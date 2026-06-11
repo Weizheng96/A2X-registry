@@ -81,6 +81,17 @@ class ClusterState:
     local_versions: Dict[str, list] = field(default_factory=dict)
     # composite key -> Tombstone
     tombstones: Dict[str, Tombstone] = field(default_factory=dict)
+    # ── membership control plane (added with the cluster-set feature) ──
+    # The cluster this node belongs to (None = standalone). Survives restart
+    # so the node rejoins its cluster automatically.
+    cluster_id: Optional[str] = None
+    # Last-known roster as [{node_id, address}, ...] — seeds auto-reconnect on
+    # restart (foreign roster overlay is memory-only). Best-effort; the live
+    # set re-converges via membership anti-entropy once peers reconnect.
+    last_roster: List[dict] = field(default_factory=list)
+    # Version (updated_at_ms, node_id) of THIS node's own membership record,
+    # so a re-adopt after restart stays monotonic under LWW.
+    my_membership_version: Optional[list] = None
     path: Optional[Path] = None
 
     # ── persistence ─────────────────────────────────────────────────────
@@ -97,11 +108,17 @@ class ClusterState:
             k: Tombstone(version=tuple(v["version"]), deleted_at_ms=int(v["deleted_at_ms"]))
             for k, v in (raw.get("tombstones") or {}).items()
         }
+        mmv = raw.get("my_membership_version")
         return cls(
             node_id=raw["node_id"],
             version_clock=int(raw.get("version_clock", 0)),
             local_versions={k: list(v) for k, v in (raw.get("local_versions") or {}).items()},
             tombstones=tombstones,
+            # Forward-compatible: a state file written before the membership
+            # feature lacks these keys → defaults keep the node standalone.
+            cluster_id=raw.get("cluster_id"),
+            last_roster=list(raw.get("last_roster") or []),
+            my_membership_version=list(mmv) if mmv else None,
             path=p,
         )
 
@@ -134,4 +151,9 @@ class ClusterState:
                 k: {"version": list(t.version), "deleted_at_ms": t.deleted_at_ms}
                 for k, t in self.tombstones.items()
             },
+            "cluster_id": self.cluster_id,
+            "last_roster": self.last_roster,
+            "my_membership_version": (
+                list(self.my_membership_version) if self.my_membership_version else None
+            ),
         }

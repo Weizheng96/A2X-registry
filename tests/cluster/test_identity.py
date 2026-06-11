@@ -42,6 +42,9 @@ def test_init_writes_file(tmp_path):
         "version_clock": 0,
         "local_versions": {},
         "tombstones": {},
+        "cluster_id": None,
+        "last_roster": [],
+        "my_membership_version": None,
     }
 
 

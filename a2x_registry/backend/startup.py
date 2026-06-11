@@ -136,6 +136,12 @@ def run_warmup() -> None:
             )
             set_cluster_store(cluster_store)
             if cluster_store is not None:
+                # Declarative membership control plane. Attaching it lets the
+                # node rejoin its persisted cluster + auto-reconnect the mesh
+                # (driven by the AntiEntropySweeper's first tick). Absent
+                # cluster_id → no peers desired → behaves like today.
+                from a2x_registry.cluster.membership import MembershipStore
+                cluster_store.membership = MembershipStore(cluster_store, cluster_store._state)
                 # Replicate every local CRUD to peers (default no-op when off).
                 registry_svc.set_on_mutation(cluster_store.on_local_mutation)
                 # Background daemons (full-mesh): anti-entropy reconcile + GC,

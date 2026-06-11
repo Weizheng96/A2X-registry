@@ -48,18 +48,20 @@ a2x-registry --host 0.0.0.0 --port 8000
 
 到此两个节点都已就绪，但还**没有建立连接**。
 
-## 3. 建立连接（在任一节点上做一次即可）
+## 3. 组建集群（在任一节点上声明一次即可）
 
-在**节点 A**上，把 B 接进来（"先发现方"发起，一条命令完成建链 + 双向首次对账）：
+在**节点 A**上，把 B（以及更多成员）声明进同一个 cluster——系统据成员名册（roster）**自动建好全连接**，不必逐条手动连：
 
 ```bash
-a2x-registry cluster add-peer http://<B_IP>:8000
+a2x-registry cluster set add http://<B_IP>:8000
+# 多个一次性加：a2x-registry cluster set add http://<B_IP>:8000 http://<C_IP>:8000
 ```
 
-返回 `{"peer": {"node_id": "B", ...}}` 即成功。
+返回 `{"cluster_id": "clu-…", "results": [{"node_id":"B","ok":true}, ...]}` 即成功。
 
-> **只需单向做一次**：发起方会与对端做双向对账（拉取对方、推送自己），两端随即收敛。在 B 上对 A 再做一次也无妨（幂等）。
-> 链路层若有"发现对方"的自动化，也可直接调底层 HTTP：`POST http://<A_IP>:8000/api/cluster/peers`，body `{"address":"http://<B_IP>:8000"}`。
+> **声明式**：A 首次 `set add` 会自动铸一个 `cluster_id`，把列出的成员拉进来并全连接；之后系统据名册自动维护连接、增量同步、失活清理。每个注册中心只属一个 cluster（并发声明由版本号 LWW 收敛）。
+> 链路层若有"发现对方"的自动化，也可直接调底层 HTTP：`POST http://<A_IP>:8000/api/cluster/set/add`，body `{"members":[{"address":"http://<B_IP>:8000"}]}`。
+> （`add-peer`/`rm-peer` 仍保留为内部建连原语，用于调试；日常运维只用 `set`。）
 
 ## 4. 验证
 
@@ -74,7 +76,7 @@ curl -s -X POST http://<A_IP>:8000/api/datasets/default/services/generic \
 curl -s http://<B_IP>:8000/api/datasets/default/services
 ```
 
-也可用 `a2x-registry cluster status --server http://<A_IP>:8000` 查看会话与副本数。客户端 SDK 的 `list_agents`/`get_agent` 会自动包含这些同步来的副本，无需改代码。
+也可用 `a2x-registry cluster set show --server http://<A_IP>:8000` 看 cluster_id 与名册，或 `cluster status` 看会话与副本数。客户端 SDK 的 `list_agents`/`get_agent` 会自动包含这些同步来的副本，无需改代码。
 
 > 同步来的记录是**只读副本**：要修改 / 注销，须到它的来源节点操作（改动会增量同步回来）。
 
@@ -83,20 +85,20 @@ curl -s http://<B_IP>:8000/api/datasets/default/services
 ## 5. 鉴权（可选）
 
 - 若两节点都**没启用鉴权**（未跑 `a2x-registry auth init`）：集群完全开放，上面的步骤无需任何 token。
-- 若对端某命名空间**要求鉴权**：`add-peer` 加 `--token <provider/admin token>`：
+- 若被加成员**启用了鉴权**：`set add` 加 `--token <admin token>`（"拉人入群"按 admin 门控，语义同新建临时命名空间）：
   ```bash
-  a2x-registry cluster add-peer http://<B_IP>:8000 --token a2x_pat_xxx
+  a2x-registry cluster set add http://<B_IP>:8000 --token a2x_pat_xxx
   ```
-  - 该命名空间在对端不存在 → 需 `admin` token（对端会建临时副本承载）。
-  - 该命名空间在对端存在且要求鉴权 → 需该命名空间的 `provider`/`admin` token。
-  - 不带 token → 只能同步对端不要求鉴权的命名空间。
+  - 被加成员开鉴权而 token 缺失/非 admin → 该成员被拒绝加入（`results` 里 `ok:false`，不会静默半连接）。
+  - 无鉴权成员直接接受。
 - 启用鉴权后，握手会签发会话令牌，后续节点间调用自动携带校验，防止身份冒充。
 
 ---
 
 ## 6. 失活与运维注意
 
-- **自动失活**：某节点漂走/宕机后，其直连 peer 在约 **30 秒**（`hold_timeout`）内收不到它的直链保活，就断会话并自动删除它的全部副本，无需人工干预。它恢复可达后重新 `add-peer` 即可补齐。
+- **主动移除**：`a2x-registry cluster set remove <node_id>` 把成员从 cluster 确定性移除——全网名册立即删除它、该成员退回单机，不依赖失活超时。
+- **自动失活（兜底非优雅退出）**：某节点漂走/宕机但未 `set remove` 时，其直连 peer 在约 **30 秒**（`hold_timeout`）内收不到保活就断会话并删除它的全部副本。它恢复可达后，反熵自动补齐；若曾持久化同一 cluster，**重启即自动重连**（无需再次 `set add`）。
 
   **可人工配置失活时间窗**：失活耗时 ≈ `hold_timeout`，通过环境变量在**启动 server 前**设置（与 `A2X_REGISTRY_CLUSTER_ADVERTISE` 一样，server 启动时读取）。无需改代码；墓碑保留与驱逐后抑制时长（`tombstone_retention = hold_timeout + keepalive_interval`）会自动跟随。
 
@@ -114,24 +116,28 @@ curl -s http://<B_IP>:8000/api/datasets/default/services
   | `A2X_REGISTRY_CLUSTER_KEEPALIVE_INTERVAL` | 10 | 直链保活广播周期(秒)；墓碑/抑制保留 = hold + keepalive |
   | `A2X_REGISTRY_CLUSTER_ANTI_ENTROPY_INTERVAL` | 20 | 反熵对账 + GC 周期(秒) |
   | `A2X_REGISTRY_CLUSTER_HTTP_TIMEOUT` | 5 | 单次对端调用超时(秒) |
+  | `A2X_REGISTRY_CLUSTER_BROADCAST_WORKERS` | 32 | 并发广播/保活线程池上限（规模化） |
+  | `A2X_REGISTRY_CLUSTER_MERKLE_BUCKETS` | 256 | Merkle 反熵桶数；**须全网一致** |
 
   > 建议**各节点设成一致**；不一致只会导致各节点驱逐时刻略有先后（已由内部抑制机制兜底，不会误删）。非法值会被忽略并回退默认。
+  > **大集群（数百~千节点）调参**：把心跳周期调到 30~60s（最有效的省流杠杆），并把 OS 文件句柄上限 `ulimit -n` 调到 ≥ 2×节点数（全连接每节点持 N−1 条长连接）。
 
 - **advertise 必须可达**：`A2X_REGISTRY_CLUSTER_ADVERTISE` 要填**对端访问得到**的地址（局域网 IP / 域名），不能是 `127.0.0.1`（除非同机调试）。填错会导致对端无法回连本节点，反向同步失效。
-- **重启后需重新建链**：同步来的副本只在内存、不落盘；server 重启后会话丢失，需重新 `add-peer`（本节点自有数据已持久化，不会丢）。
-- **新建命名空间**：建链后新创建的 dataset 不会自动纳入已有会话，需再 `add-peer` 一次刷新（已有命名空间内的服务增删改实时同步，无需重连）。
+- **重启自动重连**：`cluster_id` 与名册已落盘；server 重启后据此自动重连全连接、反熵补齐副本（副本本身只在内存，会重新同步）。无需再 `set add`。
+- **新建命名空间**：建 cluster 后新创建的 dataset 不会自动纳入已有会话，需再 `set add`（或在各节点重连）一次刷新（已有命名空间内的服务增删改实时同步）。
 - **localhost 代理**：若本机有系统代理（Clash/VPN），自己发的 HTTP 请求设 `export NO_PROXY=127.0.0.1,localhost`；`a2x-registry cluster` 系列命令内部已自动绕过代理。
 
 ---
 
 ## 7. 扩展到更多节点
 
-**拓扑必须是全连接**（每对成员都直连）：本模块直接广播、**不做转发**，未直连的两个节点学不到对方的数据。**对每一对成员各 `add-peer` 一次**即可：
+底层拓扑是**全连接**（每对成员都直连，无转发），但你**不必手动建每条边**——成员控制面据名册自动维护：
 
-- **3 节点 A、B、C**：建 A—B、B—C、A—C 三条边（任一端发起一次即建好双向会话）。
-- **N 节点**：共 `N×(N−1)/2` 条边，对每对各建一次。
-- **节点移动 / 拓扑变化**：注册中心**自身不做发现、不会自动连接新邻居**——"两节点进入彼此可达范围"这一事件由**外部**（链路层发现守护进程或人工）感知，并对**新成员与每个现有成员**各调用一次 `add-peer`（或 `POST /api/cluster/peers`）补齐全连接。一旦触发，握手 + 双向对账全自动；与此同时，已失联的旧来源数据按失活规则（~30s HOLD）自动清除。
-  > 例：A 漂离原集群进入新集群 {D, E} —— A 会先自动失活清除旧集群副本；待外部对 A↔D、A↔E 各触发一次 `add-peer` 后，A 与新集群全连接并自动对账补齐。**建链这一步需要外部触发，不会自动发生。**
+- **一条命令成群**：在任一节点 `cluster set add <addr1> <addr2> ...` 把所有成员声明进同一 cluster，系统自动建好 `N×(N−1)/2` 条全连接边并持续维护。
+- **扩容**：对集群中任一节点再 `set add <新成员地址>` 即可；新成员经 bootstrap 拿到全名册并连上每个现有成员。
+- **缩容**：`set remove <node_id>` 确定性移除。
+- **节点移动 / 拓扑变化**：注册中心**自身不做发现**——"成员进入可达范围"这一事件由**外部**（链路层发现守护进程或人工）感知后调用一次 `set add` 即可；其余（全连接、对账、失活清理、退老群）全自动。
+  > 例：A 漂离原集群进入新集群 {D, E} —— 对 D 或 E 执行一次 `set add <A 地址>`，A 会**主动优雅退出**旧集群（旧成员立即移除它）、采纳新 cluster 并与 D、E 全连接对账。**这一步的触发需要外部感知，不会凭空发生。**
 
 ---
 

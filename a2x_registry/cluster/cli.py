@@ -94,6 +94,35 @@ def cmd_rm_peer(args: argparse.Namespace) -> int:
     return _print_resp_or_404(resp)
 
 
+def cmd_set_add(args: argparse.Namespace) -> int:
+    body = {
+        "members": [{"address": a} for a in args.addresses],
+        "token": args.token,
+    }
+    resp, err = _client_call(args.server, "POST", "/api/cluster/set/add", json=body)
+    if err:
+        print(f"error: {err}")
+        return 1
+    return _print_resp_or_404(resp)
+
+
+def cmd_set_remove(args: argparse.Namespace) -> int:
+    body = {"members": [{"node_id": n} for n in args.node_ids]}
+    resp, err = _client_call(args.server, "POST", "/api/cluster/set/remove", json=body)
+    if err:
+        print(f"error: {err}")
+        return 1
+    return _print_resp_or_404(resp)
+
+
+def cmd_set_show(args: argparse.Namespace) -> int:
+    resp, err = _client_call(args.server, "GET", "/api/cluster/set")
+    if err:
+        print(f"error: {err}")
+        return 1
+    return _print_resp_or_404(resp)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="a2x-registry cluster")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -123,6 +152,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("--server", default=DEFAULT_SERVER,
                       help=f"This instance's base URL (default: {DEFAULT_SERVER})")
     p_rm.set_defaults(func=cmd_rm_peer)
+
+    # ── declarative membership (primary user interface) ──────────────────
+    p_set = sub.add_parser("set", help="Declaratively manage cluster membership")
+    set_sub = p_set.add_subparsers(dest="set_cmd", required=True)
+
+    p_set_add = set_sub.add_parser(
+        "add", help="Add members to this node's cluster (auto full-mesh)")
+    p_set_add.add_argument("addresses", nargs="+",
+                           help="Member base URLs, e.g. http://10.0.0.2:8000")
+    p_set_add.add_argument("--token", default=None,
+                           help="Admin API key, if the members require auth")
+    p_set_add.add_argument("--server", default=DEFAULT_SERVER,
+                           help=f"This instance's base URL (default: {DEFAULT_SERVER})")
+    p_set_add.set_defaults(func=cmd_set_add)
+
+    p_set_rm = set_sub.add_parser("remove", help="Remove members from the cluster")
+    p_set_rm.add_argument("node_ids", nargs="+", help="Member node ids to remove")
+    p_set_rm.add_argument("--server", default=DEFAULT_SERVER,
+                          help=f"This instance's base URL (default: {DEFAULT_SERVER})")
+    p_set_rm.set_defaults(func=cmd_set_remove)
+
+    p_set_show = set_sub.add_parser("show", help="Show this node's cluster + roster")
+    p_set_show.add_argument("--server", default=DEFAULT_SERVER,
+                            help=f"This instance's base URL (default: {DEFAULT_SERVER})")
+    p_set_show.set_defaults(func=cmd_set_show)
 
     return parser
 

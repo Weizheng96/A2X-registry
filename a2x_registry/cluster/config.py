@@ -34,6 +34,18 @@ class ClusterConfig:
     # Per-request HTTP timeout for peer calls (seconds).
     http_timeout: float = 5.0
 
+    # Max concurrent peer calls per fan-out (broadcast / keepalive). Bounds
+    # a full-mesh broadcast to ~one timeout window instead of N sequential
+    # ones, so a dead peer can't stall a local CRUD. ~1000 nodes is fine
+    # with a few dozen workers (the calls are I/O-bound).
+    broadcast_workers: int = 32
+
+    # Number of buckets for Merkle anti-entropy. Each reconcile first
+    # compares ``merkle_buckets`` bucket hashes (O(buckets), not O(records));
+    # only differing buckets transfer their rows. Must match cluster-wide
+    # (a mismatch degrades to a fuller transfer, still correct).
+    merkle_buckets: int = 256
+
     @property
     def tombstone_retention(self) -> float:
         """Local tombstones (and the post-eviction suppression cooldown) are

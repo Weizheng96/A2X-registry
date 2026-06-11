@@ -42,13 +42,15 @@ a2x_registry/                      # pip 包根
 │   ├── router.py                  #   /api/datasets/{ds}/services/{sid}/heartbeat
 │   └── system_ctx.py              #   合成 admin context 给 sweeper 走 deregister
 ├── cluster/                       # 分布式同步（opt-in，需 cluster init；不 import register/ 业务）
-│   ├── store.py                   #   ClusterStore：foreign overlay + 会话表 + 全连接复制/HOLD 驱逐
+│   ├── store.py                   #   ClusterStore：foreign overlay + 会话表 + 全连接复制/HOLD 驱逐 + 并发广播池
+│   ├── membership.py              #   声明式成员控制面：roster(LWW) + set add/remove + 退老群 + 自动全连接
+│   ├── merkle.py                  #   分桶 Merkle 反熵摘要（规模化）
 │   ├── envelope.py                #   SyncEnvelope + LWW 版本判新
-│   ├── state.py                   #   cluster_state.json：node_id / 版本 / 本地墓碑
+│   ├── state.py                   #   cluster_state.json：node_id / 版本 / 墓碑 / cluster_id / 名册
 │   ├── peer.py / auth_handshake.py #  会话模型 / 逐 namespace 握手鉴权（复用 auth）
-│   ├── sweepers.py                #   后台守护线程：反熵对账+GC / keepalive·HOLD
-│   ├── transport.py / router.py    #  httpx 节点间传输 / RESTful /api/cluster/*
-│   └── cli.py                     #   `a2x-registry cluster init/add-peer/rm-peer/status`
+│   ├── sweepers.py                #   后台守护线程：成员对账 + 反熵 + GC / keepalive·HOLD
+│   ├── transport.py / router.py    #  httpx 连接池传输 / RESTful /api/cluster/*
+│   └── cli.py                     #   `a2x-registry cluster init/set add|remove|show/status`
 ├── backend/                       # FastAPI 应用
 │   ├── app.py                     #   入口、CORS、503 异常 handler
 │   ├── startup.py                 #   warmup（按 has("vector") 分阶段；加载 AuthStore）
@@ -173,17 +175,18 @@ a2x_registry/                      # pip 包根
 
 ### 2.9 `cluster/` — 分布式同步（默认关闭）
 
-**opt-in**：注册中心默认单机；执行 `a2x-registry cluster init` 生成 `cluster_state.json` 后才启用。未启用时所有 `/api/cluster/*` 返回 404、读写与单机 byte-equal。启用后多实例组成**全连接**集群自动同步注册表（**AP / 最终一致**，直接广播 + LWW），查询任一节点即得全网节点的服务；节点失联后靠直链 HOLD 失活删除其数据。
+**opt-in**：注册中心默认单机；执行 `a2x-registry cluster init` 生成 `cluster_state.json` 后才启用。未启用时所有 `/api/cluster/*` 返回 404、读写与单机 byte-equal。启用后用户在任一节点 `cluster set add` 声明成员，系统据名册自动组成**全连接**集群同步注册表（**AP / 最终一致**，直接广播 + LWW），查询任一节点即得全网节点的服务；`set remove` 确定性移除，节点失联则靠直链 HOLD 失活删除其数据。
 
 | 接口 | 说明 |
 |---|---|
-| `cluster.store.ClusterStore` | 核心：foreign overlay（只读、仅内存）+ 会话表 + 全连接复制 / HOLD 驱逐 |
-| `cluster.router` — `/api/cluster/{peers,sessions,digest,pulls,updates,keepalives,state}` | 触发/会话/同步/存活的 RESTful 端点；未初始化 404 |
-| `cluster.cli` — `a2x-registry cluster {init,add-peer,rm-peer,status}` | 用户主用入口（薄 HTTP 客户端） |
+| `cluster.store.ClusterStore` | 核心：foreign overlay（只读、仅内存）+ 会话表 + 全连接复制 / HOLD 驱逐 + 并发广播池 |
+| `cluster.membership.MembershipStore` | 声明式成员控制面：roster(LWW 叠加层) + set add/remove + 退老群 + roster→会话对账 + 名册增量反熵 |
+| `cluster.router` — `/api/cluster/{set/*,join,evicted,leave,sessions,merkle,digest,pulls,updates,keepalives,peers,state}` | RESTful 端点（同步 `def`，阻塞 RPC 在线程池跑，避免互连死锁）；未初始化 404 |
+| `cluster.cli` — `a2x-registry cluster {init,set add\|remove\|show,status}` | 用户主用入口；`add-peer/rm-peer` 降为内部原语 |
 | `RegistryService.set_on_mutation(callback)` | 注入点 —— `register/` 不 import `cluster/`，本地 CRUD 经回调推送增量 |
-| 数据集 `GET /services`、`GET /services/{id}` | 读路径合并 foreign 副本（命名空间化 id `origin_id:sid` + `source=cluster`）；本地 entry / 持久化 / taxonomy hash 不受影响 |
+| 数据集 `GET /services`、`GET /services/{id}` | 读路径合并 foreign 副本（命名空间化 id `origin_id:sid` + `source=cluster`）；成员记录不入此路径 |
 
-写入 origin-only（外部副本只读）、版本 `(updated_at_ms, node_id)` LWW。**全连接、直接广播、不转发**：来源直发所有 peer，入站只按 LWW 落库，天然无环。失活统一走直链 keepalive/HOLD（默认 `hold_timeout` 30s）+ 驱逐后抑制冷却（防反熵复活）。启用鉴权时握手签发会话令牌认证逐次调用。完整设计 / 时序图 / 类图见 [cluster_design.md](cluster_design.md)，部署见 [README_forDistributed.md](../README_forDistributed.md)。
+写入 origin-only（外部副本只读）、版本 `(updated_at_ms, node_id)` LWW。**全连接、直接广播、不转发**：来源直发所有 peer，入站只按 LWW 落库，天然无环。成员控制面单独维护一条 origin-only+LWW 的 membership 记录（独立 roster 叠加层），用 `set add`(含 bootstrap 直推)/`set remove`(确定性墓碑)/退老群驱动全连接，跨来源墓碑用 `next_version_after` 保证 LWW 必胜。失活统一走直链 keepalive/HOLD（默认 30s）+ 驱逐后抑制冷却。规模化（~1000 节点）：并发广播池 + 连接池 + 分桶 Merkle 反熵 + 可调心跳周期。完整设计 / 时序图 / 类图见 [cluster_design.md](cluster_design.md)，部署见 [README_forDistributed.md](../README_forDistributed.md)。
 
 ## 3. 主要数据流
 

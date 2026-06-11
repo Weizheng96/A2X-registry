@@ -22,8 +22,10 @@ import logging
 import secrets
 import threading
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from concurrent.futures import ThreadPoolExecutor, wait
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from . import merkle
 from .auth_handshake import authorize_namespaces
 from .config import ClusterConfig
 from .envelope import SyncEnvelope, Version, version_newer
@@ -71,6 +73,18 @@ class ClusterStore:
         # from a peer that hasn't evicted it yet (ping-pong). The cooldown
         # blocks that; (re)establishing a session with the node clears it.
         self._evicted_until: Dict[str, float] = {}
+        # Bounded pool for concurrent best-effort fan-out (broadcast /
+        # keepalive / membership push). Concurrency caps a full-mesh fan-out
+        # at ~one timeout window so a dead peer can't serialize the others.
+        self._pool = ThreadPoolExecutor(
+            max_workers=max(4, self._config.broadcast_workers),
+            thread_name_prefix="ClusterFanout",
+        )
+        # Membership control plane (cluster-set feature). Attached after
+        # construction (backend startup / tests) so the data plane stays
+        # usable on its own. None → no declarative membership (manual
+        # add-peer still works).
+        self.membership = None
 
     @classmethod
     def load_or_none(
@@ -113,6 +127,35 @@ class ClusterStore:
     @property
     def config(self) -> ClusterConfig:
         return self._config
+
+    @property
+    def advertise(self) -> str:
+        """This node's peer-reachable base URL (empty until configured)."""
+        return self._advertise
+
+    @property
+    def transport(self) -> Transport:
+        return self._transport
+
+    def next_version(self) -> Tuple[int, str]:
+        """A fresh LWW version ``(updated_at_ms, node_id)`` drawn from the
+        shared monotonic clock. Used by the membership control plane so its
+        records stay monotonic with service records on this node."""
+        with self._lock:
+            return (self._next_ts(), self.node_id)
+
+    def next_version_after(self, floor_ms: int = 0) -> Tuple[int, str]:
+        """A fresh version guaranteed strictly newer than ``floor_ms`` under
+        LWW. The normal monotonic guard only protects against our own clock
+        step-back; when membership tombstones a record minted by *another*
+        node (set-remove / graceful-leave), that record's timestamp can
+        exceed ours and our node_id might lose the tiebreak. Bumping past it
+        makes the tombstone always win."""
+        with self._lock:
+            now_ms = time.time_ns() // 1_000_000
+            ts = max(now_ms, self._state.version_clock + 1, floor_ms + 1)
+            self._state.version_clock = ts
+            return (ts, self.node_id)
 
     # ── versioning (monotonic, survives clock step-back) ────────────────
 
@@ -319,17 +362,36 @@ class ClusterStore:
         return base
 
     def serve_digest(self, from_node: str, namespaces: Optional[List[str]],
-                     token: Optional[str] = None) -> list:
+                     token: Optional[str] = None,
+                     buckets: Optional[List[int]] = None) -> list:
         """Return ``[dataset, origin_id, service_id, version]`` rows for the
-        records visible to ``from_node`` (session-scoped, authenticated)."""
+        records visible to ``from_node`` (session-scoped, authenticated).
+        When ``buckets`` is given, only rows whose key falls in one of those
+        Merkle buckets are returned (anti-entropy fetches just the differing
+        buckets)."""
         self._touch_peer(from_node)
         allowed = self._allowed_for(from_node, namespaces, token)
         idx = self._full_index(sorted(allowed) if allowed else [])
+        bset = set(buckets) if buckets is not None else None
+        n = self._config.merkle_buckets
         return [
             [ds, origin, sid, list(ver)]
             for (ds, origin, sid), ver in idx.items()
             if ds in allowed
+            and (bset is None or merkle.bucket_of((ds, origin, sid), n) in bset)
         ]
+
+    def serve_merkle(self, from_node: str, namespaces: Optional[List[str]],
+                     token: Optional[str] = None) -> dict:
+        """Return ``{bucket_index: hash}`` for the records visible to
+        ``from_node``. O(buckets) — the anti-entropy fast path."""
+        self._touch_peer(from_node)
+        allowed = self._allowed_for(from_node, namespaces, token)
+        idx = {
+            k: v for k, v in self._full_index(sorted(allowed) if allowed else []).items()
+            if k[0] in allowed
+        }
+        return merkle.bucket_hashes(idx, self._config.merkle_buckets)
 
     def serve_pull(self, from_node: str, keys: List[list],
                    token: Optional[str] = None) -> list:
@@ -390,21 +452,45 @@ class ClusterStore:
 
     # ── outbound replication ────────────────────────────────────────────
 
+    def fan_out(self, thunks: List[Callable[[], None]]) -> None:
+        """Run best-effort peer calls concurrently and wait for them all.
+        Concurrency (bounded by the pool) means one unreachable peer's
+        timeout doesn't serialize the rest — a full-mesh fan-out costs ~one
+        timeout window, not N. Exceptions are swallowed (best-effort);
+        periodic anti-entropy heals anything dropped."""
+        if not thunks:
+            return
+        futures = [self._pool.submit(self._guarded, t) for t in thunks]
+        wait(futures)
+
+    @staticmethod
+    def _guarded(thunk: Callable[[], None]) -> None:
+        try:
+            thunk()
+        except TransportError:
+            pass
+        except Exception as exc:  # noqa: BLE001 — best-effort; don't propagate
+            logger.warning("cluster: fan-out task failed: %s", exc)
+
+    def close(self) -> None:
+        """Release the fan-out pool and any pooled transport connections.
+        Called on server shutdown; safe to call more than once."""
+        self._pool.shutdown(wait=False)
+        closer = getattr(self._transport, "close", None)
+        if callable(closer):
+            closer()
+
     def _broadcast(self, env: SyncEnvelope) -> None:
-        """Send ``env`` to every session that syncs its dataset. Best-effort:
-        a peer that's unreachable is skipped — periodic anti-entropy will
-        reconcile it. Full-mesh means this reaches the whole cluster directly,
+        """Send ``env`` concurrently to every session that syncs its dataset.
+        Best-effort; full-mesh means this reaches the whole cluster directly,
         with no onward relay."""
         payload = [env.model_dump(mode="json")]
         with self._lock:
-            peers = list(self._sessions.values())
-        for peer in peers:
-            if env.dataset not in peer.namespaces:
-                continue
-            try:
-                self._transport.updates(peer.address, self.node_id, payload, peer.token)
-            except TransportError:
-                pass
+            peers = [p for p in self._sessions.values() if env.dataset in p.namespaces]
+        self.fan_out([
+            (lambda p=p: self._transport.updates(p.address, self.node_id, payload, p.token))
+            for p in peers
+        ])
 
     # ── liveness: direct-link keepalive / HOLD ──────────────────────────
 
@@ -419,11 +505,10 @@ class ClusterStore:
     def emit_keepalive(self) -> None:
         with self._lock:
             peers = list(self._sessions.values())
-        for peer in peers:
-            try:
-                self._transport.keepalive(peer.address, self.node_id, peer.token)
-            except TransportError:
-                pass
+        self.fan_out([
+            (lambda p=p: self._transport.keepalive(p.address, self.node_id, p.token))
+            for p in peers
+        ])
 
     def check_hold(self, now: Optional[float] = None) -> List[str]:
         """Drop sessions whose direct link has been silent past ``hold_timeout``.
@@ -479,19 +564,36 @@ class ClusterStore:
         return peer
 
     def reconcile(self, peer: Peer) -> dict:
-        """Bidirectional full reconcile with ``peer``: pull what it has
-        newer/we lack, push what we have newer/it lacks. Best-effort —
-        transport errors propagate to the caller."""
+        """Bidirectional anti-entropy with ``peer``, Merkle fast-path first:
+        compare bucket hashes (O(buckets)); if identical we're already in
+        sync and stop. Otherwise fetch + diff only the differing buckets and
+        pull what's newer / push what we have newer. Best-effort — transport
+        errors propagate to the caller."""
         ns = sorted(peer.namespaces)
-        remote_rows = self._transport.digest(peer.address, self.node_id, ns, peer.token)
+        local_index = self._full_index(ns)
+        n = self._config.merkle_buckets
+
+        # Fast path: only the bucket hashes cross the wire when nothing changed.
+        local_buckets = merkle.bucket_hashes(local_index, n)
+        remote_buckets = self._transport.merkle(peer.address, self.node_id, ns, peer.token)
+        diff = merkle.differing_buckets(local_buckets, remote_buckets)
+        if not diff:
+            return {"pulled": 0, "pushed": 0}
+
+        # Only the differing buckets transfer their rows.
+        remote_rows = self._transport.digest(
+            peer.address, self.node_id, ns, peer.token, buckets=sorted(diff),
+        )
         remote_index: Dict[_Key, Version] = {
             (r[0], r[1], r[2]): tuple(r[3]) for r in remote_rows
         }
-        local_index = self._full_index(ns)
+        local_sub = {
+            k: v for k, v in local_index.items() if merkle.bucket_of(k, n) in diff
+        }
 
         to_pull = [
             [d, o, s] for (d, o, s), rv in remote_index.items()
-            if version_newer(rv, local_index.get((d, o, s)))
+            if version_newer(rv, local_sub.get((d, o, s)))
         ]
         pulled = 0
         if to_pull:
@@ -500,7 +602,7 @@ class ClusterStore:
                     pulled += 1
 
         push_envs = []
-        for key, lv in local_index.items():
+        for key, lv in local_sub.items():
             if version_newer(lv, remote_index.get(key)):
                 env = self._build_envelope_for_key(key)
                 if env is not None:

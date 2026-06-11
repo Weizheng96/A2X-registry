@@ -28,11 +28,15 @@ class AntiEntropySweeper:
         self._thread: threading.Thread | None = None
 
     def tick(self) -> None:
-        """One pass: reconcile each peer (best-effort), GC tombstones, and
-        prune expired post-eviction suppression entries."""
+        """One pass: reconcile membership (connect/disconnect to match the
+        roster), reconcile each peer's records + membership deltas
+        (best-effort), GC tombstones, and prune suppression entries."""
+        self._reconcile_membership()
         for peer in self._store.list_peers():
             try:
                 self._store.reconcile(peer)
+                if self._store.membership is not None:
+                    self._store.membership.reconcile_with(peer)
             except TransportError:
                 pass  # peer unreachable now; a later tick will catch up
             except Exception as exc:  # noqa: BLE001 — never kill the loop
@@ -40,6 +44,13 @@ class AntiEntropySweeper:
                                peer.node_id, exc)
         self._store.gc_tombstones()
         self._store.prune_suppression()
+
+    def _reconcile_membership(self) -> None:
+        """Drive the session set toward the declarative roster (membership
+        owns the policy)."""
+        m = getattr(self._store, "membership", None)
+        if m is not None:
+            m.reconcile_connections()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():

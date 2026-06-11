@@ -150,3 +150,68 @@ def test_two_process_http_sync(tmp_path):
                 proc.kill()
         for log in logs:
             log.close()
+
+
+def test_three_process_membership_set(tmp_path):
+    """`cluster set add` over real HTTP: A pulls B and C into one cluster
+    (auto full-mesh), a service on C reaches A, then `set remove` drops B
+    everywhere."""
+    ports = {n: _free_port() for n in ("A", "B", "C")}
+    bases = {n: f"http://127.0.0.1:{p}" for n, p in ports.items()}
+    procs, logs = [], []
+    client = httpx.Client(trust_env=False, timeout=10.0)
+    try:
+        for name in ("A", "B", "C"):
+            proc, log = _start_node(name, tmp_path / name, ports[name])
+            procs.append(proc)
+            logs.append(log)
+        for name in ("A", "B", "C"):
+            if not _wait_ready(client, bases[name]):
+                pytest.skip("servers did not become ready (no subprocess/network in sandbox?)")
+
+        # Same dataset on every node so the namespace is negotiated.
+        for name in ("A", "B", "C"):
+            assert client.post(f"{bases[name]}/api/datasets", json={"name": "svc"}).status_code == 200
+        assert client.post(f"{bases['C']}/api/datasets/svc/services/generic",
+                           json={"name": "c-svc", "description": "d"}).status_code == 200
+
+        # A declaratively forms the cluster with B and C.
+        r = client.post(f"{bases['A']}/api/cluster/set/add",
+                        json={"members": [{"address": bases["B"]}, {"address": bases["C"]}]})
+        assert r.status_code == 200, r.text
+        assert r.json()["cluster_id"].startswith("clu-")
+
+        # Roster converges to all three on A.
+        def a_roster():
+            ids = {m["node_id"] for m in client.get(f"{bases['A']}/api/cluster/set").json()["roster"]}
+            return ids == {"A", "B", "C"}
+        assert _eventually(a_roster), "A's roster did not converge to {A,B,C}"
+
+        # C's service reaches A (full mesh, direct broadcast).
+        def a_sees_c():
+            rows = client.get(f"{bases['A']}/api/datasets/svc/services").json()
+            return any(x.get("origin_id") == "C" and x["name"] == "c-svc" for x in rows)
+        assert _eventually(a_sees_c), "A did not receive C's service"
+
+        # Remove B → it disappears from A's roster and reverts to standalone.
+        assert client.post(f"{bases['A']}/api/cluster/set/remove",
+                           json={"members": [{"node_id": "B"}]}).status_code == 200
+
+        def b_gone_from_a():
+            ids = {m["node_id"] for m in client.get(f"{bases['A']}/api/cluster/set").json()["roster"]}
+            return "B" not in ids
+        assert _eventually(b_gone_from_a), "B not removed from A's roster"
+
+        def b_standalone():
+            return client.get(f"{bases['B']}/api/cluster/set").json()["cluster_id"] is None
+        assert _eventually(b_standalone), "B did not revert to standalone"
+    finally:
+        client.close()
+        for proc in procs:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        for log in logs:
+            log.close()

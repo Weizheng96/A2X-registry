@@ -87,8 +87,12 @@ class InProcessTransport(Transport):
     def open(self, address: str, body: dict) -> dict:
         return self._stores[address].handle_open(body)
 
-    def digest(self, address, from_node, namespaces, token=None):
-        return self._target(from_node, address).serve_digest(from_node, namespaces or None, token)
+    def merkle(self, address, from_node, namespaces, token=None):
+        return self._target(from_node, address).serve_merkle(from_node, namespaces or None, token)
+
+    def digest(self, address, from_node, namespaces, token=None, buckets=None):
+        return self._target(from_node, address).serve_digest(
+            from_node, namespaces or None, token, buckets=buckets)
 
     def pull(self, address, from_node, keys, token=None):
         return self._target(from_node, address).serve_pull(from_node, keys, token)
@@ -99,18 +103,52 @@ class InProcessTransport(Transport):
     def keepalive(self, address, from_node, token=None):
         return self._target(from_node, address).handle_keepalive(from_node, token)
 
+    # ── membership control plane ────────────────────────────────────────
+    # join/evict/evict_self are control ops (never partition-tested, like
+    # open); set_digest/pull/sync ride the partition-able link.
+    def join(self, address, body):
+        return self._stores[address].membership.handle_join(body)
+
+    def evict(self, address, body):
+        return self._stores[address].membership.handle_evicted(body)
+
+    def evict_self(self, address, body):
+        return self._stores[address].membership.handle_evict_self(body)
+
+    def set_digest(self, address, from_node, token=None):
+        return self._target(from_node, address).membership.serve_set_digest(from_node, token)
+
+    def set_pull(self, address, from_node, node_ids, token=None):
+        return self._target(from_node, address).membership.serve_set_pull(from_node, node_ids, token)
+
+    def set_sync(self, address, from_node, records, token=None):
+        return self._target(from_node, address).membership.serve_set_sync(from_node, records, token)
+
 
 def converge(stores, rounds: int = 4) -> None:
-    """Drive anti-entropy: each node reconciles each of its peers, several
-    rounds, so gossip propagates transitively to a fixed point."""
+    """Drive anti-entropy: each node reconciles each of its peers (records +
+    membership deltas), several rounds, to a fixed point."""
     from a2x_registry.cluster.transport import TransportError
     for _ in range(rounds):
         for s in stores:
             for p in s.list_peers():
                 try:
                     s.reconcile(p)
+                    if s.membership is not None:
+                        s.membership.reconcile_with(p)
                 except TransportError:
                     pass
+
+
+def settle(stores, rounds: int = 4) -> None:
+    """Drive the membership control loop to a fixed point: each node
+    reconciles its connections (roster→sessions) then exchanges record +
+    membership deltas. Mirrors what the AntiEntropySweeper does each tick."""
+    for _ in range(rounds):
+        for s in stores:
+            if s.membership is not None:
+                s.membership.reconcile_connections()
+        converge(stores, rounds=1)
 
 
 def visible(store, registry, dataset: str) -> set:
@@ -138,7 +176,9 @@ class FakeClock:
 
 
 def build_store(tmp_path, name, registry, transport, *, auth_store=None,
-                config: Optional[ClusterConfig] = None, clock=None) -> ClusterStore:
+                config: Optional[ClusterConfig] = None, clock=None,
+                membership: bool = True) -> ClusterStore:
+    from a2x_registry.cluster.membership import MembershipStore
     state = ClusterState.init(node_id=name, path=tmp_path / f"{name}.json")
     store = ClusterStore(
         state,
@@ -149,5 +189,7 @@ def build_store(tmp_path, name, registry, transport, *, auth_store=None,
         auth_store_getter=(lambda: auth_store),
         clock=clock,
     )
+    if membership:
+        store.membership = MembershipStore(store, state)
     transport.register(name, store)
     return store

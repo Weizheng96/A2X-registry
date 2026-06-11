@@ -102,6 +102,18 @@ async def _startup():
     loop.run_in_executor(ThreadPoolExecutor(1), run_warmup)
 
 
+@app.on_event("shutdown")
+async def _shutdown():
+    # Release the cluster fan-out pool + pooled HTTP connections, if loaded.
+    try:
+        from a2x_registry.cluster.deps import get_cluster_store
+        store = get_cluster_store()
+        if store is not None:
+            store.close()
+    except Exception:  # noqa: BLE001 — shutdown must not raise
+        pass
+
+
 # Optional static mount for the clone-source demo UI. When the source tree's
 # ``ui/launcher.py`` is used, it exports ``A2X_FRONTEND_DIST_DIR`` pointing at
 # ``ui/frontend/dist/`` before starting uvicorn. Pip users never set this and

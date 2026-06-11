@@ -6,16 +6,27 @@
 
 ## Unreleased
 
-### 概述
+### 概述（二）声明式成员控制面 + 全连接规模化（~1000 节点）
+在全连接瘦身之上，新增**声明式集群成员管理**：用户只用 `cluster set add/remove/show`，系统据成员名册（roster）自动维护全连接，不再手动逐条 `add-peer`。并落地全部规模化优化，目标 ~1000 节点。确定性、无随机。
+
+- **成员控制面 `cluster/membership.py`**：每节点一条 origin-only + LWW 的 `MembershipRecord`（独立 roster 叠加层，不碰服务同步/读路径/鉴权门控/掉会话驱逐）；`set add`（含 bootstrap 直推）/`set remove`（确定性墓碑）/退老 cluster（主动 `leave`，先发后断）/重启自动重连；成员名册增量反熵（版本图）+ 本地变更即时推。`cluster_id = clu-<uuid>`。
+- **接口**：新增 `POST /api/cluster/set/{add,remove}`、`GET /api/cluster/set`、`/join`、`/evicted`、`/leave`、`/set/{digest,pull,sync}` + CLI `cluster set add/remove/show`。`add-peer`/`rm-peer` 降级为内部建连原语。
+- **持久化**：`cluster_state.json` 加 `cluster_id`/`last_roster`/`my_membership_version`（向前兼容：旧文件按默认值加载为单机）。
+- **规模化**：并发非阻塞广播（`broadcast_workers` 线程池，死节点不拖垮 CRUD）+ `HttpTransport` 连接池/keep-alive + 服务面 **Merkle 反熵**（`merkle_buckets`，稳态无变更近零传输）+ 可调心跳周期。
+- **修复**：跨来源墓碑用 `next_version_after` 保证 LWW 必胜（同毫秒下 node_id tiebreak 曾让墓碑落败）；cluster 路由改同步 `def`（async 内做阻塞 RPC 会阻塞事件循环，互连时形成 A↔B 往返死锁）。
+- **测试**：`tests/cluster` 100 全绿（新增 `test_membership` 9 + `test_scale` 3 + 三进程成员集成）；全量非 query 套件 238 全绿。
+- **文档**：`docs/cluster_design.md` 加 §5 成员控制面 + §6 规模化。
+
+### 概述（一）full-mesh 瘦身
 `cluster/` 模块瘦身为**全连接（full-mesh）直接广播**模型：每个成员与其它每个成员直连，记录由来源直发所有 peer、入站不再转发。删除为支持链式/稀疏拓扑而存在的 BEACON 存活泛洪、relay 转发、按来源的租约驱逐三块死代码；失活统一到直链 **HOLD + 抑制冷却**一条路径。确定性、无随机。
 
-> **部署契约变化**：删 relay 后部署**必须全连接**（每对成员两两 `add-peer`）；旧的链式部署不再传播。`add-peer`/`rm-peer` 用户接口保留为建链原语。
+> **部署契约变化**：删 relay 后部署**必须全连接**；现由成员控制面（上）自动建好。旧的链式部署不再传播。
 
 ### 变化
 - 删除：`emit_beacon`/`handle_beacon`/`_broadcast_beacon`、`sweep_origins`/`_evict_origin`、`serve_updates` 的转发、`BeaconSweeper`、`POST /api/cluster/beacons` 与 `Transport.beacon`。
 - 失活：`disconnect_peer` 成为唯一驱逐路径（删会话 + 删该来源 foreign 记录 + 设抑制冷却）；会话(重)建解除抑制；`KeepaliveMonitor` 的 HOLD 超时触发它。
 - 配置：移除 `beacon_ttl`/`beacon_grace`/`beacon_interval`；`tombstone_retention` 改为 `hold_timeout + keepalive_interval`。
-- 测试：`tests/cluster` 改写为全连接 + HOLD（87 测试全绿，新增 HOLD 驱逐 / 不复活 / 全连接直达用例）。
+- 测试：`tests/cluster` 改写为全连接 + HOLD（新增 HOLD 驱逐 / 不复活 / 全连接直达用例）。
 - 文档：`docs/cluster_design.md` 全面改写为全连接 + HOLD。
 
 ---
